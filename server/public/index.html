@@ -9,8 +9,7 @@
   <body>
     <main class="container">
       <header class="card">
-        <h1>Deck Monitor</h1>
-        <p id="statusLine">接続中...</p>
+        <h1>Rekordbox DJ Link</h1>
         <p id="sourceLine" class="source-line">Source: -</p>
       </header>
 
@@ -32,8 +31,12 @@
       </section>
 
       <section class="deck-grid">
-        <article class="card deck-card">
+        <article id="deck1Card" class="card deck-card">
           <div class="label">DECK 1</div>
+          <div class="row">
+            <span class="label">State</span>
+            <span id="deck1PlayState" class="play-state">-</span>
+          </div>
           <div id="deck1Title" class="value large">-</div>
           <div id="deck1Artist" class="meta">-</div>
           <div class="row">
@@ -53,8 +56,12 @@
           </div>
         </article>
 
-        <article class="card deck-card">
+        <article id="deck2Card" class="card deck-card">
           <div class="label">DECK 2</div>
+          <div class="row">
+            <span class="label">State</span>
+            <span id="deck2PlayState" class="play-state">-</span>
+          </div>
           <div id="deck2Title" class="value large">-</div>
           <div id="deck2Artist" class="meta">-</div>
           <div class="row">

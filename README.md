@@ -55,6 +55,15 @@ npm start
 - 同一PC: `http://localhost:8787`
 - 別端末: `http://<Rekordbox-PC-IP>:8787`
 
+## まとめて起動（ワンクリック）
+
+リポジトリ直下の `start-all.bat` を実行すると、以下を自動で行います。
+
+1. `rb_hook.dll` が無ければビルド
+2. Web サーバー（`node server\index.js`）を起動（既に起動中ならスキップ）
+3. Rekordbox へフック注入
+4. `http://localhost:8787` を開く
+
 ## API
 
 - `GET /api/health`

@@ -29,6 +29,20 @@ function isLikelyHookEventName(name) {
   return /^@[A-Za-z0-9_.-]+$/.test(text);
 }
 
+function isPlayStateLikeEventName(name) {
+  if (typeof name !== "string") {
+    return false;
+  }
+  return /@(IsPlaying|PlayState|PlayerState|Play|Pause|Stop)$/i.test(name.trim());
+}
+
+function isExplicitPlaybackStateEventName(name) {
+  if (typeof name !== "string") {
+    return false;
+  }
+  return /@(IsPlaying|PlayState|PlayerState)$/i.test(name.trim());
+}
+
 function isLikelyTrackText(value) {
   if (typeof value !== "string") {
     return false;
@@ -80,6 +94,10 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       currentTime: null,
       totalTime: null,
       remainingTime: null,
+      lastPositionSec: null,
+      lastPositionAt: 0,
+      lastIsPlaying: null,
+      explicitIsPlaying: null,
       trackNo: null,
       title: null,
       artist: null,
@@ -201,6 +219,34 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
           ? Number((totalSec - remainingSec).toFixed(2))
           : null;
 
+    const now = Date.now();
+    let isPlaying =
+      typeof data.explicitIsPlaying === "boolean" ? data.explicitIsPlaying : data.lastIsPlaying;
+    if (Number.isFinite(positionSec)) {
+      const prevPos = Number(data.lastPositionSec);
+      const prevAt = Number(data.lastPositionAt || 0);
+      if (Number.isFinite(prevPos) && prevAt > 0) {
+        const elapsedSec = (now - prevAt) / 1000;
+        const deltaSec = positionSec - prevPos;
+        if (elapsedSec >= 0.4) {
+          if (deltaSec > 0.03) {
+            isPlaying = true;
+          } else if (Math.abs(deltaSec) <= 0.02) {
+            isPlaying = false;
+          } else if (deltaSec < -1.0) {
+            // Track jump/reload時は判定を維持
+            isPlaying = data.lastIsPlaying;
+          }
+          data.lastPositionSec = positionSec;
+          data.lastPositionAt = now;
+        }
+      } else {
+        data.lastPositionSec = positionSec;
+        data.lastPositionAt = now;
+      }
+      data.lastIsPlaying = isPlaying;
+    }
+
     return {
       deck: deckIndex + 1,
       bpm: bpmFromRaw(data.bpm),
@@ -208,7 +254,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       remainingSec: Number.isFinite(remainingSec) ? remainingSec : null,
       totalSec: Number.isFinite(totalSec) ? totalSec : null,
       isEstimated: false,
-      isPlaying: null,
+      isPlaying: typeof isPlaying === "boolean" ? isPlaying : null,
       updatedAt: new Date().toISOString(),
     };
   }
@@ -525,7 +571,8 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     }
     const isTrackIdLikeName =
       /TrackBrowserID/i.test(name) || /ContentID/i.test(name) || /Track.*ID/i.test(name);
-    if (!HOOK_OLVC_WHITELIST.has(name) && !isTrackIdLikeName) {
+    const isPlayStateName = isPlayStateLikeEventName(name);
+    if (!HOOK_OLVC_WHITELIST.has(name) && !isTrackIdLikeName && !isPlayStateName) {
       return;
     }
     const value = Number(packet.value);
@@ -564,6 +611,24 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
           data.trackBrowserId = value;
           markDeckSignal(deck, "track-id");
         }
+      } else if (isPlayStateName) {
+        if (isExplicitPlaybackStateEventName(name) && Number.isFinite(value)) {
+          if (/IsPlaying/i.test(name)) {
+            data.explicitIsPlaying = value > 0;
+          } else if (/PlayState|PlayerState/i.test(name)) {
+            // Common enum patterns:
+            // 0: stop, 1: play, 2: pause
+            if (value === 0 || value === 2) {
+              data.explicitIsPlaying = false;
+            } else if (value === 1) {
+              data.explicitIsPlaying = true;
+            } else if (value > 2) {
+              data.explicitIsPlaying = true;
+            }
+          }
+          data.lastIsPlaying = data.explicitIsPlaying;
+        }
+        markDeckSignal(deck, "playback");
       } else if (name === "@TrackNo") {
         data.trackNo = value;
       } else if (/CurrentTime/i.test(name)) {

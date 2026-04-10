@@ -10,6 +10,8 @@ const deck1TrackBpmEl = document.getElementById("deck1TrackBpm");
 const deck1PositionTextEl = document.getElementById("deck1PositionText");
 const deck1TotalTextEl = document.getElementById("deck1TotalText");
 const deck1ProgressBarEl = document.getElementById("deck1ProgressBar");
+const deck1PlayStateEl = document.getElementById("deck1PlayState");
+const deck1CardEl = document.getElementById("deck1Card");
 
 const deck2TitleEl = document.getElementById("deck2Title");
 const deck2ArtistEl = document.getElementById("deck2Artist");
@@ -18,6 +20,8 @@ const deck2TrackBpmEl = document.getElementById("deck2TrackBpm");
 const deck2PositionTextEl = document.getElementById("deck2PositionText");
 const deck2TotalTextEl = document.getElementById("deck2TotalText");
 const deck2ProgressBarEl = document.getElementById("deck2ProgressBar");
+const deck2PlayStateEl = document.getElementById("deck2PlayState");
+const deck2CardEl = document.getElementById("deck2Card");
 
 const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
@@ -185,6 +189,18 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   view.positionEl.textContent = formatDuration(pos);
   view.totalEl.textContent = formatDuration(total);
   view.progressEl.style.width = `${ratio}%`;
+
+  const explicitIsPlaying = playback?.isPlaying;
+  const isPlaying = typeof explicitIsPlaying === "boolean" ? explicitIsPlaying : null;
+  if (view.playStateEl) {
+    view.playStateEl.textContent = isPlaying === null ? "-" : isPlaying ? "PLAY" : "PAUSE";
+    view.playStateEl.classList.toggle("playing", isPlaying === true);
+    view.playStateEl.classList.toggle("paused", isPlaying === false);
+  }
+  if (view.cardEl) {
+    view.cardEl.classList.toggle("is-playing", isPlaying === true);
+    view.cardEl.classList.toggle("is-paused", isPlaying === false);
+  }
 }
 
 function pickRecentTrackByBpm(recentTracks, targetBpm, excludedIds = new Set()) {
@@ -268,6 +284,8 @@ function render(state) {
   const deck2RealtimeFallback = Number(realtimeBpm?.deck) === 2 ? Number(realtimeBpm?.value) : null;
 
   renderDeckCard(deck1Track, deck1Playback, {
+    cardEl: deck1CardEl,
+    playStateEl: deck1PlayStateEl,
     titleEl: deck1TitleEl,
     artistEl: deck1ArtistEl,
     realtimeBpmEl: deck1RealtimeBpmEl,
@@ -278,6 +296,8 @@ function render(state) {
   }, deck1RealtimeFallback, 1);
 
   renderDeckCard(deck2Track, deck2Playback, {
+    cardEl: deck2CardEl,
+    playStateEl: deck2PlayStateEl,
     titleEl: deck2TitleEl,
     artistEl: deck2ArtistEl,
     realtimeBpmEl: deck2RealtimeBpmEl,
@@ -293,7 +313,9 @@ function render(state) {
   const deckMethods = sourceInfo?.deckMethods || {};
   const rbStatus = rb.ok ? "Rekordbox: OK" : `Rekordbox: ${rb.message || "NG"}`;
   const hookStatus = hook.ok ? "Hook: OK" : `Hook: ${hook.message || "NG"}`;
-  statusLineEl.textContent = `${rbStatus} | ${hookStatus}`;
+  if (statusLineEl) {
+    statusLineEl.textContent = `${rbStatus} | ${hookStatus}`;
+  }
   if (sourceLineEl) {
     sourceLineEl.textContent = `Source: nowPlaying=${sourceInfo.nowPlayingMethod || "-"} | deck1=${deckMethods[1] || "-"} | deck2=${deckMethods[2] || "-"}`;
   }

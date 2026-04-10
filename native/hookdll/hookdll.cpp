@@ -390,6 +390,11 @@ bool is_whitelisted_olvc_name(const char* name) {
   if (!is_likely_event_name(name)) {
     return false;
   }
+  if (strstr(name, "PlayState") != nullptr || strstr(name, "IsPlaying") != nullptr ||
+      strcmp(name, "@Play") == 0 || strcmp(name, "@Pause") == 0 ||
+      strcmp(name, "@Stop") == 0) {
+    return true;
+  }
   return
       strcmp(name, "@BPM") == 0 ||
       strcmp(name, "@SyncSlaveBPM") == 0 ||
