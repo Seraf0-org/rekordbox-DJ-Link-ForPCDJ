@@ -1,0 +1,35 @@
+{
+  "name": "rb-output",
+  "version": "1.0.0",
+  "description": "Rekordbox now-playing and realtime BPM viewer for LAN devices",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "poc:rekordbox": "python python/poc_rekordbox_probe.py",
+    "poc:link": "node scripts/poc-ableton-link.js",
+    "build:hook": "powershell -ExecutionPolicy Bypass -File scripts/build-hook.ps1",
+    "inject:hook": "python scripts/inject_hook.py",
+    "hook:prepare": "npm run build:hook && npm run inject:hook",
+    "test": "node --test"
+  },
+  "keywords": [
+    "rekordbox",
+    "flx10",
+    "ableton-link",
+    "socket.io",
+    "now-playing"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
+  },
+  "optionalDependencies": {
+    "@ktamas77/abletonlink": "^1.2.3"
+  }
+}

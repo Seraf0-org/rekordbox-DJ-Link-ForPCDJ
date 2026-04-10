@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rekordbox Deck Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="card">
+        <h1>Deck Monitor</h1>
+        <p id="statusLine">接続中...</p>
+        <p id="sourceLine" class="source-line">Source: -</p>
+      </header>
+
+      <section class="card settings-panel">
+        <div class="settings-grid">
+          <label class="setting">
+            <span class="label">THEME</span>
+            <select id="themeSelect" aria-label="テーマ選択">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </label>
+          <label class="setting">
+            <span class="label">ACCENT</span>
+            <input id="accentColor" type="color" value="#47e1a8" aria-label="アクセントカラー" />
+          </label>
+          <button id="resetTheme" type="button">Default</button>
+        </div>
+      </section>
+
+      <section class="deck-grid">
+        <article class="card deck-card">
+          <div class="label">DECK 1</div>
+          <div id="deck1Title" class="value large">-</div>
+          <div id="deck1Artist" class="meta">-</div>
+          <div class="row">
+            <span class="label">Realtime BPM</span>
+            <span id="deck1RealtimeBpm" class="realtime-bpm-value">-</span>
+          </div>
+          <div class="row">
+            <span class="label">Track BPM</span>
+            <span id="deck1TrackBpm">-</span>
+          </div>
+          <div class="row">
+            <span class="label">Time</span>
+            <span><span id="deck1PositionText">-</span> / <span id="deck1TotalText">-</span></span>
+          </div>
+          <div class="progress">
+            <div id="deck1ProgressBar" class="progress-bar"></div>
+          </div>
+        </article>
+
+        <article class="card deck-card">
+          <div class="label">DECK 2</div>
+          <div id="deck2Title" class="value large">-</div>
+          <div id="deck2Artist" class="meta">-</div>
+          <div class="row">
+            <span class="label">Realtime BPM</span>
+            <span id="deck2RealtimeBpm" class="realtime-bpm-value">-</span>
+          </div>
+          <div class="row">
+            <span class="label">Track BPM</span>
+            <span id="deck2TrackBpm">-</span>
+          </div>
+          <div class="row">
+            <span class="label">Time</span>
+            <span><span id="deck2PositionText">-</span> / <span id="deck2TotalText">-</span></span>
+          </div>
+          <div class="progress">
+            <div id="deck2ProgressBar" class="progress-bar"></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="label">WARNINGS</div>
+        <ul id="warnings"></ul>
+      </section>
+
+      <section class="card">
+        <div class="label">DEBUG LOG</div>
+        <ul id="debugLogs"></ul>
+      </section>
+    </main>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
