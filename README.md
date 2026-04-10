@@ -24,6 +24,22 @@ npm install
 python -m pip install -r python\requirements.txt
 ```
 
+### `g++` がないエラーが出る場合（別PCでよく発生）
+
+`npm run build:hook` や `start-all.bat` 実行時に `g++` が無いと言われたら、C++コンパイラを導入してください。
+
+- 例1: **TDM-GCC** をインストール
+- 例2: **MSYS2 + mingw-w64** をインストール
+
+インストール後、新しいターミナルで確認:
+
+```powershell
+g++ --version
+```
+
+バージョンが表示されればOKです。  
+その後に再度 `start-all.bat` を実行してください。
+
 ## Hook DLL のビルド
 
 ```powershell
