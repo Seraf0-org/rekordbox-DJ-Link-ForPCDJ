@@ -13,9 +13,9 @@ const deck1RealtimeBpmEl = document.getElementById("deck1RealtimeBpm");
 const deck1TrackBpmEl = document.getElementById("deck1TrackBpm");
 const deck1PositionTextEl = document.getElementById("deck1PositionText");
 const deck1TotalTextEl = document.getElementById("deck1TotalText");
-const deck1ProgressBarEl = document.getElementById("deck1ProgressBar");
 const deck1PlayStateEl = document.getElementById("deck1PlayState");
 const deck1CardEl = document.getElementById("deck1Card");
+const deck1WaveformEl = document.getElementById("deck1Waveform");
 
 const deck2TitleEl = document.getElementById("deck2Title");
 const deck2ArtistEl = document.getElementById("deck2Artist");
@@ -27,9 +27,9 @@ const deck2RealtimeBpmEl = document.getElementById("deck2RealtimeBpm");
 const deck2TrackBpmEl = document.getElementById("deck2TrackBpm");
 const deck2PositionTextEl = document.getElementById("deck2PositionText");
 const deck2TotalTextEl = document.getElementById("deck2TotalText");
-const deck2ProgressBarEl = document.getElementById("deck2ProgressBar");
 const deck2PlayStateEl = document.getElementById("deck2PlayState");
 const deck2CardEl = document.getElementById("deck2Card");
+const deck2WaveformEl = document.getElementById("deck2Waveform");
 
 const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
@@ -231,6 +231,53 @@ function renderDebugLogs(items) {
   }
 }
 
+function drawWaveform(canvasEl, base64Data, ratio) {
+  if (!canvasEl) return;
+  const ctx = canvasEl.getContext('2d');
+  
+  canvasEl.width = canvasEl.clientWidth || 300;
+  canvasEl.height = canvasEl.clientHeight || 48;
+  
+  if (!base64Data) {
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    canvasEl.dataset.waveraw = "";
+    canvasEl._cachedHeights = null;
+    return;
+  }
+  
+  if (canvasEl.dataset.waveraw !== base64Data || !canvasEl._cachedHeights) {
+    canvasEl.dataset.waveraw = base64Data;
+    const bin = atob(base64Data);
+    const heights = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      heights[i] = bin.charCodeAt(i);
+    }
+    canvasEl._cachedHeights = heights;
+  }
+  
+  const heights = canvasEl._cachedHeights;
+  
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-color').trim() || '#47e1a8';
+  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
+  
+  const barWidth = canvasEl.width / heights.length;
+  const maxH = 31;
+  const splitIndex = Math.floor(heights.length * (ratio / 100));
+
+  for (let i = 0; i < heights.length; i++) {
+    const val = heights[i] & 0x1F;
+    const ch = (val / maxH) * canvasEl.height;
+    ctx.fillStyle = i <= splitIndex ? accent : muted;
+    ctx.fillRect(i * barWidth, canvasEl.height - ch, Math.max(1, barWidth - 0.5), ch);
+  }
+  
+  // Draw playhead line
+  const x = (ratio / 100) * canvasEl.width;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x - 1, 0, 2, canvasEl.height);
+}
+
 function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckNumber = 0) {
   const titleText =
     track?.title ||
@@ -275,7 +322,6 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   view.trackBpmEl.textContent = formatBpm(trackBpm);
   view.positionEl.textContent = formatDuration(pos);
   view.totalEl.textContent = formatDuration(total);
-  view.progressEl.style.width = `${ratio}%`;
 
   const explicitIsPlaying = playback?.isPlaying;
   const isPlaying = typeof explicitIsPlaying === "boolean" ? explicitIsPlaying : null;
@@ -287,6 +333,9 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   if (view.cardEl) {
     view.cardEl.classList.toggle("is-playing", isPlaying === true);
     view.cardEl.classList.toggle("is-paused", isPlaying === false);
+  }
+  if (view.waveformEl) {
+    drawWaveform(view.waveformEl, track?.waveform, ratio);
   }
 }
 
@@ -369,7 +418,7 @@ function render(state) {
     trackBpmEl: deck1TrackBpmEl,
     positionEl: deck1PositionTextEl,
     totalEl: deck1TotalTextEl,
-    progressEl: deck1ProgressBarEl,
+    waveformEl: deck1WaveformEl,
   }, deck1RealtimeFallback, 1);
 
   renderDeckCard(deck2Track, deck2Playback, {
@@ -385,7 +434,7 @@ function render(state) {
     trackBpmEl: deck2TrackBpmEl,
     positionEl: deck2PositionTextEl,
     totalEl: deck2TotalTextEl,
-    progressEl: deck2ProgressBarEl,
+    waveformEl: deck2WaveformEl,
   }, deck2RealtimeFallback, 2);
 
   const rb = status.rekordbox || {};

@@ -302,9 +302,15 @@ const deckCandidateCounts = new Map();
 const CANDIDATE_ACCEPT_COUNT = 2;
 const failedContentCandidates = new Map();
 
+const EXT_FIELDS = ["album", "genre", "key", "label", "origArtist", "remixer", "composer", "comment", "mixName", "lyricist", "waveform"];
+
 function normalizeResolvedMetadata(payload, contentId) {
   if (!payload || payload.ok === false) {
     return null;
+  }
+  const extended = {};
+  for (const f of EXT_FIELDS) {
+    if (payload[f] != null) extended[f] = payload[f] || null;
   }
   return {
     contentId: String(payload.contentId || contentId),
@@ -313,6 +319,7 @@ function normalizeResolvedMetadata(payload, contentId) {
     trackBpm: Number.isFinite(payload.trackBpm) ? payload.trackBpm : null,
     durationSec: Number.isFinite(payload.durationSec) ? payload.durationSec : null,
     trackNo: Number.isFinite(payload.trackNo) ? payload.trackNo : null,
+    ...extended,
     source: "rekordbox-hook-live",
   };
 }
@@ -567,6 +574,11 @@ function mergeDeckEntryMetadata(entry, metadata) {
   if (!metadata) {
     return entry;
   }
+  const extended = {};
+  for (const f of EXT_FIELDS) {
+    const val = entry[f] || metadata[f] || null;
+    if (val != null) extended[f] = val;
+  }
   return {
     ...entry,
     title: metadata.title || entry.title || null,
@@ -574,6 +586,7 @@ function mergeDeckEntryMetadata(entry, metadata) {
     durationSec: Number.isFinite(metadata.durationSec) ? metadata.durationSec : entry.durationSec ?? null,
     trackBpm: Number.isFinite(entry.trackBpm) ? entry.trackBpm : metadata.trackBpm ?? null,
     trackNo: Number.isFinite(entry.trackNo) ? entry.trackNo : metadata.trackNo ?? null,
+    ...extended,
     source: "rekordbox-hook-live",
   };
 }

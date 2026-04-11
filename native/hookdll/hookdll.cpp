@@ -995,7 +995,9 @@ void poll_player_track_ids() {
     }
     g_lastPlayerProbeTick[i] = nowTick;
 
-    const uint32_t directTrackId = read_player_track_browser_id(player);
+    // allowFallback=true: already-loaded tracks (pre-injection) require the
+    // wider memory scan. Cross-deck bleed is prevented at the app.js layer.
+    const uint32_t directTrackId = read_player_track_browser_id(player, true);
     if (!is_likely_track_id(directTrackId)) {
       if (g_trackIdMisses[i] < 0xFFFFFFFFu) {
         ++g_trackIdMisses[i];

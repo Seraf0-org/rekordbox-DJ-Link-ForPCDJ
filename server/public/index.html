@@ -81,8 +81,9 @@
 
       <section class="deck-grid">
         <article id="deck1Card" class="card deck-card">
-          <div class="label">DECK 1</div>
-          <div class="row">
+          <div class="deck-content">
+            <div class="label">DECK 1</div>
+            <div class="row">
             <span class="label">State</span>
             <span id="deck1PlayState" class="play-state">-</span>
           </div>
@@ -113,19 +114,21 @@
               <span class="label">Track BPM</span>
               <span id="deck1TrackBpm">-</span>
             </div>
-            <div class="row meta-time" data-field="time">
-              <span class="label">Time</span>
-              <span><span id="deck1PositionText">-</span> / <span id="deck1TotalText">-</span></span>
+            <div class="row meta-time" style="flex-direction: column; align-items: stretch; gap: 8px;" data-field="time">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="label">Time</span>
+                <span><span id="deck1PositionText">-</span> / <span id="deck1TotalText">-</span></span>
+              </div>
+              <canvas id="deck1Waveform" class="waveform-canvas"></canvas>
             </div>
           </div>
-          <div class="progress">
-            <div id="deck1ProgressBar" class="progress-bar"></div>
           </div>
         </article>
 
         <article id="deck2Card" class="card deck-card">
-          <div class="label">DECK 2</div>
-          <div class="row">
+          <div class="deck-content">
+            <div class="label">DECK 2</div>
+            <div class="row">
             <span class="label">State</span>
             <span id="deck2PlayState" class="play-state">-</span>
           </div>
@@ -156,13 +159,14 @@
               <span class="label">Track BPM</span>
               <span id="deck2TrackBpm">-</span>
             </div>
-            <div class="row meta-time" data-field="time">
-              <span class="label">Time</span>
-              <span><span id="deck2PositionText">-</span> / <span id="deck2TotalText">-</span></span>
+            <div class="row meta-time" style="flex-direction: column; align-items: stretch; gap: 8px;" data-field="time">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="label">Time</span>
+                <span><span id="deck2PositionText">-</span> / <span id="deck2TotalText">-</span></span>
+              </div>
+              <canvas id="deck2Waveform" class="waveform-canvas"></canvas>
             </div>
           </div>
-          <div class="progress">
-            <div id="deck2ProgressBar" class="progress-bar"></div>
           </div>
         </article>
       </section>
