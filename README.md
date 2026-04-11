@@ -1,6 +1,6 @@
-# rb-output (Rekordbox DJ Link)
+# Rekordbox DJ Link for PCDJ
 
-Rekordbox 7.2.13 と Pioneer DJコントローラー（FLX10等）環境における、**超低遅延なNow PlayingおよびBPMリアルタイム配信システム**です。
+Rekordbox 7.2.13 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**超低遅延なNow PlayingおよびBPMリアルタイム配信システム**です。
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入（インジェクト）し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 

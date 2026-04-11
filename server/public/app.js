@@ -236,19 +236,19 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
     track?.title ||
     (Number.isFinite(track?.trackNo) && track.trackNo > 0 ? `Track #${track.trackNo}` : "-");
   const artistText = track?.artist || "-";
-  const realtimeRaw = Number(playback?.bpm);
+  const realtimeRaw = playback?.bpm == null ? NaN : Number(playback.bpm);
   const realtimeBpm =
-    Number.isFinite(realtimeRaw) && realtimeRaw > 0 ? realtimeRaw : Number(fallbackRealtimeBpm);
-  const trackBpm = Number(track?.trackBpm);
-  const pos = Number(playback?.positionSec);
-  const totalRaw = Number(playback?.totalSec);
-  const durationFallback = Number(track?.durationSec);
+    Number.isFinite(realtimeRaw) && realtimeRaw > 0 ? realtimeRaw : (fallbackRealtimeBpm == null ? NaN : Number(fallbackRealtimeBpm));
+  const trackBpm = track?.trackBpm == null ? NaN : Number(track.trackBpm);
+  const pos = playback?.positionSec == null ? NaN : Number(playback.positionSec);
+  const totalRaw = playback?.totalSec == null ? NaN : Number(playback.totalSec);
+  const durationFallback = track?.durationSec == null ? NaN : Number(track.durationSec);
   const total =
     Number.isFinite(totalRaw) && totalRaw > 0
       ? totalRaw
       : Number.isFinite(durationFallback)
         ? durationFallback
-        : null;
+        : NaN;
   const ratio =
     Number.isFinite(pos) && Number.isFinite(total) && total > 0
       ? Math.min(100, Math.max(0, (pos / total) * 100))
@@ -353,20 +353,6 @@ function render(state) {
   );
   let deck1Track = deck1KnownTrack || deck1FallbackTrack || null;
   let deck2Track = deck2KnownTrack || deck2FallbackTrack || null;
-  const nowPlayingTrack =
-    state?.nowPlaying && (state.nowPlaying.title || state.nowPlaying.artist || state.nowPlaying.contentId)
-      ? state.nowPlaying
-      : null;
-  const activeDeck = Number(playback?.deck);
-  if (nowPlayingTrack) {
-    if (activeDeck === 1 && !deck1Track) {
-      deck1Track = nowPlayingTrack;
-    } else if (activeDeck === 2 && !deck2Track) {
-      deck2Track = nowPlayingTrack;
-    } else if (!deck1Track && !deck2Track) {
-      deck1Track = nowPlayingTrack;
-    }
-  }
   const deck1RealtimeFallback = Number(realtimeBpm?.deck) === 1 ? Number(realtimeBpm?.value) : null;
   const deck2RealtimeFallback = Number(realtimeBpm?.deck) === 2 ? Number(realtimeBpm?.value) : null;
 

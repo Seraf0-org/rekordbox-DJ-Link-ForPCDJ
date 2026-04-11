@@ -22,6 +22,8 @@ if errorlevel 1 (
   echo [rb-output] web server already running.
 )
 
+start "" "http://localhost:8787"
+
 echo [rb-output] injecting hook...
 python scripts\inject_hook.py
 if errorlevel 1 (
@@ -29,6 +31,5 @@ if errorlevel 1 (
   exit /b 1
 )
 
-start "" "http://localhost:8787"
 echo [rb-output] done.
 exit /b 0

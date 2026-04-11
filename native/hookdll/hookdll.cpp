@@ -479,7 +479,7 @@ void send_track_meta(int deck, const std::string& title, const std::string& arti
 // 前方宣言
 bool resolve_player_slots();
 bool is_likely_track_id(uint32_t value);
-uint32_t read_player_track_browser_id(uintptr_t playerPtr);
+uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback = false);
 
 // RowDataTrack ポインタから全メタデータを読んで送信する共通処理
 void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
@@ -908,7 +908,7 @@ uint32_t extract_track_id_from_olvc_value(uintptr_t rawValue) {
   return 0;
 }
 
-uint32_t read_player_track_browser_id(uintptr_t playerPtr) {
+uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback) {
   if (!playerPtr) {
     return 0;
   }
@@ -923,7 +923,10 @@ uint32_t read_player_track_browser_id(uintptr_t playerPtr) {
     }
   }
 
-  // フォールバック: UiPlayer 内の u32 を走査し、複数回現れる値を trackId 候補とする。
+  if (!allowFallback) {
+    return 0;
+  }
+
   std::unordered_map<uint32_t, int> counts;
   static const uintptr_t kScanStart = 0x100;
   static const uintptr_t kScanEnd = 0x900;
@@ -948,6 +951,7 @@ uint32_t read_player_track_browser_id(uintptr_t playerPtr) {
   if (bestCount >= 4) {
     return best;
   }
+
   return 0;
 }
 
@@ -1098,7 +1102,7 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
 
   uint32_t loadTrackId = read_loadinfo_track_browser_id(arg2);
   if (!is_likely_track_id(loadTrackId)) {
-    loadTrackId = read_player_track_browser_id(arg1);
+    loadTrackId = read_player_track_browser_id(arg1, true);
   }
   if (deckRaw > 0) {
     const auto candidates = probe_loadinfo_candidates(arg2);
