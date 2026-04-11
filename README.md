@@ -1,94 +1,89 @@
-# rb-output (Hook Mode)
+# rb-output (Rekordbox DJ Link)
 
-Rekordbox 7.2.13 + FLX10 向けの **フック型 now-playing/BPM 配信**です。  
-Rekordbox プロセスに `rb_hook.dll` を注入し、取得したイベントを UDP で Node サーバーに渡して Web 表示します。
+Rekordbox 7.2.13 と Pioneer DJコントローラー（FLX10等）環境における、**超低遅延なNow PlayingおよびBPMリアルタイム配信システム**です。
 
-## 現在の構成
+Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入（インジェクト）し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
-- **Hook (DLL注入)**: `@BPM`, `@CurrentTime`, `@TotalTime` をリアルタイム捕捉
-- **Web配信**: Express + Socket.IO (`/api/now-playing`, `/api/status`)
-- **表示**: iPad/PC/スマホ向けレスポンシブ UI（Now Playing + 2トラック表示 + ライト/ダーク + アクセントカラー変更）
-- **補助ソース**: Python bridge（履歴ベースの補完） + ContentID即時lookup（タイトル/アーティストを即時補完）
+## ✨ Core Features
 
-## 前提
+* **リアルタイムHookングエンジン**
+  * `LoadFile` 時の内部データを横取りし、曲がロードされた瞬間に情報を取得（最大1秒の遅延すらゼロに）。
+  * 常に変動するリアルタイムBPM、現在再生時間 (`@CurrentTime`)、総時間 (`@TotalTime`) などを一瞬のラグもなくブラウザへ同期します。
+* **リッチな楽曲メタデータ**
+  * 従来のTitleとArtistに加え、内部の `RowDataTrack` にアクセスし **アルバム、ジャンル、キー、レーベル、BPM、Track Number、コメント** など最大14項目のメタデータを即座に取得・配信します。
+* **高精度なマスターデッキ検知**
+  * Rekordbox内部の `notifyMasterChange` 関数フックを利用した、確実なマスターデッキの切り替え検知（フォールバック検知も内包）。
+* **柔軟かつリッチなUI (ブラウザ配信)**
+  * ダーク/ライトテーマ対応、任意のアクセントカラー設定。
+  * **Sortable.js** を利用した、表示項目の自由なドラッグ＆ドロップ並び替え機能。
+  * 必要な項目（Album, Genre, Key, Label, Time, Track BPM）の表示ON/OFF切り替え。
+  * スマホ、タブレット、PCのどのサイズにでも対応するレスポンシブデザイン。
 
-- Windows x64
-- Rekordbox 7.2.13
-- `g++` (TDM-GCC など) が PATH にあること
-- 注入方式のため Defender / 権限設定の影響を受ける可能性あり（自己責任）
+---
 
-## セットアップ
+## 🛠 Prerequisites (前提環境)
+
+* **OS**: Windows (x64)
+* **Software**: Rekordbox 7.2.13 (バージョンが異なると動作しない、またはシグネチャの更新が必要です)
+* **Build Tools**: Node.js, Python 3, および `g++` 実行環境 (TDM-GCC, MSYS2 など)
+
+※ *注意*: プロセス注入型のフックエンジンのため、アンチウイルスソフト（Windows Defender等）にて検知・ブロックされる場合や、管理者権限が必要になる場合があります。環境に応じた例外設定および自己責任でのご利用をお願いいたします。
+
+---
+
+## 🚀 Setup & Launch
+
+### 1. 初回セットアップ
+
+リポジトリをクローン後、NodeパッケージとPythonライブラリをインストールします。
 
 ```powershell
 npm install
 python -m pip install -r python\requirements.txt
 ```
 
-### `g++` がないエラーが出る場合（別PCでよく発生）
+#### g++ (C++コンパイラ) の導入
+DLLのビルドに `g++` が必須です。コマンドプロンプトで `g++ --version` と入力してエラーが出る場合、以下のいずれかから導入し、環境変数のPATHを通してください。
+- [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
+- [MSYS2](https://www.msys2.org/) (mingw-w64)
 
-`npm run build:hook` や `start-all.bat` 実行時に `g++` が無いと言われたら、C++コンパイラを導入してください。
+### 2. ワンクリック起動 (おすすめ)
 
-- 例1: **TDM-GCC** をインストール
-- 例2: **MSYS2 + mingw-w64** をインストール
-
-インストール後、新しいターミナルで確認:
+プロジェクトルートにあるバッチファイルを実行するだけで、「DLLのビルド確認」→「Webサーバー起動」→「Rekordboxへのインジェクト」→「ブラウザ起動」までを全て自動で処理します。
 
 ```powershell
-g++ --version
+start-all.bat
 ```
 
-バージョンが表示されればOKです。  
-その後に再度 `start-all.bat` を実行してください。
-
-## Hook DLL のビルド
+### 個別の手動実行コマンド
+もし各処理を単独で実行したい場合は以下のコマンドを使用します。
 
 ```powershell
+# 1. 注入用DLLのビルド
 npm run build:hook
-```
 
-- 初回は `native\third_party\minhook` を自動取得します。
-- 出力: `native\bin\rb_hook.dll`
+# 2. サーバーの起動 (localhost:8787)
+npm start
 
-## Rekordbox への注入
-
-```powershell
+# 3. 起動中のRekordboxへDLLの注入
 npm run inject:hook
 ```
+※独自のインストールパスでRekordboxを使用している場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` のように引数指定で注入可能です。
 
-必要なら起動パスを指定:
+---
 
-```powershell
-python scripts\inject_hook.py --launch-path "C:\Program Files\rekordbox\rekordbox 7.2.13\rekordbox.exe"
-```
+## 💻 API & Integration
 
-## サーバー起動
+Nodeサーバーからは以下のエンドポイントを通じ、他のシステム（OBS連携等）からでもステータスや現在の状態を取得可能です。
 
-```powershell
-npm start
-```
+- `GET /api/health` - サーバー死活監視
+- `GET /api/status` - RekordboxならびにHookエンジンの接続状況
+- `GET /api/now-playing` - 全デッキの状態（JSON）
 
-表示:
-- 同一PC: `http://localhost:8787`
-- 別端末: `http://<Rekordbox-PC-IP>:8787`
+---
 
-## まとめて起動（ワンクリック）
+## ⚠️ Known Issues & Troubleshooting
 
-リポジトリ直下の `start-all.bat` を実行すると、以下を自動で行います。
-
-1. `rb_hook.dll` が無ければビルド
-2. Web サーバー（`node server\index.js`）を起動（既に起動中ならスキップ）
-3. Rekordbox へフック注入
-4. `http://localhost:8787` を開く
-
-## API
-
-- `GET /api/health`
-- `GET /api/status`
-- `GET /api/now-playing`
-
-## 既知事項
-
-- フック側で未マッピングのイベント名は警告に表示されます。
-- `PYTHON_BRIDGE_ENABLED=true`（既定）で、タイトル/アーティスト補完に使います。
-- リアルタイムBPM/再生位置は Hook 優先です。
-- Rekordbox アップデート時はシグネチャ更新が必要です。
+- **シグネチャの不一致**: Rekordbox のアップデートが行われた場合、関数のメモリアドレスを検索・フックするための「シグネチャ」が無効になる可能性があります。その場合は `hookdll.cpp` のシグネチャ文字列の再調査および更新が必要です。
+- **補完機能**: `PYTHON_BRIDGE_ENABLED` により、メタデータがHook内で取りきれなかったケースでもデータベース解析等により情報の補完が行われます（既定で有効）。
+- **未マップイベント**: 新しいRekordbox環境において、DLLから未知のイベント名が到着した場合は、UIのDEBUG LOGセクションに `Unmapped hook event` として出力されます。

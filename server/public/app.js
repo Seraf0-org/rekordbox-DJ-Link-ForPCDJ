@@ -5,6 +5,10 @@ const debugLogsEl = document.getElementById("debugLogs");
 
 const deck1TitleEl = document.getElementById("deck1Title");
 const deck1ArtistEl = document.getElementById("deck1Artist");
+const deck1AlbumEl = document.getElementById("deck1Album");
+const deck1GenreEl = document.getElementById("deck1Genre");
+const deck1KeyEl = document.getElementById("deck1Key");
+const deck1LabelEl = document.getElementById("deck1Label");
 const deck1RealtimeBpmEl = document.getElementById("deck1RealtimeBpm");
 const deck1TrackBpmEl = document.getElementById("deck1TrackBpm");
 const deck1PositionTextEl = document.getElementById("deck1PositionText");
@@ -15,6 +19,10 @@ const deck1CardEl = document.getElementById("deck1Card");
 
 const deck2TitleEl = document.getElementById("deck2Title");
 const deck2ArtistEl = document.getElementById("deck2Artist");
+const deck2AlbumEl = document.getElementById("deck2Album");
+const deck2GenreEl = document.getElementById("deck2Genre");
+const deck2KeyEl = document.getElementById("deck2Key");
+const deck2LabelEl = document.getElementById("deck2Label");
 const deck2RealtimeBpmEl = document.getElementById("deck2RealtimeBpm");
 const deck2TrackBpmEl = document.getElementById("deck2TrackBpm");
 const deck2PositionTextEl = document.getElementById("deck2PositionText");
@@ -26,6 +34,13 @@ const deck2CardEl = document.getElementById("deck2Card");
 const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
 const resetThemeEl = document.getElementById("resetTheme");
+
+const toggleAlbumEl = document.getElementById("toggleAlbum");
+const toggleGenreEl = document.getElementById("toggleGenre");
+const toggleKeyEl = document.getElementById("toggleKey");
+const toggleLabelEl = document.getElementById("toggleLabel");
+const toggleTrackBpmEl = document.getElementById("toggleTrackBpm");
+const toggleTimeEl = document.getElementById("toggleTime");
 
 const THEME_STORAGE_KEY = "rb-output-theme";
 const ACCENT_STORAGE_KEY = "rb-output-accent";
@@ -63,6 +78,24 @@ function loadThemeSettings() {
   if (accentColorEl) {
     accentColorEl.value = savedAccent;
   }
+
+  // Load field toggles
+  const extFields = [
+    { el: toggleAlbumEl,   key: "rb-output-show-album",    cls: "hide-meta-album",    defaultVal: false },
+    { el: toggleGenreEl,   key: "rb-output-show-genre",    cls: "hide-meta-genre",    defaultVal: false },
+    { el: toggleKeyEl,     key: "rb-output-show-key",      cls: "hide-meta-key",      defaultVal: false },
+    { el: toggleLabelEl,   key: "rb-output-show-label",    cls: "hide-meta-label",    defaultVal: false },
+    { el: toggleTrackBpmEl,key: "rb-output-show-trackbpm", cls: "hide-meta-trackbpm", defaultVal: true },
+    { el: toggleTimeEl,    key: "rb-output-show-time",     cls: "hide-meta-time",     defaultVal: true },
+  ];
+  for (const { el, key, cls, defaultVal } of extFields) {
+    if (el) {
+      const saved = localStorage.getItem(key);
+      const isShowing = saved === null ? defaultVal : saved === "true";
+      el.checked = isShowing;
+      document.body.classList.toggle(cls, !isShowing);
+    }
+  }
 }
 
 function bindThemeSettings() {
@@ -94,7 +127,55 @@ function bindThemeSettings() {
       if (accentColorEl) {
         accentColorEl.value = DEFAULT_ACCENT;
       }
+      // Reset toggles
+      const extFields = [
+        { el: toggleAlbumEl,   key: "rb-output-show-album",    cls: "hide-meta-album",    defaultVal: false },
+        { el: toggleGenreEl,   key: "rb-output-show-genre",    cls: "hide-meta-genre",    defaultVal: false },
+        { el: toggleKeyEl,     key: "rb-output-show-key",      cls: "hide-meta-key",      defaultVal: false },
+        { el: toggleLabelEl,   key: "rb-output-show-label",    cls: "hide-meta-label",    defaultVal: false },
+        { el: toggleTrackBpmEl,key: "rb-output-show-trackbpm", cls: "hide-meta-trackbpm", defaultVal: true },
+        { el: toggleTimeEl,    key: "rb-output-show-time",     cls: "hide-meta-time",     defaultVal: true },
+      ];
+      for (const { el, key, cls, defaultVal } of extFields) {
+        if (el) {
+          el.checked = defaultVal;
+          localStorage.removeItem(key);
+          document.body.classList.toggle(cls, !defaultVal);
+        }
+      }
+      
+      // Reset Field Order
+      localStorage.removeItem(FIELD_ORDER_KEY);
+      applyFieldOrder(DEFAULT_FIELD_ORDER);
+      const listEl = document.getElementById("fieldSortableList");
+      if (listEl) {
+        DEFAULT_FIELD_ORDER.forEach((fieldName) => {
+          const el = listEl.querySelector(`[data-field="${fieldName}"]`);
+          if (el) {
+            listEl.appendChild(el);
+          }
+        });
+      }
     });
+  }
+
+  // Bind field toggles
+  const extFields = [
+    { el: toggleAlbumEl,   key: "rb-output-show-album",    cls: "hide-meta-album" },
+    { el: toggleGenreEl,   key: "rb-output-show-genre",    cls: "hide-meta-genre" },
+    { el: toggleKeyEl,     key: "rb-output-show-key",      cls: "hide-meta-key" },
+    { el: toggleLabelEl,   key: "rb-output-show-label",    cls: "hide-meta-label" },
+    { el: toggleTrackBpmEl,key: "rb-output-show-trackbpm", cls: "hide-meta-trackbpm" },
+    { el: toggleTimeEl,    key: "rb-output-show-time",     cls: "hide-meta-time" },
+  ];
+  for (const { el, key, cls } of extFields) {
+    if (el) {
+      el.addEventListener("change", (e) => {
+        const isShowing = e.target.checked;
+        localStorage.setItem(key, isShowing.toString());
+        document.body.classList.toggle(cls, !isShowing);
+      });
+    }
   }
 }
 
@@ -177,6 +258,12 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   view.titleEl.title = titleText;
   view.artistEl.textContent = artistText;
   view.artistEl.title = artistText;
+
+  if (view.albumEl) view.albumEl.textContent = track?.album || "-";
+  if (view.genreEl) view.genreEl.textContent = track?.genre || "-";
+  if (view.keyEl) view.keyEl.textContent = track?.key || "-";
+  if (view.labelEl) view.labelEl.textContent = track?.label || "-";
+
   const realtimeDisplayValue =
     Number.isFinite(realtimeBpm) && realtimeBpm > 0
       ? realtimeBpm
@@ -288,6 +375,10 @@ function render(state) {
     playStateEl: deck1PlayStateEl,
     titleEl: deck1TitleEl,
     artistEl: deck1ArtistEl,
+    albumEl: deck1AlbumEl,
+    genreEl: deck1GenreEl,
+    keyEl: deck1KeyEl,
+    labelEl: deck1LabelEl,
     realtimeBpmEl: deck1RealtimeBpmEl,
     trackBpmEl: deck1TrackBpmEl,
     positionEl: deck1PositionTextEl,
@@ -300,6 +391,10 @@ function render(state) {
     playStateEl: deck2PlayStateEl,
     titleEl: deck2TitleEl,
     artistEl: deck2ArtistEl,
+    albumEl: deck2AlbumEl,
+    genreEl: deck2GenreEl,
+    keyEl: deck2KeyEl,
+    labelEl: deck2LabelEl,
     realtimeBpmEl: deck2RealtimeBpmEl,
     trackBpmEl: deck2TrackBpmEl,
     positionEl: deck2PositionTextEl,
@@ -337,6 +432,58 @@ function connectSocket() {
 
 loadThemeSettings();
 bindThemeSettings();
+
+const FIELD_ORDER_KEY = "rb-output-field-order";
+const DEFAULT_FIELD_ORDER = ["title", "artist", "album", "genre", "key", "label", "realtimebpm", "trackbpm", "time"];
+
+function applyFieldOrder(orderArray) {
+  const decks = [document.getElementById("deck1Card"), document.getElementById("deck2Card")];
+  for (const deck of decks) {
+    if (!deck) continue;
+    const container = deck.querySelector(".deck-fields");
+    if (!container) continue;
+    orderArray.forEach((fieldName, index) => {
+      const el = container.querySelector(`[data-field="${fieldName}"]`);
+      if (el) {
+        el.style.order = index;
+      }
+    });
+  }
+}
+
+function initSortableFields() {
+  const listEl = document.getElementById("fieldSortableList");
+  if (!listEl || typeof Sortable === "undefined") return;
+
+  let savedOrder;
+  try {
+    savedOrder = JSON.parse(localStorage.getItem(FIELD_ORDER_KEY));
+  } catch (e) {}
+  if (!Array.isArray(savedOrder) || savedOrder.length === 0) {
+    savedOrder = DEFAULT_FIELD_ORDER;
+  }
+
+  // Reorder sortable list DOM nodes to match saved order
+  savedOrder.forEach((fieldName) => {
+    const el = listEl.querySelector(`[data-field="${fieldName}"]`);
+    if (el) {
+      listEl.appendChild(el);
+    }
+  });
+
+  applyFieldOrder(savedOrder);
+
+  Sortable.create(listEl, {
+    animation: 150,
+    onEnd: function () {
+      const newOrder = Array.from(listEl.querySelectorAll("[data-field]")).map(el => el.getAttribute("data-field"));
+      localStorage.setItem(FIELD_ORDER_KEY, JSON.stringify(newOrder));
+      applyFieldOrder(newOrder);
+    }
+  });
+}
+
+initSortableFields();
 
 fetchInitialState().finally(() => {
   connectSocket();

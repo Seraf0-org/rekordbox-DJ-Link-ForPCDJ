@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "rb-hook-7.2.13-alpha7";
+constexpr const char* kVersion = "rb-hook-7.2.13-alpha8";
 constexpr const char* kUdpHost = "127.0.0.1";
 constexpr uint16_t kUdpPort = 22346;
 
@@ -47,9 +47,15 @@ constexpr const char* kInitRowDataTrackSig =
 // db::RowDataTrack::~RowDataTrack(rowData)
 constexpr const char* kDestrRowDataTrackSig =
     "48 89 5C 24 08 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 48 8D 05 ?? ?? ?? ?? 48 89 41 38 48 81 C1 C0 04 00 00 E8 ?? ?? ?? ?? 48";
+// notifyMasterChange (7.x: RekordBoxSongExporter 準拠)
+constexpr const char* kNotifyMasterChangeSig708 =
+    "48 89 5C 24 18 48 89 74 24 20 55 57 41 54 41 56 41 57 48 8D 6C 24 B9";
+constexpr const char* kNotifyMasterChangeSigFallback =
+    "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 C8 FE FF FF";
 
 using OlvcFn = uintptr_t(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 using LoadFileFn = uintptr_t(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+using NotifyMasterChangeFn = uintptr_t(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 using GetInstanceFn = uintptr_t(*)();
 using GetRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t, uintptr_t, uint32_t, uint32_t);
 using InitRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t);
@@ -59,12 +65,14 @@ SOCKET g_socket = INVALID_SOCKET;
 sockaddr_in g_destination = {};
 OlvcFn g_originalOlvc = nullptr;
 LoadFileFn g_originalLoadFile = nullptr;
+NotifyMasterChangeFn g_originalNotifyMasterChange = nullptr;
 GetInstanceFn g_getInstance = nullptr;
 GetRowDataTrackFn g_getRowDataTrack = nullptr;
 InitRowDataTrackFn g_initRowDataTrack = nullptr;
 DestrRowDataTrackFn g_destrRowDataTrack = nullptr;
 bool g_olvcHookInstalled = false;
 bool g_loadFileHookInstalled = false;
+bool g_masterChangeHookInstalled = false;
 ULONGLONG g_lastProbeTick[8] = {};
 uintptr_t g_playerSlots[4] = {};
 bool g_playerSlotsTried = false;
@@ -406,14 +414,66 @@ bool is_whitelisted_olvc_name(const char* name) {
       strcmp(name, "@TrackNo") == 0;
 }
 
+// 拡張メタデータ構造体
+struct TrackMetaFields {
+  std::string title;
+  std::string artist;
+  std::string album;
+  std::string genre;
+  std::string label;
+  std::string key;
+  std::string origArtist;
+  std::string remixer;
+  std::string composer;
+  std::string comment;
+  std::string mixName;
+  std::string lyricist;
+  uint32_t trackBpm = 0;     // 15150 = 151.50 BPM
+  uint32_t trackNumber = 0;
+};
+
+void send_track_meta_extended(int deck, const TrackMetaFields& m) {
+  // JSON を動的に構築（空フィールドは省略）
+  std::string payload = "{\"type\":\"track_meta\",\"deck\":";
+  payload += std::to_string(deck);
+  auto appendStr = [&](const char* key, const std::string& val) {
+    if (val.empty()) return;
+    payload += ",\"";
+    payload += key;
+    payload += "\":\"";
+    payload += escape_json(val.c_str());
+    payload += "\"";
+  };
+  appendStr("title", m.title);
+  appendStr("artist", m.artist);
+  appendStr("album", m.album);
+  appendStr("genre", m.genre);
+  appendStr("label", m.label);
+  appendStr("key", m.key);
+  appendStr("origArtist", m.origArtist);
+  appendStr("remixer", m.remixer);
+  appendStr("composer", m.composer);
+  appendStr("comment", m.comment);
+  appendStr("mixName", m.mixName);
+  appendStr("lyricist", m.lyricist);
+  if (m.trackBpm > 0) {
+    payload += ",\"trackBpm\":";
+    payload += std::to_string(static_cast<unsigned long long>(m.trackBpm));
+  }
+  if (m.trackNumber > 0) {
+    payload += ",\"trackNumber\":";
+    payload += std::to_string(static_cast<unsigned long long>(m.trackNumber));
+  }
+  payload += "}";
+  send_packet(payload);
+}
+
+// 後方互換: 旧シグネチャの send_track_meta はそのまま維持
 void send_track_meta(int deck, const std::string& title, const std::string& artist) {
-  char buf[2048] = {};
-  _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-              "{\"type\":\"track_meta\",\"deck\":%d,\"title\":\"%s\",\"artist\":\"%s\"}",
-              deck,
-              escape_json(title.c_str()).c_str(),
-              escape_json(artist.c_str()).c_str());
-  send_packet(buf);
+  TrackMetaFields m;
+  m.title = title;
+  m.artist = artist;
+  send_track_meta_extended(deck, m);
 }
 
 // 前方宣言
@@ -421,9 +481,9 @@ bool resolve_player_slots();
 bool is_likely_track_id(uint32_t value);
 uint32_t read_player_track_browser_id(uintptr_t playerPtr);
 
-// RowDataTrack ポインタから title/artist を読んで送信する共通処理
+// RowDataTrack ポインタから全メタデータを読んで送信する共通処理
 void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
-  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0xD0)) return;
+  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0x450)) return;
 
   const int slot = (deckOneBased - 1) % 4;
   auto is_reserved_track_text = [](const std::string& s) -> bool {
@@ -453,37 +513,78 @@ void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
     return s;
   };
 
-  const std::string title = read_utf8_str(0x20);
-  std::string artist = read_utf8_str(0xC0);
-  if (title.empty()) return;
-  if (artist == title) {
-    artist.clear();
+  auto read_u32_val = [&](uintptr_t offset) -> uint32_t {
+    uint32_t val = 0;
+    if (!safe_read_u32(rowData + offset, val)) return 0;
+    return val;
+  };
+
+  // RekordBoxSongExporter 7.0.8+ 準拠オフセット
+  TrackMetaFields m;
+  m.title      = read_utf8_str(0x20);
+  m.artist     = read_utf8_str(0xC0);
+  m.album      = read_utf8_str(0xF8);
+  m.genre      = read_utf8_str(0x170);
+  m.label      = read_utf8_str(0x1A8);
+  m.key        = read_utf8_str(0x200);
+  m.origArtist = read_utf8_str(0x280);
+  m.remixer    = read_utf8_str(0x2F0);
+  m.composer   = read_utf8_str(0x328);
+  m.comment    = read_utf8_str(0x350);
+  m.mixName    = read_utf8_str(0x380);
+  m.lyricist   = read_utf8_str(0x448);
+  m.trackBpm   = read_u32_val(0x398);
+  m.trackNumber = read_u32_val(0x340);
+
+  if (m.title.empty()) return;
+  if (m.artist == m.title) {
+    m.artist.clear();
   }
 
-  const uint32_t th = simple_hash(title);
-  const uint32_t ah = simple_hash(artist);
+  const uint32_t th = simple_hash(m.title);
+  const uint32_t ah = simple_hash(m.artist);
   if (g_lastTitleHash[slot] == th && g_lastArtistHash[slot] == ah) return;
 
   g_lastTitleHash[slot] = th;
   g_lastArtistHash[slot] = ah;
-  send_track_meta(deckOneBased, title, artist);
+  send_track_meta_extended(deckOneBased, m);
 }
 
-void poll_track_strings() {
-  // db::DatabaseIF + db::RowDataTrack 経路のみを使用
-  if (!g_getInstance || !g_getRowDataTrack) {
-    return;
-  }
+// DB instance を取得するヘルパー（RB 7.x の間接参照に対応）
+uintptr_t resolve_db_instance() {
+  if (!g_getInstance) return 0;
   uintptr_t instance = g_getInstance();
-  if (!instance) {
-    return;
-  }
+  if (!instance) return 0;
   // RB 7.x では getInstance の返り値が this* へのポインタの場合がある
   uintptr_t instanceMaybeThis = 0;
   if (safe_read_ptr(instance, instanceMaybeThis) && instanceMaybeThis && !IsBadReadPtr(reinterpret_cast<const void*>(instanceMaybeThis), 8)) {
     instance = instanceMaybeThis;
   }
-  if (IsBadReadPtr(reinterpret_cast<const void*>(instance), 8)) {
+  if (IsBadReadPtr(reinterpret_cast<const void*>(instance), 8)) return 0;
+  return instance;
+}
+
+// trackId を指定して RowDataTrack を構築 → メタデータを送信
+void try_lookup_and_send_track_meta(int deckOneBased, uint32_t trackId) {
+  if (!g_getRowDataTrack || !is_likely_track_id(trackId)) return;
+  const uintptr_t instance = resolve_db_instance();
+  if (!instance) return;
+
+  alignas(16) uint8_t rowDataBuf[0x1024] = {};
+  const uintptr_t rowData = reinterpret_cast<uintptr_t>(rowDataBuf);
+  if (g_initRowDataTrack) {
+    g_initRowDataTrack(rowData);
+  }
+  g_getRowDataTrack(instance, trackId, rowData, 1, 0);
+  try_send_strings_from_row_data(deckOneBased, rowData);
+  if (g_destrRowDataTrack) {
+    g_destrRowDataTrack(rowData);
+  }
+}
+
+void poll_track_strings() {
+  // db::DatabaseIF + db::RowDataTrack 経路のみを使用
+  if (!g_getInstance || !g_getRowDataTrack) {
     return;
   }
 
@@ -495,17 +596,7 @@ void poll_track_strings() {
     if (!is_likely_track_id(trackId)) {
       continue;
     }
-
-    alignas(16) uint8_t rowDataBuf[0x1024] = {};
-    const uintptr_t rowData = reinterpret_cast<uintptr_t>(rowDataBuf);
-    if (g_initRowDataTrack) {
-      g_initRowDataTrack(rowData);
-    }
-    g_getRowDataTrack(instance, trackId, rowData, 1, 0);
-    try_send_strings_from_row_data(deck + 1, rowData);
-    if (g_destrRowDataTrack) {
-      g_destrRowDataTrack(rowData);
-    }
+    try_lookup_and_send_track_meta(deck + 1, trackId);
   }
 }
 
@@ -1024,6 +1115,10 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
         g_lastPlayerTrackId[slot] = loadTrackId;
         g_lastPlayerStableCandidate[slot] = loadTrackId;
         g_lastPlayerStableHits[slot] = 2;
+        // イベント駆動: 曲ロード時に即座に RowDataTrack でメタデータ取得
+        g_lastTitleHash[slot] = 0;
+        g_lastArtistHash[slot] = 0;
+        try_lookup_and_send_track_meta(deckRaw, loadTrackId);
       }
     }
   }
@@ -1033,6 +1128,35 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
     return result;
   }
   return 0;
+}
+
+uintptr_t __fastcall notify_master_change_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4) {
+  // arg2 はマスターデッキインデックス (0-based)
+  int deckRaw = static_cast<int>(arg2) + 1;
+  if (deckRaw < 1 || deckRaw > 4) {
+    deckRaw = static_cast<int>(arg2);
+  }
+  char buf[256] = {};
+  _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+              "{\"type\":\"master_change\",\"deck\":%d,\"arg1\":%llu,\"arg2\":%llu}",
+              deckRaw,
+              static_cast<unsigned long long>(arg1),
+              static_cast<unsigned long long>(arg2));
+  send_packet(buf);
+
+  if (g_originalNotifyMasterChange) {
+    return g_originalNotifyMasterChange(arg1, arg2, arg3, arg4);
+  }
+  return 0;
+}
+
+uintptr_t find_notify_master_change_target() {
+  HMODULE module = GetModuleHandleA(nullptr);
+  const auto sig708 = parse_signature(kNotifyMasterChangeSig708);
+  uintptr_t address = scan_module_text_section(module, sig708);
+  if (address) return address;
+  const auto sigFallback = parse_signature(kNotifyMasterChangeSigFallback);
+  return scan_module_text_section(module, sigFallback);
 }
 
 DWORD WINAPI worker_thread(LPVOID) {
@@ -1078,6 +1202,21 @@ DWORD WINAPI worker_thread(LPVOID) {
   } else {
     g_loadFileHookInstalled = true;
     send_packet("{\"type\":\"log\",\"message\":\"LoadFile hook installed\"}");
+  }
+
+  // notifyMasterChange フック (best-effort: 見つからなくても動作に影響しない)
+  const uintptr_t masterChangeTarget = find_notify_master_change_target();
+  if (!masterChangeTarget) {
+    send_packet("{\"type\":\"log\",\"message\":\"NotifyMasterChange signature not found (non-critical)\"}");
+  } else if (
+      MH_CreateHook(reinterpret_cast<LPVOID>(masterChangeTarget), reinterpret_cast<LPVOID>(&notify_master_change_detour),
+                    reinterpret_cast<LPVOID*>(&g_originalNotifyMasterChange)) != MH_OK) {
+    send_packet("{\"type\":\"log\",\"message\":\"NotifyMasterChange hook create failed\"}");
+  } else if (MH_EnableHook(reinterpret_cast<LPVOID>(masterChangeTarget)) != MH_OK) {
+    send_packet("{\"type\":\"log\",\"message\":\"NotifyMasterChange hook enable failed\"}");
+  } else {
+    g_masterChangeHookInstalled = true;
+    send_packet("{\"type\":\"log\",\"message\":\"NotifyMasterChange hook installed\"}");
   }
 
   const uintptr_t getInstanceAddr = find_get_instance();
@@ -1137,11 +1276,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
       CloseHandle(thread);
     }
   } else if (reason == DLL_PROCESS_DETACH) {
-    if (g_olvcHookInstalled || g_loadFileHookInstalled) {
+    if (g_olvcHookInstalled || g_loadFileHookInstalled || g_masterChangeHookInstalled) {
       MH_DisableHook(MH_ALL_HOOKS);
       MH_Uninitialize();
       g_olvcHookInstalled = false;
       g_loadFileHookInstalled = false;
+      g_masterChangeHookInstalled = false;
     }
     cleanup_udp();
   }

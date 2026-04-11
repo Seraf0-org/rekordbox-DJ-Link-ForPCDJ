@@ -1106,6 +1106,15 @@ hookUdpProvider.on("deck-resolution", (event) => {
   emitState();
 });
 
+hookUdpProvider.on("master-change", (event) => {
+  const deck = Number(event?.deck);
+  if (Number.isFinite(deck) && deck >= 1 && deck <= 4) {
+    pushDebugLog("hook-master-change", `Master deck changed to Deck ${deck}`);
+    setDeckMethod(deck, "hook-master-change", "notifyMasterChange");
+  }
+  emitState();
+});
+
 hookUdpProvider.on("unknown-event", (name) => {
   mergeWarning(`Unmapped hook event detected: ${name}`);
   emitState();

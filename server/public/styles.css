@@ -101,6 +101,38 @@ h1 {
   margin-top: 8px;
 }
 
+.ext-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+body.hide-meta-album .meta-album,
+body.hide-meta-genre .meta-genre,
+body.hide-meta-key .meta-key,
+body.hide-meta-label .meta-label,
+body.hide-meta-trackbpm .meta-trackbpm,
+body.hide-meta-time .meta-time {
+  display: none !important;
+}
+
+.dropdown-setting {
+  /* user-select is inline in HTML */
+}
+.dropdown-content {
+  margin-top: 0.5rem;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.dropdown-content .setting {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .realtime-bpm-value {
   color: var(--accent-color);
   font-size: clamp(20px, 2.2vw, 28px);
@@ -148,6 +180,19 @@ button {
 
 button:hover {
   border-color: var(--accent-color);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent-color);
+  cursor: pointer;
+}
+
+select:focus,
+input[type="color"]:focus,
+input[type="checkbox"]:focus,
+button:focus {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
 }
 
 .deck-grid {

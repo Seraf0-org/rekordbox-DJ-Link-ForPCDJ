@@ -101,6 +101,16 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       trackNo: null,
       title: null,
       artist: null,
+      album: null,
+      genre: null,
+      label: null,
+      key: null,
+      origArtist: null,
+      remixer: null,
+      composer: null,
+      comment: null,
+      mixName: null,
+      lyricist: null,
       lastSeenAt: null,
       metadata: {},
     };
@@ -305,6 +315,16 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
           contentId,
           title,
           artist,
+          album: deckData.album || null,
+          genre: deckData.genre || null,
+          label: deckData.label || null,
+          key: deckData.key || null,
+          origArtist: deckData.origArtist || null,
+          remixer: deckData.remixer || null,
+          composer: deckData.composer || null,
+          comment: deckData.comment || null,
+          mixName: deckData.mixName || null,
+          lyricist: deckData.lyricist || null,
           trackNo,
           trackBpm: Number.isFinite(trackBpm) ? trackBpm : null,
           updatedAt: new Date().toISOString(),
@@ -481,6 +501,21 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       return;
     }
 
+    if (packet.type === "master_change") {
+      const deckRaw = Number(packet.deck);
+      if (Number.isFinite(deckRaw) && deckRaw >= 1 && deckRaw <= 4) {
+        emitter.emit("master-change", {
+          deck: deckRaw,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      if (!connected) {
+        connected = true;
+        emitStatus(true, "Hook events detected");
+      }
+      return;
+    }
+
     if (packet.type === "track_meta") {
       emitter.emit("raw-track-meta", {
         deckHint: Number(packet.deck),
@@ -497,9 +532,33 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       const title = isLikelyTrackText(titleRaw) ? titleRaw : null;
       const artist = isLikelyTrackText(artistRaw) ? artistRaw : null;
       if (!title && !artist) return;
+
+      // 拡張メタデータフィールドの取得
+      const extFields = ["album", "genre", "label", "key", "origArtist", "remixer",
+                         "composer", "comment", "mixName", "lyricist"];
+      const extValues = {};
+      for (const f of extFields) {
+        const raw = typeof packet[f] === "string" ? packet[f].trim() : null;
+        if (raw && isLikelyTrackText(raw)) {
+          extValues[f] = raw;
+        }
+      }
+      // trackBpm / trackNumber (integers from RowDataTrack)
+      const hookTrackBpm = Number(packet.trackBpm);
+      const hookTrackNumber = Number(packet.trackNumber);
+
       updateDeckState(deck, (data) => {
         if (title) data.title = title;
         if (artist) data.artist = artist;
+        for (const [k, v] of Object.entries(extValues)) {
+          data[k] = v;
+        }
+        if (Number.isFinite(hookTrackBpm) && hookTrackBpm > 0) {
+          data.originalBpm = hookTrackBpm;
+        }
+        if (Number.isFinite(hookTrackNumber) && hookTrackNumber > 0 && hookTrackNumber < 1_000_000) {
+          data.trackNo = hookTrackNumber;
+        }
       });
       markDeckSignal(deck, "track-meta");
       emitter.emit("deck-resolution", {
