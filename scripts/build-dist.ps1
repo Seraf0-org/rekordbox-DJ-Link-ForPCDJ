@@ -22,12 +22,9 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 $pip = ".venv\Scripts\pip.exe"
 $pyinstaller = ".venv\Scripts\pyinstaller.exe"
 
-& $pip show pyinstaller 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "Installing PyInstaller..."
-  & $pip install pyinstaller
-  if ($LASTEXITCODE -ne 0) { throw "PyInstaller install failed" }
-}
+Write-Host "Installing PyInstaller..."
+& $pip install pyinstaller
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller install failed" }
 
 Write-Host "Building inject_hook.exe..."
 & $pyinstaller `
