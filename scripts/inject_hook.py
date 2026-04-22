@@ -224,6 +224,9 @@ def main() -> int:
 
     print(f"[info] injecting {dll_path} into PID {pid}", flush=True)
     module_handle = inject_dll(pid, dll_path)
+    if not module_handle:
+        print(f"[error] LoadLibraryW returned NULL - DLL load failed (antivirus or missing dependency?)", flush=True)
+        return 1
     print(f"[ok] remote module handle: 0x{module_handle:016X}", flush=True)
 
     # rekordbox can hand off from a launcher PID to the main UI PID.

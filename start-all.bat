@@ -52,7 +52,10 @@ echo [rb-output] injecting hook...
 .venv\Scripts\python scripts\inject_hook.py
 if errorlevel 1 (
   echo.
-  echo [ERROR] Hook injection failed. Is Rekordbox 7.2.13 running?
+  echo [ERROR] Hook injection failed.
+  echo   - Is Rekordbox 7.2.13 running?
+  echo   - Try running this script as Administrator
+  echo   - Antivirus may be blocking DLL injection
   echo.
   pause
   exit /b 1
