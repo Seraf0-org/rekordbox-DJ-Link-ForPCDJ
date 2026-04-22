@@ -5,9 +5,12 @@ cd /d "%~dp0"
 echo [rb-output] starting...
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [rb-output] Python venv not found. run setup first:
+  echo.
+  echo [ERROR] Python venv not found. Run the following first:
   echo   python -m venv .venv
   echo   .venv\Scripts\pip install -r python\requirements.txt
+  echo.
+  pause
   exit /b 1
 )
 
@@ -15,7 +18,10 @@ if not exist "native\bin\rb_hook.dll" (
   echo [rb-output] rb_hook.dll not found. building...
   call npm run build:hook
   if errorlevel 1 (
-    echo [rb-output] build failed.
+    echo.
+    echo [ERROR] DLL build failed. Is g++ installed and in PATH?
+    echo.
+    pause
     exit /b 1
   )
 )
@@ -34,9 +40,13 @@ start "" "http://localhost:8787"
 echo [rb-output] injecting hook...
 .venv\Scripts\python scripts\inject_hook.py
 if errorlevel 1 (
-  echo [rb-output] hook injection failed. ensure Rekordbox is running.
+  echo.
+  echo [ERROR] Hook injection failed. Is Rekordbox 7.2.13 running?
+  echo.
+  pause
   exit /b 1
 )
 
+echo.
 echo [rb-output] done.
-exit /b 0
+pause
