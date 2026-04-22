@@ -542,7 +542,7 @@ function resolveDeckMetadataBySignature(deck) {
   const [_sigCmd, _sigArgs] = buildSpawnCmd("content_lookup.exe", CONTENT_LOOKUP_SCRIPT, _sigFlags);
   const lookup = new Promise((resolve) => {
     const child = spawn(_sigCmd, _sigArgs, {
-      cwd: path.resolve(__dirname, ".."),
+      cwd: isPackaged ? _exeDir : path.resolve(__dirname, ".."),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

@@ -450,7 +450,16 @@ function render(state) {
     sourceLineEl.textContent = `Source: nowPlaying=${sourceInfo.nowPlayingMethod || "-"} | deck1=${deckMethods[1] || "-"} | deck2=${deckMethods[2] || "-"}`;
   }
 
-  renderWarnings(state?.warnings || []);
+  const warnings = [...(state?.warnings || [])];
+  const noTrackData =
+    hook.ok &&
+    deckPlaybacks.length > 0 &&
+    (!state?.deckNowPlaying?.length ||
+      state.deckNowPlaying.every((e) => !e?.title && !e?.artist));
+  if (noTrackData) {
+    warnings.unshift("Rekordboxで曲をデッキに読み込むと曲名が表示されます (Hook connected, waiting for track load)");
+  }
+  renderWarnings(warnings);
   renderDebugLogs(state?.debugLogs || []);
 }
 
