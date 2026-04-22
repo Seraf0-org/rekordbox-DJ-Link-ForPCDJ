@@ -49,7 +49,7 @@ Write-Host "Building content_lookup.exe..."
 if ($LASTEXITCODE -ne 0) { throw "content_lookup build failed" }
 
 Write-Host "Building server.exe..."
-& npx --yes @yao-pkg/pkg . --targets node18-win-x64 --output dist\server.exe
+& npx --yes @yao-pkg/pkg server/index.js --targets node18-win-x64 --output dist\server.exe
 if ($LASTEXITCODE -ne 0) { throw "server.exe build failed" }
 
 Write-Host "Copying assets..."
