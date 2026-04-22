@@ -71,6 +71,9 @@ if (Test-Path $iscc) {
   if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed" }
   Write-Host "Done: dist\rb-output-setup.exe"
 } else {
-  Write-Host "Inno Setup not found — skipping installer."
-  Write-Host "Install from https://jrsoftware.org/isdl.php and re-run, or use the files in dist\ directly."
+  Write-Host "Inno Setup not found — creating zip instead..."
+  $zipPath = "dist\rb-output-$((Get-Date -Format 'yyyyMMdd')).zip"
+  Compress-Archive -Path dist\server.exe, dist\inject_hook.exe, dist\content_lookup.exe, dist\native, dist\public, dist\start-rb.bat -DestinationPath $zipPath
+  Write-Host "Done: $zipPath"
+  Write-Host "(For a proper installer, install Inno Setup 6: https://jrsoftware.org/isdl.php)"
 }
