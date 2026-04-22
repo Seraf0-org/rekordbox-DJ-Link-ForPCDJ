@@ -51,5 +51,5 @@ jobs:
       - name: Upload installer to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/rb-output-setup.exe
+          files: dist/DJLinkForPCDJ-setup.exe
           fail_on_unmatched_files: true

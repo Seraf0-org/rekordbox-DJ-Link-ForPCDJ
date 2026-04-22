@@ -1,10 +1,10 @@
 [Setup]
-AppName=rb-output
+AppName=DJLinkForPCDJ
 AppVersion=1.0.0
-AppPublisher=rb-output
-DefaultDirName={autopf}\rb-output
-DefaultGroupName=rb-output
-OutputBaseFilename=rb-output-setup
+AppPublisher=DJLinkForPCDJ
+DefaultDirName={autopf}\DJLinkForPCDJ
+DefaultGroupName=DJLinkForPCDJ
+OutputBaseFilename=DJLinkForPCDJ-setup
 OutputDir=dist
 Compression=lzma2
 SolidCompression=yes
@@ -23,8 +23,8 @@ Source: "start-rb.bat";             DestDir: "{app}"; Flags: ignoreversion
 Name: "desktopicon"; Description: "デスクトップにショートカットを作成"; GroupDescription: "追加タスク:"; Flags: unchecked
 
 [Icons]
-Name: "{group}\rb-output";       Filename: "{app}\start-rb.bat"; WorkingDir: "{app}"
-Name: "{commondesktop}\rb-output"; Filename: "{app}\start-rb.bat"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\DJLinkForPCDJ";       Filename: "{app}\start-rb.bat"; WorkingDir: "{app}"
+Name: "{commondesktop}\DJLinkForPCDJ"; Filename: "{app}\start-rb.bat"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\start-rb.bat"; Description: "rb-output を起動する"; Flags: postinstall nowait shellexec
+Filename: "{app}\start-rb.bat"; Description: "DJLinkForPCDJ を起動する"; Flags: postinstall nowait shellexec
