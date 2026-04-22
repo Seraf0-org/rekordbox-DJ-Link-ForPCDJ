@@ -5,11 +5,12 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "poc:rekordbox": "python python/poc_rekordbox_probe.py",
+    "poc:rekordbox": ".venv\\Scripts\\python python/poc_rekordbox_probe.py",
     "poc:link": "node scripts/poc-ableton-link.js",
     "build:hook": "powershell -ExecutionPolicy Bypass -File scripts/build-hook.ps1",
-    "inject:hook": "python scripts/inject_hook.py",
+    "inject:hook": ".venv\\Scripts\\python scripts/inject_hook.py",
     "hook:prepare": "npm run build:hook && npm run inject:hook",
+    "build:dist": "powershell -ExecutionPolicy Bypass -File scripts/build-dist.ps1",
     "test": "node --test"
   },
   "keywords": [
@@ -24,6 +25,11 @@
   "type": "commonjs",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "pkg": {
+    "scripts": ["server/**/*.js"],
+    "targets": ["node18-win-x64"],
+    "outputPath": "dist"
   },
   "dependencies": {
     "express": "^5.2.1",

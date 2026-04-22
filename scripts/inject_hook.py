@@ -170,7 +170,10 @@ def inject_dll(pid: int, dll_path: Path) -> int:
 
 
 def main() -> int:
-    default_dll = (Path(__file__).resolve().parent.parent / "native" / "bin" / "rb_hook.dll").resolve()
+    if getattr(sys, "frozen", False):
+        default_dll = (Path(sys.executable).parent / "native" / "bin" / "rb_hook.dll").resolve()
+    else:
+        default_dll = (Path(__file__).resolve().parent.parent / "native" / "bin" / "rb_hook.dll").resolve()
     parser = argparse.ArgumentParser(description="Inject rb_hook.dll into rekordbox.exe")
     parser.add_argument(
         "--dll-path",

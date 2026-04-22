@@ -2,6 +2,8 @@ const http = require("node:http");
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
+const isPackaged = typeof process.pkg !== "undefined";
+const _exeDir = isPackaged ? path.dirname(process.execPath) : null;
 const express = require("express");
 const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
@@ -25,6 +27,12 @@ const HOOK_INJECT_SCRIPT =
 const DEFAULT_REKORDBOX_EXE = "C:\\Program Files\\rekordbox\\rekordbox 7.2.13\\rekordbox.exe";
 const REKORDBOX_EXE_PATH =
   process.env.REKORDBOX_EXE_PATH || (fs.existsSync(DEFAULT_REKORDBOX_EXE) ? DEFAULT_REKORDBOX_EXE : "");
+
+function buildSpawnCmd(exeName, scriptPath, extraArgs) {
+  if (isPackaged) return [path.join(_exeDir, exeName), extraArgs];
+  return [PYTHON_BIN, [scriptPath, ...extraArgs]];
+}
+
 const ABLETON_LINK_ENABLED = process.env.ABLETON_LINK_ENABLED === "true";
 const ABLETON_LINK_MODULE = process.env.ABLETON_LINK_MODULE || "@ktamas77/abletonlink";
 const ABLETON_LINK_INITIAL_TEMPO = Number(process.env.ABLETON_LINK_INITIAL_TEMPO || 120);
@@ -97,12 +105,13 @@ function tryRecoverHook() {
   }
   hookRuntime.recovering = true;
   hookRuntime.lastRecoveryAt = now;
-  const args = [HOOK_INJECT_SCRIPT, "--process-name", "rekordbox.exe", "--wait-seconds", "4", "--handoff-seconds", "20"];
+  const args = ["--process-name", "rekordbox.exe", "--wait-seconds", "4", "--handoff-seconds", "20"];
   if (REKORDBOX_EXE_PATH) {
     args.push("--launch-path", REKORDBOX_EXE_PATH);
   }
-  const child = spawn(PYTHON_BIN, args, {
-    cwd: path.resolve(__dirname, ".."),
+  const [_injCmd, _injArgs] = buildSpawnCmd("inject_hook.exe", HOOK_INJECT_SCRIPT, args);
+  const child = spawn(_injCmd, _injArgs, {
+    cwd: isPackaged ? _exeDir : path.resolve(__dirname, ".."),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
@@ -431,11 +440,12 @@ function resolveContentMetadata(contentId) {
     return contentLookupInFlight.get(key);
   }
 
-  const args = buildContentLookupArgs(["--content-id", key]);
+  const _cidFlags = buildContentLookupArgs(["--content-id", key]);
+  const [_cidCmd, _cidArgs] = buildSpawnCmd("content_lookup.exe", CONTENT_LOOKUP_SCRIPT, _cidFlags);
 
   const lookup = new Promise((resolve) => {
-    const child = spawn(PYTHON_BIN, args, {
-      cwd: path.resolve(__dirname, ".."),
+    const child = spawn(_cidCmd, _cidArgs, {
+      cwd: isPackaged ? _exeDir : path.resolve(__dirname, ".."),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -495,7 +505,7 @@ function resolveContentMetadata(contentId) {
 }
 
 function buildContentLookupArgs(extraArgs = []) {
-  const args = [CONTENT_LOOKUP_SCRIPT, ...extraArgs];
+  const args = [...extraArgs];
   if (process.env.REKORDBOX_DB_PATH) {
     args.push("--db-path", process.env.REKORDBOX_DB_PATH);
   }
@@ -528,9 +538,10 @@ function resolveDeckMetadataBySignature(deck) {
     return contentLookupInFlight.get(sigKey);
   }
 
-  const args = buildContentLookupArgs(["--track-bpm", String(bpm), "--duration-sec", String(totalSec)]);
+  const _sigFlags = buildContentLookupArgs(["--track-bpm", String(bpm), "--duration-sec", String(totalSec)]);
+  const [_sigCmd, _sigArgs] = buildSpawnCmd("content_lookup.exe", CONTENT_LOOKUP_SCRIPT, _sigFlags);
   const lookup = new Promise((resolve) => {
-    const child = spawn(PYTHON_BIN, args, {
+    const child = spawn(_sigCmd, _sigArgs, {
       cwd: path.resolve(__dirname, ".."),
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1173,7 +1184,7 @@ setInterval(() => {
 }, 1000);
 
 app.use(express.json());
-app.use(express.static(path.resolve(__dirname, "public")));
+app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
