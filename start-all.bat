@@ -5,13 +5,24 @@ cd /d "%~dp0"
 echo [rb-output] starting...
 
 if not exist ".venv\Scripts\python.exe" (
-  echo.
-  echo [ERROR] Python venv not found. Run the following first:
-  echo   python -m venv .venv
-  echo   .venv\Scripts\pip install -r python\requirements.txt
-  echo.
-  pause
-  exit /b 1
+  echo [rb-output] venv not found. creating...
+  python -m venv .venv
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] Failed to create venv. Is Python 3.11+ installed?
+    echo.
+    pause
+    exit /b 1
+  )
+  echo [rb-output] installing dependencies...
+  .venv\Scripts\pip install -r python\requirements.txt
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] pip install failed.
+    echo.
+    pause
+    exit /b 1
+  )
 )
 
 if not exist "native\bin\rb_hook.dll" (
