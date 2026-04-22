@@ -40,6 +40,8 @@ $cmd = @(
   "-O2",
   "-shared",
   "-s",
+  "-static-libgcc",
+  "-static-libstdc++",
   "-DWIN32_LEAN_AND_MEAN",
   "-I$mhInclude",
   "-I$mhSrc"
