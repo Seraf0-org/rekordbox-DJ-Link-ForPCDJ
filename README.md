@@ -76,13 +76,14 @@ npm run inject:hook
 
 ## 配布用インストーラーのビルド
 
-[Inno Setup 6](https://jrsoftware.org/isdl.php) をインストール後、以下を実行すると `dist\rb-output-setup.exe` が生成されます。
+GitHub にバージョンタグを push すると CI が自動でインストーラーをビルドし、Releases に添付します。
 
 ```powershell
-npm run build:dist
+git tag v1.x.x
+git push origin v1.x.x
 ```
 
-インストーラーは Node.js・Python・g++ を一切必要とせず、ダブルクリックだけでセットアップが完了します。
+ローカルでビルドしたい場合は `npm run build:dist` を実行します。Inno Setup がなければ ZIP で出力されます。
 
 ---
 
