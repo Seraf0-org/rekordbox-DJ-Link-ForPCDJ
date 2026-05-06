@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rekordbox Deck Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="card">
+        <h1>Rekordbox DJ Link</h1>
+      </header>
+
+      <section class="card settings-panel">
+        <div class="settings-grid">
+          <label class="setting">
+            <span class="label">THEME</span>
+            <select id="themeSelect" aria-label="テーマ選択">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </label>
+          <label class="setting">
+            <span class="label">ACCENT</span>
+            <input id="accentColor" type="color" value="#47e1a8" aria-label="アクセントカラー" />
+          </label>
+          <button id="resetTheme" type="button">Default</button>
+        </div>
+        <details class="dropdown-setting" style="margin-top: 1rem;">
+          <summary class="label" style="cursor: pointer; user-select: none;">&#9662; DISPLAY FIELDS</summary>
+          <div class="dropdown-content" id="fieldSortableList">
+            <label class="setting sortable-item" data-field="title" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" checked disabled />
+              <span class="label" style="margin-bottom: 0;">Title</span>
+            </label>
+            <label class="setting sortable-item" data-field="artist" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" checked disabled />
+              <span class="label" style="margin-bottom: 0;">Artist</span>
+            </label>
+            <label class="setting sortable-item" data-field="album" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleAlbum" />
+              <span class="label" style="margin-bottom: 0;">Album</span>
+            </label>
+            <label class="setting sortable-item" data-field="genre" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleGenre" />
+              <span class="label" style="margin-bottom: 0;">Genre</span>
+            </label>
+            <label class="setting sortable-item" data-field="key" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleKey" />
+              <span class="label" style="margin-bottom: 0;">Key</span>
+            </label>
+            <label class="setting sortable-item" data-field="label" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleLabel" />
+              <span class="label" style="margin-bottom: 0;">Label</span>
+            </label>
+            <label class="setting sortable-item" data-field="realtimebpm" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" checked disabled />
+              <span class="label" style="margin-bottom: 0;">Realtime BPM</span>
+            </label>
+            <label class="setting sortable-item" data-field="trackbpm" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleTrackBpm" checked />
+              <span class="label" style="margin-bottom: 0;">Track BPM</span>
+            </label>
+            <label class="setting sortable-item" data-field="time" style="cursor: grab;">
+              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
+              <input type="checkbox" id="toggleTime" checked />
+              <span class="label" style="margin-bottom: 0;">Time</span>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <section class="deck-grid">
+        <article id="deck1Card" class="card deck-card">
+          <div class="deck-content">
+            <div class="label">DECK 1</div>
+            <div class="row">
+            <span class="label">State</span>
+            <span id="deck1PlayState" class="play-state">-</span>
+          </div>
+          <div class="deck-fields" style="display: flex; flex-direction: column;">
+            <div id="deck1Title" class="value large" data-field="title">-</div>
+            <div id="deck1Artist" class="meta" data-field="artist">-</div>
+            <div class="row extended-meta meta-album" data-field="album">
+              <span class="label">Album</span>
+              <span id="deck1Album" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-genre" data-field="genre">
+              <span class="label">Genre</span>
+              <span id="deck1Genre" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-key" data-field="key">
+              <span class="label">Key</span>
+              <span id="deck1Key" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-label" data-field="label">
+              <span class="label">Label</span>
+              <span id="deck1Label" class="ext-value">-</span>
+            </div>
+            <div class="row" data-field="realtimebpm">
+              <span class="label">Realtime BPM</span>
+              <span id="deck1RealtimeBpm" class="realtime-bpm-value">-</span>
+            </div>
+            <div class="row meta-trackbpm" data-field="trackbpm">
+              <span class="label">Track BPM</span>
+              <span id="deck1TrackBpm">-</span>
+            </div>
+            <div class="row meta-time" style="flex-direction: column; align-items: stretch; gap: 8px;" data-field="time">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="label">Time</span>
+                <span><span id="deck1PositionText">-</span> / <span id="deck1TotalText">-</span></span>
+              </div>
+              <canvas id="deck1Waveform" class="waveform-canvas"></canvas>
+            </div>
+          </div>
+          </div>
+        </article>
+
+        <article id="deck2Card" class="card deck-card">
+          <div class="deck-content">
+            <div class="label">DECK 2</div>
+            <div class="row">
+            <span class="label">State</span>
+            <span id="deck2PlayState" class="play-state">-</span>
+          </div>
+          <div class="deck-fields" style="display: flex; flex-direction: column;">
+            <div id="deck2Title" class="value large" data-field="title">-</div>
+            <div id="deck2Artist" class="meta" data-field="artist">-</div>
+            <div class="row extended-meta meta-album" data-field="album">
+              <span class="label">Album</span>
+              <span id="deck2Album" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-genre" data-field="genre">
+              <span class="label">Genre</span>
+              <span id="deck2Genre" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-key" data-field="key">
+              <span class="label">Key</span>
+              <span id="deck2Key" class="ext-value">-</span>
+            </div>
+            <div class="row extended-meta meta-label" data-field="label">
+              <span class="label">Label</span>
+              <span id="deck2Label" class="ext-value">-</span>
+            </div>
+            <div class="row" data-field="realtimebpm">
+              <span class="label">Realtime BPM</span>
+              <span id="deck2RealtimeBpm" class="realtime-bpm-value">-</span>
+            </div>
+            <div class="row meta-trackbpm" data-field="trackbpm">
+              <span class="label">Track BPM</span>
+              <span id="deck2TrackBpm">-</span>
+            </div>
+            <div class="row meta-time" style="flex-direction: column; align-items: stretch; gap: 8px;" data-field="time">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="label">Time</span>
+                <span><span id="deck2PositionText">-</span> / <span id="deck2TotalText">-</span></span>
+              </div>
+              <canvas id="deck2Waveform" class="waveform-canvas"></canvas>
+            </div>
+          </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="label">WARNINGS</div>
+        <ul id="warnings"></ul>
+      </section>
+
+      <section class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div class="label" style="margin: 0;">DEBUG LOG</div>
+          <div id="sourceLine" class="source-line" style="margin: 0; font-size: 11px;">Source: -</div>
+        </div>
+        <ul id="debugLogs"></ul>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
