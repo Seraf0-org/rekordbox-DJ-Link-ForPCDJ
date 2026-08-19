@@ -30,7 +30,7 @@ if not exist "native\bin\rb_hook.dll" (
   call npm run build:hook
   if errorlevel 1 (
     echo.
-    echo [ERROR] DLL build failed. Is g++ installed and in PATH?
+    echo [ERROR] DLL build failed. Is g++ or Visual Studio C++ Build Tools installed?
     echo.
     pause
     exit /b 1
@@ -53,7 +53,7 @@ echo [rb-output] injecting hook...
 if errorlevel 1 (
   echo.
   echo [ERROR] Hook injection failed.
-  echo   - Is Rekordbox 7.2.13 running?
+  echo   - Is a supported Rekordbox version ^(7.2.13, 7.2.14, or 7.2.18^) running?
   echo   - Try running this script as Administrator
   echo   - Antivirus may be blocking DLL injection
   echo.

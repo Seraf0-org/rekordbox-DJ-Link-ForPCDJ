@@ -243,6 +243,22 @@ button:focus {
   color: var(--muted);
 }
 
+.loop-state {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+.loop-state.active {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.deck-card.loop-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 52%, transparent);
+}
+
 #warnings {
   margin: 8px 0 0;
   padding-left: 18px;

@@ -1,5 +1,6 @@
 const dgram = require("node:dgram");
 const { EventEmitter } = require("node:events");
+const { normalizeLoopState, upsertLoopState } = require("../loopState");
 
 function normalizePlaybackSeconds(rawValue) {
   if (!Number.isFinite(rawValue)) {
@@ -111,6 +112,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       comment: null,
       mixName: null,
       lyricist: null,
+      loopState: null,
       lastSeenAt: null,
       metadata: {},
     };
@@ -334,6 +336,11 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       .filter(Boolean)
       .sort((a, b) => a.deck - b.deck);
 
+    const loopStates = Array.from(deckState.entries())
+      .map(([_deck, deckData]) => deckData.loopState)
+      .filter(Boolean)
+      .sort((a, b) => Number(a.deck) - Number(b.deck));
+
     const nowPlayingPatch = {};
     const originalTrackBpm = bpmFromRaw(data.originalBpm);
     if (Number.isFinite(originalTrackBpm)) {
@@ -364,6 +371,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       },
       deckPlaybacks,
       deckNowPlaying,
+      loopStates,
       realtimeBpm: {
         value: bpmFromRaw(data.bpm),
         source: "rekordbox-hook",
@@ -603,6 +611,29 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         method: resolvedDeck.method,
         updatedAt: new Date().toISOString(),
       });
+      if (!connected) {
+        connected = true;
+        emitStatus(true, "Hook events detected");
+      }
+      emitSnapshotFromDecks();
+      return;
+    }
+
+    // The native hook publishes a normalized loop_state packet whenever a
+    // deck's active loop or loop boundaries change. Keep this path separate
+    // from OLVC so older Rekordbox builds remain unaffected.
+    if (packet.type === "loop_state" || packet.type === "loopState" || packet.type === "loop") {
+      const loop = normalizeLoopState(packet, { maxDeck: 4 });
+      if (!loop) {
+        return;
+      }
+      const sourceDeckIndex = loop.deck - 1;
+      const deck = ((sourceDeckIndex % logicalDeckCount) + logicalDeckCount) % logicalDeckCount;
+      const logicalLoop = { ...loop, deck: deck + 1 };
+      updateDeckState(deck, (data) => {
+        data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], logicalLoop)[0] || logicalLoop;
+      });
+      emitter.emit("loop-state", logicalLoop);
       if (!connected) {
         connected = true;
         emitStatus(true, "Hook events detected");

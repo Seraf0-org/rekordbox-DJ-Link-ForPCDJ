@@ -14,6 +14,7 @@ const deck1TrackBpmEl = document.getElementById("deck1TrackBpm");
 const deck1PositionTextEl = document.getElementById("deck1PositionText");
 const deck1TotalTextEl = document.getElementById("deck1TotalText");
 const deck1PlayStateEl = document.getElementById("deck1PlayState");
+const deck1LoopStateEl = document.getElementById("deck1LoopState");
 const deck1CardEl = document.getElementById("deck1Card");
 const deck1WaveformEl = document.getElementById("deck1Waveform");
 
@@ -28,6 +29,7 @@ const deck2TrackBpmEl = document.getElementById("deck2TrackBpm");
 const deck2PositionTextEl = document.getElementById("deck2PositionText");
 const deck2TotalTextEl = document.getElementById("deck2TotalText");
 const deck2PlayStateEl = document.getElementById("deck2PlayState");
+const deck2LoopStateEl = document.getElementById("deck2LoopState");
 const deck2CardEl = document.getElementById("deck2Card");
 const deck2WaveformEl = document.getElementById("deck2Waveform");
 
@@ -193,6 +195,42 @@ function formatBpm(value) {
   return Number.isFinite(value) && value > 0 ? value.toFixed(2) : "-";
 }
 
+function formatLoopState(loopState) {
+  if (!loopState || typeof loopState !== "object") {
+    return { text: "-", active: false };
+  }
+  const active = loopState.active === true;
+  const status = active ? "ACTIVE" : loopState.active === false ? "OFF" : "UNKNOWN";
+  const lengthBeats = Number(loopState.lengthBeats);
+  const startBeat = Number(loopState.startBeat);
+  const endBeat = Number(loopState.endBeat);
+  if (Number.isFinite(lengthBeats) && lengthBeats > 0) {
+    const lengthText = `${Number(lengthBeats.toFixed(2))} beats`;
+    if (Number.isFinite(startBeat) && Number.isFinite(endBeat)) {
+      return { text: `${status} · ${lengthText} · ${Number(startBeat.toFixed(2))}→${Number(endBeat.toFixed(2))}`, active };
+    }
+    return { text: `${status} · ${lengthText}`, active };
+  }
+  const startMs = Number(loopState.startMs);
+  const endMs = Number(loopState.endMs);
+  if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+    return { text: `${status} · ${(startMs / 1000).toFixed(2)}→${(endMs / 1000).toFixed(2)}s`, active };
+  }
+  return { text: status, active };
+}
+
+function renderLoopState(loopState, loopStateEl, cardEl) {
+  if (!loopStateEl) {
+    return;
+  }
+  const formatted = formatLoopState(loopState);
+  loopStateEl.textContent = formatted.text;
+  loopStateEl.classList.toggle("active", formatted.active);
+  if (cardEl) {
+    cardEl.classList.toggle("loop-active", formatted.active);
+  }
+}
+
 function renderWarnings(items) {
   warningsEl.innerHTML = "";
   const warnings = Array.isArray(items) ? items : [];
@@ -278,7 +316,7 @@ function drawWaveform(canvasEl, base64Data, ratio) {
   ctx.fillRect(x - 1, 0, 2, canvasEl.height);
 }
 
-function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckNumber = 0) {
+function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckNumber = 0, loopState = null) {
   const titleText =
     track?.title ||
     (Number.isFinite(track?.trackNo) && track.trackNo > 0 ? `Track #${track.trackNo}` : "-");
@@ -334,6 +372,7 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
     view.cardEl.classList.toggle("is-playing", isPlaying === true);
     view.cardEl.classList.toggle("is-paused", isPlaying === false);
   }
+  renderLoopState(loopState, view.loopStateEl, view.cardEl);
   if (view.waveformEl) {
     drawWaveform(view.waveformEl, track?.waveform, ratio);
   }
@@ -367,9 +406,15 @@ function pickRecentTrackByBpm(recentTracks, targetBpm, excludedIds = new Set()) 
 }
 
 function render(state) {
+  window.__rbLastState = state;
   const deckNowPlaying = Array.isArray(state?.deckNowPlaying) ? state.deckNowPlaying : [];
   const recentTracks = Array.isArray(state?.recentTracks) ? state.recentTracks : [];
   const deckPlaybacks = Array.isArray(state?.deckPlaybacks) ? state.deckPlaybacks : [];
+  const loopStates = Array.isArray(state?.loopStates)
+    ? state.loopStates
+    : Array.isArray(state?.loops)
+      ? state.loops
+      : [];
   const playback = state?.playback || {};
   const realtimeBpm = state?.realtimeBpm || {};
   const status = state?.status || {};
@@ -419,7 +464,8 @@ function render(state) {
     positionEl: deck1PositionTextEl,
     totalEl: deck1TotalTextEl,
     waveformEl: deck1WaveformEl,
-  }, deck1RealtimeFallback, 1);
+    loopStateEl: deck1LoopStateEl,
+  }, deck1RealtimeFallback, 1, loopStates.find((item) => Number(item?.deck) === 1));
 
   renderDeckCard(deck2Track, deck2Playback, {
     cardEl: deck2CardEl,
@@ -435,7 +481,8 @@ function render(state) {
     positionEl: deck2PositionTextEl,
     totalEl: deck2TotalTextEl,
     waveformEl: deck2WaveformEl,
-  }, deck2RealtimeFallback, 2);
+    loopStateEl: deck2LoopStateEl,
+  }, deck2RealtimeFallback, 2, loopStates.find((item) => Number(item?.deck) === 2));
 
   const rb = status.rekordbox || {};
   const hook = status.hook || {};
@@ -472,6 +519,19 @@ async function fetchInitialState() {
 function connectSocket() {
   const socket = io();
   socket.on("state", (state) => render(state));
+  socket.on("loop_state", (loopState) => {
+    if (!window.__rbLastState || !loopState) {
+      return;
+    }
+    const current = Array.isArray(window.__rbLastState.loopStates)
+      ? window.__rbLastState.loopStates
+      : [];
+    const next = current.filter((item) => Number(item?.deck) !== Number(loopState?.deck));
+    next.push(loopState);
+    next.sort((a, b) => Number(a?.deck) - Number(b?.deck));
+    window.__rbLastState = { ...window.__rbLastState, loopStates: next };
+    render(window.__rbLastState);
+  });
 }
 
 loadThemeSettings();

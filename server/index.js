@@ -1,6 +1,5 @@
 const http = require("node:http");
 const path = require("node:path");
-const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const isPackaged = typeof process.pkg !== "undefined";
 const _exeDir = isPackaged ? path.dirname(process.execPath) : null;
@@ -9,6 +8,8 @@ const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
 const { createAbletonLinkProvider } = require("./providers/abletonLinkProvider");
 const { createHookUdpProvider } = require("./providers/hookUdpProvider");
+const { resolveRekordboxExePath } = require("./rekordboxInstall");
+const { upsertLoopState } = require("./loopState");
 
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
@@ -24,9 +25,7 @@ const CONTENT_LOOKUP_SCRIPT =
 const HOOK_INJECT_SCRIPT =
   process.env.REKORDBOX_INJECT_SCRIPT ||
   path.resolve(__dirname, "..", "scripts", "inject_hook.py");
-const DEFAULT_REKORDBOX_EXE = "C:\\Program Files\\rekordbox\\rekordbox 7.2.13\\rekordbox.exe";
-const REKORDBOX_EXE_PATH =
-  process.env.REKORDBOX_EXE_PATH || (fs.existsSync(DEFAULT_REKORDBOX_EXE) ? DEFAULT_REKORDBOX_EXE : "");
+const REKORDBOX_EXE_PATH = resolveRekordboxExePath();
 
 function buildSpawnCmd(exeName, scriptPath, extraArgs) {
   if (isPackaged) return [path.join(_exeDir, exeName), extraArgs];
@@ -51,6 +50,7 @@ const state = {
   recentTracks: [],
   deckNowPlaying: [],
   deckPlaybacks: [],
+  loopStates: [],
   playback: {
     positionSec: null,
     remainingSec: null,
@@ -85,6 +85,29 @@ const state = {
   },
   updatedAt: null,
 };
+
+// Server-Sent Events clients are intentionally kept independent of Socket.IO.
+// This makes the live feed consumable by simple scripts, DAWs, and browser
+// integrations without requiring a Socket.IO client implementation.
+const sseClients = new Set();
+
+function writeSseEvent(response, eventName, payload) {
+  if (!response || response.writableEnded) {
+    return;
+  }
+  const data = JSON.stringify(payload ?? null);
+  response.write(`event: ${eventName}\ndata: ${data}\n\n`);
+}
+
+function broadcastSse(eventName, payload) {
+  for (const client of sseClients) {
+    try {
+      writeSseEvent(client, eventName, payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
 
 let lastStateFingerprint = "";
 const hookRuntime = {
@@ -155,6 +178,7 @@ function clearRealtimeState(reasonMessage) {
   state.recentTracks = [];
   state.deckNowPlaying = [];
   state.deckPlaybacks = [];
+  state.loopStates = [];
   state.playback = {
     positionSec: null,
     remainingSec: null,
@@ -270,6 +294,7 @@ function buildSnapshot() {
     recentTracks: state.recentTracks,
     deckNowPlaying: state.deckNowPlaying,
     deckPlaybacks: state.deckPlaybacks,
+    loopStates: state.loopStates,
     playback: state.playback,
     realtimeBpm: state.realtimeBpm,
     capabilities: state.capabilities,
@@ -287,6 +312,7 @@ function emitState() {
     recentTracks: state.recentTracks,
     deckNowPlaying: state.deckNowPlaying,
     deckPlaybacks: state.deckPlaybacks,
+    loopStates: state.loopStates,
     playback: state.playback,
     realtimeBpm: state.realtimeBpm,
     capabilities: state.capabilities,
@@ -302,7 +328,23 @@ function emitState() {
 
   state.updatedAt = new Date().toISOString();
   lastStateFingerprint = fingerprint;
-  io.emit("state", buildSnapshot());
+  const snapshot = buildSnapshot();
+  io.emit("state", snapshot);
+  broadcastSse("state", snapshot);
+}
+
+function applyLoopState(loopState, { emitEvent = true } = {}) {
+  const previous = JSON.stringify(state.loopStates);
+  state.loopStates = upsertLoopState(state.loopStates, loopState);
+  const changed = previous !== JSON.stringify(state.loopStates);
+  if (changed && emitEvent) {
+    const current = state.loopStates.find((item) => Number(item?.deck) === Number(loopState?.deck));
+    if (current) {
+      io.emit("loop_state", current);
+      broadcastSse("loop_state", current);
+    }
+  }
+  return changed;
 }
 
 const contentMetadataCache = new Map();
@@ -1019,6 +1061,11 @@ hookUdpProvider.on("snapshot", (snapshot) => {
   if (Array.isArray(snapshot.deckPlaybacks)) {
     state.deckPlaybacks = snapshot.deckPlaybacks;
   }
+  if (Array.isArray(snapshot.loopStates)) {
+    for (const loopState of snapshot.loopStates) {
+      applyLoopState(loopState, { emitEvent: false });
+    }
+  }
   if (snapshot.realtimeBpm) {
     state.realtimeBpm = {
       ...state.realtimeBpm,
@@ -1037,6 +1084,12 @@ hookUdpProvider.on("snapshot", (snapshot) => {
   applyMasterNowPlayingFromDecks();
   hydrateDeckNowPlayingMetadata();
   emitState();
+});
+
+hookUdpProvider.on("loop-state", (loopState) => {
+  if (applyLoopState(loopState)) {
+    emitState();
+  }
 });
 
 hookUdpProvider.on("cid-probe", (probe) => {
@@ -1184,6 +1237,16 @@ setInterval(() => {
 }, 1000);
 
 app.use(express.json());
+app.use((_req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Last-Event-ID");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  if (_req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
@@ -1194,6 +1257,7 @@ app.get("/api/status", (_req, res) => {
   res.json({
     status: state.status,
     capabilities: state.capabilities,
+    loopStates: state.loopStates,
     warnings: state.warnings,
     sourceInfo: state.sourceInfo,
     debugLogs: state.debugLogs,
@@ -1205,8 +1269,67 @@ app.get("/api/now-playing", (_req, res) => {
   res.json(buildSnapshot());
 });
 
+function sendLoopStates(res) {
+  // `loops` is kept as a friendly alias while `loopStates` is the canonical
+  // field used by the full snapshot and Socket.IO event contract.
+  res.json({
+    loopStates: state.loopStates,
+    loops: state.loopStates,
+    updatedAt: state.updatedAt,
+  });
+}
+
+app.get("/api/loops", (_req, res) => {
+  sendLoopStates(res);
+});
+
+app.get("/api/loop-state", (_req, res) => {
+  sendLoopStates(res);
+});
+
+app.get("/api/state", (_req, res) => {
+  res.json(buildSnapshot());
+});
+
+function handleEventStream(req, res) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+  sseClients.add(res);
+  writeSseEvent(res, "state", buildSnapshot());
+  for (const loopState of state.loopStates) {
+    writeSseEvent(res, "loop_state", loopState);
+  }
+
+  const keepAlive = setInterval(() => {
+    if (res.writableEnded) {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+      return;
+    }
+    res.write(": keep-alive\n\n");
+  }, 25_000);
+
+  const cleanup = () => {
+    clearInterval(keepAlive);
+    sseClients.delete(res);
+  };
+  req.on("close", cleanup);
+  res.on("error", cleanup);
+}
+
+app.get("/api/stream", handleEventStream);
+app.get("/api/events", handleEventStream);
+
 io.on("connection", (socket) => {
   socket.emit("state", buildSnapshot());
+  for (const loopState of state.loopStates) {
+    socket.emit("loop_state", loopState);
+  }
 });
 
 function shutdown() {

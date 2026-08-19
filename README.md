@@ -1,6 +1,6 @@
 # Rekordbox DJ Link for PCDJ
 
-Rekordbox 7.2.13 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**低遅延Now PlayingおよびBPMリアルタイム配信システム**です。
+Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**低遅延Now PlayingおよびBPMリアルタイム配信システム**です。
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
@@ -14,6 +14,9 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
   * 楽曲の解析済みプロファイル (`ANLZ0000.DAT`) からプレビュー波形（PWAV）をリアルタイムに抽出し、UI上の時間シークバー領域に高精度な波形プレビューとして描画します。
 * **高精度なマスターデッキ検知**
   * Rekordbox内部の `notifyMasterChange` 関数フックを利用した、確実なマスターデッキの切り替え検知（フォールバック検知も内包）。
+* **ループ状態の検出・配信**
+  * デッキごとのループ有効状態、開始/終了時刻、開始/終了ビート、ループ長を検出し、Web UIに表示します。
+  * Socket.IO、HTTP JSON、Server-Sent Events (SSE) から他ソフトウェアでも取得できます。
 * **柔軟なUI (ブラウザ配信)**
   * ダーク/ライトテーマ対応、任意のアクセントカラー設定。
   * **Sortable.js** を利用した、表示項目の自由なドラッグ＆ドロップ並び替え機能。
@@ -25,8 +28,8 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
 ## Prerequisites (前提環境)
 
 * **OS**: Windows 11 (x64)
-* **Software**: Rekordbox 7.2.13~7.2.14 (バージョンが異なると動作しない、またはシグネチャの更新が必要です)
-* **Build Tools**: Node.js, Python 3, および `g++` 実行環境 (TDM-GCC, MSYS2 など)
+* **Software**: Rekordbox 7.2.13、7.2.14、7.2.18（それ以外はシグネチャの再調査が必要な場合があります）
+* **Build Tools**: Node.js、Python 3、および `g++` (TDM-GCC/MSYS2) または Visual Studio C++ Build Tools
 
 ※ *注意*: プロセス注入型のフックエンジンのため、アンチウイルスソフト（Windows Defender等）にて検知・ブロックされる場合や、管理者権限が必要になる場合があります。環境に応じた例外設定および自己責任でのご利用をお願いいたします。
 
@@ -44,8 +47,8 @@ python -m venv .venv
 .venv\Scripts\pip install -r python\requirements.txt
 ```
 
-#### g++ (C++コンパイラ) の導入
-DLLのビルドに `g++` が必須です。コマンドプロンプトで `g++ --version` と入力してエラーが出る場合、以下のいずれかから導入し、環境変数のPATHを通してください。
+#### C++コンパイラの導入
+DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用します。`g++` の候補は以下の通りです。
 - [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
 - [MSYS2](https://www.msys2.org/) (mingw-w64)
 
@@ -72,6 +75,8 @@ npm run inject:hook
 ```
 ※独自のインストールパスでRekordboxを使用している場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` のように引数指定で注入可能です。
 
+Webサーバーは `C:\Program Files\rekordbox` 配下から最新のインストール版を自動選択します。別の実行ファイルを使う場合は `.env` の `REKORDBOX_EXE_PATH` で明示できます。
+
 ---
 
 ## 配布用インストーラーのビルド
@@ -94,6 +99,12 @@ Nodeサーバーからは以下のエンドポイントを通じ、他のシス�
 - `GET /api/health` - サーバー監視
 - `GET /api/status` - RekordboxならびにHookエンジンの接続状況
 - `GET /api/now-playing` - 全デッキの状態（JSON）
+- `GET /api/loops` - デッキごとのループ状態（JSON）
+- `GET /api/stream` - 状態更新と `loop_state` イベントのSSEストリーム
+
+詳細なイベント契約は [API.md](API.md) を参照してください。既存の `state`
+Socket.IOイベントは後方互換のまま `loopStates` を含み、ループ更新時には
+`loop_state`イベントも発行されます。
 
 ---
 

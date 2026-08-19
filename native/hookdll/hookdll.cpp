@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "rb-hook-7.2.13-alpha8";
+constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-alpha10-loop";
 constexpr const char* kUdpHost = "127.0.0.1";
 constexpr uint16_t kUdpPort = 22346;
 
@@ -35,8 +35,16 @@ constexpr const char* kLoadFileSig670 =
 // 7.x MainComponent 参照（UiManager -> UiPlayer*4 を辿る）
 constexpr const char* kMainComponentSig7 =
     "48 89 5C 24 10 48 89 74 24 18 55 57 41 54 41 56 41 57 48 8D 6C 24 B0 48 81 EC 50 01 00 00";
-// 7.0.1+ getInstance（TrackBrowser singleton を返す）
-constexpr const char* kGetInstanceSig =
+// 7.2.18 MainComponent 参照。末尾の RIP 相対 mov が g_MainComponent を指す。
+constexpr const char* kMainComponentSig7218 =
+    "49 89 9F 10 0B 00 00 49 89 9F 18 0B 00 00 49 89 9F 20 0B 00 00 "
+    "49 89 9F 28 0B 00 00 49 89 9F 30 0B 00 00 41 88 9F 38 0B 00 00 "
+    "4C 89 3D ?? ?? ?? ??";
+// 7.0.1+ getInstance（TrackBrowser singleton を返す）。旧版の一意な末尾も含める。
+constexpr const char* kGetInstanceSig701 =
+    "48 89 5C 24 18 57 48 83 EC 30 48 8B 05 ?? ?? ?? ?? ?? 48 85 C0 0F 85 A2";
+// 過去版向け最終フォールバック。短く非一意なため構造解析より後でのみ使う。
+constexpr const char* kGetInstanceSigFallback =
     "48 89 5c 24 18 57 48 83 ec 30 48 8b 05 ?? ?? ?? ??";
 // 7.x 内部 getRowDataTrack(this, trackBrowserId, outRowData, 1, 0)
 constexpr const char* kGetRowDataTrackSig =
@@ -44,9 +52,16 @@ constexpr const char* kGetRowDataTrackSig =
 // db::RowDataTrack::RowDataTrack(rowData)
 constexpr const char* kInitRowDataTrackSig =
     "48 89 5C 24 18 48 89 4C 24 08 55 56 57 48 83 EC 20 48 8B F1";
+// 7.2.18: RowDataTrack にフィールドが追加され、コンストラクタのプロローグも変更された。
+constexpr const char* kInitRowDataTrackSig7218 =
+    "48 89 5C 24 18 48 89 74 24 20 48 89 4C 24 08 57 48 83 EC 20 "
+    "48 8B F9 48 8D 35 ?? ?? ?? ?? 48 89 31";
 // db::RowDataTrack::~RowDataTrack(rowData)
 constexpr const char* kDestrRowDataTrackSig =
     "48 89 5C 24 08 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 48 8D 05 ?? ?? ?? ?? 48 89 41 38 48 81 C1 C0 04 00 00 E8 ?? ?? ?? ?? 48";
+constexpr const char* kDestrRowDataTrackSig7218 =
+    "48 89 5C 24 08 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 "
+    "48 8D 05 ?? ?? ?? ?? 48 89 41 38 48 81 C1 D8 04 00 00 E8";
 // notifyMasterChange (7.x: RekordBoxSongExporter 準拠)
 constexpr const char* kNotifyMasterChangeSig708 =
     "48 89 5C 24 18 48 89 74 24 20 55 57 41 54 41 56 41 57 48 8D 6C 24 B9";
@@ -73,9 +88,9 @@ DestrRowDataTrackFn g_destrRowDataTrack = nullptr;
 bool g_olvcHookInstalled = false;
 bool g_loadFileHookInstalled = false;
 bool g_masterChangeHookInstalled = false;
+bool g_rowDataLayout7218 = false;
 ULONGLONG g_lastProbeTick[8] = {};
 uintptr_t g_playerSlots[4] = {};
-bool g_playerSlotsTried = false;
 bool g_playerSlotsResolved = false;
 uint32_t g_lastPlayerTrackId[4] = {};
 uint32_t g_lastPlayerPrimaryCandidate[4] = {};
@@ -90,6 +105,32 @@ uint32_t g_trackIdMisses[4] = {};
 uint32_t g_loadDetourHits = 0;
 ULONGLONG g_lastTrackDiagLogTick = 0;
 ULONGLONG g_lastLoadDetourLogTick = 0;
+
+// Loop 状態は OLVC の明示的なプロパティ通知からのみ構築する。
+// レイアウトを推測して UiPlayer のメモリを走査しないので、過去版にも
+// 影響せず、未知のレイアウトで false positive を発生させない。
+struct LoopState {
+  bool activeKnown = false;
+  bool active = false;
+  bool hasStartMs = false;
+  bool hasEndMs = false;
+  bool hasLengthBeats = false;
+  uint32_t startMs = 0;
+  uint32_t endMs = 0;
+  uint32_t lengthBeats = 0;
+
+  bool sent = false;
+  bool sentActive = false;
+  bool sentHasStartMs = false;
+  bool sentHasEndMs = false;
+  bool sentHasLengthBeats = false;
+  uint32_t sentStartMs = 0;
+  uint32_t sentEndMs = 0;
+  uint32_t sentLengthBeats = 0;
+};
+
+LoopState g_loopState[4] = {};
+uint32_t g_loopTrackId[4] = {};
 
 std::string wchar_to_utf8(const wchar_t* wstr) {
   if (!wstr) return "";
@@ -304,10 +345,153 @@ void send_cid_probe(uintptr_t deckRaw, const std::vector<uint32_t>& candidates) 
   send_packet(payload);
 }
 
+// Loop の開始/終了時刻は Rekordbox が `@Loop*Time` としてミリ秒で通知する。
+// 楽曲の最大長を大きく超える値（ポインタや符号付き値の誤読）を拒否する。
+bool is_likely_loop_time_ms(uintptr_t rawValue) {
+  return rawValue <= 24ULL * 60ULL * 60ULL * 1000ULL;
+}
+
+// @BeatLoopCDJ は 7.x で整数拍の Auto Beat Loop をそのまま通知する場合だけ
+// 利用する。1/2 や 3/4 などのエンコードを推測して公開することはしない。
+bool is_likely_whole_beat_loop_length(uintptr_t rawValue) {
+  switch (rawValue) {
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 16:
+    case 32:
+    case 64:
+    case 128:
+    case 256:
+    case 512:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void reset_loop_state_for_track(int deckOneBased, uint32_t trackId) {
+  if (deckOneBased < 1 || deckOneBased > 4 || !is_likely_track_id(trackId)) {
+    return;
+  }
+  const int slot = deckOneBased - 1;
+  if (g_loopTrackId[slot] == trackId) {
+    return;
+  }
+  g_loopTrackId[slot] = trackId;
+  g_loopState[slot] = LoopState{};
+}
+
+void send_loop_state_if_changed(int deckOneBased) {
+  if (deckOneBased < 1 || deckOneBased > 4) {
+    return;
+  }
+  LoopState& state = g_loopState[deckOneBased - 1];
+  // active は GetLoopActive による真偽値を受け取るまで送らない。
+  // Loop In/Out の残存値だけで「ループ中」と決め付けないためである。
+  if (!state.activeKnown) {
+    return;
+  }
+
+  if (state.sent && state.sentActive == state.active &&
+      state.sentHasStartMs == state.hasStartMs &&
+      state.sentHasEndMs == state.hasEndMs &&
+      state.sentHasLengthBeats == state.hasLengthBeats &&
+      state.sentStartMs == state.startMs && state.sentEndMs == state.endMs &&
+      state.sentLengthBeats == state.lengthBeats) {
+    return;
+  }
+
+  std::string payload = "{\"type\":\"loop_state\",\"deck\":";
+  payload += std::to_string(deckOneBased);
+  payload += ",\"active\":";
+  payload += state.active ? "true" : "false";
+  if (state.hasStartMs) {
+    payload += ",\"startMs\":";
+    payload += std::to_string(static_cast<unsigned long long>(state.startMs));
+  }
+  if (state.hasEndMs) {
+    payload += ",\"endMs\":";
+    payload += std::to_string(static_cast<unsigned long long>(state.endMs));
+  }
+  if (state.hasStartMs && state.hasEndMs && state.endMs >= state.startMs) {
+    payload += ",\"lengthMs\":";
+    payload += std::to_string(
+        static_cast<unsigned long long>(state.endMs - state.startMs));
+  }
+  if (state.hasLengthBeats) {
+    payload += ",\"lengthBeats\":";
+    payload += std::to_string(static_cast<unsigned long long>(state.lengthBeats));
+  }
+  payload += "}";
+  send_packet(payload);
+
+  state.sent = true;
+  state.sentActive = state.active;
+  state.sentHasStartMs = state.hasStartMs;
+  state.sentHasEndMs = state.hasEndMs;
+  state.sentHasLengthBeats = state.hasLengthBeats;
+  state.sentStartMs = state.startMs;
+  state.sentEndMs = state.endMs;
+  state.sentLengthBeats = state.lengthBeats;
+}
+
+// 7.x の UiPlayer は以下のプロパティを購読している。これは 7.2.18 の
+// バイナリで確認済みで、旧版では存在しなければ単に到達しない。
+void observe_loop_olvc(int deckOneBased, const char* name, uintptr_t rawValue) {
+  if (deckOneBased < 1 || deckOneBased > 4 || !name) {
+    return;
+  }
+  LoopState& state = g_loopState[deckOneBased - 1];
+  bool changed = false;
+
+  if (strcmp(name, "GetLoopActive") == 0) {
+    // Boolean 以外は別の OLVC payload の可能性があるため採用しない。
+    if (rawValue <= 1) {
+      const bool active = rawValue != 0;
+      changed = !state.activeKnown || state.active != active;
+      state.activeKnown = true;
+      state.active = active;
+    }
+  } else if (strcmp(name, "@LoopInTime") == 0) {
+    if (is_likely_loop_time_ms(rawValue)) {
+      const uint32_t value = static_cast<uint32_t>(rawValue);
+      changed = !state.hasStartMs || state.startMs != value;
+      state.hasStartMs = true;
+      state.startMs = value;
+    }
+  } else if (strcmp(name, "@LoopOutTime") == 0) {
+    if (is_likely_loop_time_ms(rawValue)) {
+      const uint32_t value = static_cast<uint32_t>(rawValue);
+      changed = !state.hasEndMs || state.endMs != value;
+      state.hasEndMs = true;
+      state.endMs = value;
+    }
+  } else if (strcmp(name, "@BeatLoopCDJ") == 0) {
+    if (is_likely_whole_beat_loop_length(rawValue)) {
+      const uint32_t value = static_cast<uint32_t>(rawValue);
+      changed = !state.hasLengthBeats || state.lengthBeats != value;
+      state.hasLengthBeats = true;
+      state.lengthBeats = value;
+    }
+  }
+
+  if (changed) {
+    send_loop_state_if_changed(deckOneBased);
+  }
+}
+
 void send_track_load(int deckRaw, uint32_t contentId, uintptr_t playerPtr, uintptr_t arg3, uintptr_t arg4) {
   if (contentId == 0) {
     return;
   }
+  reset_loop_state_for_track(deckRaw, contentId);
   char buffer[256] = {};
   _snprintf_s(
       buffer, sizeof(buffer), _TRUNCATE,
@@ -483,7 +667,7 @@ uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback = 
 
 // RowDataTrack ポインタから全メタデータを読んで送信する共通処理
 void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
-  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0x450)) return;
+  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0x4E0)) return;
 
   const int slot = (deckOneBased - 1) % 4;
   auto is_reserved_track_text = [](const std::string& s) -> bool {
@@ -519,22 +703,24 @@ void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
     return val;
   };
 
-  // RekordBoxSongExporter 7.0.8+ 準拠オフセット
+  // 7.2.18 では title より後ろに 0x10 バイト分のフィールドが追加された。
+  // 旧版レイアウトはそのまま残し、7.2.18 のコンストラクタ検出時だけ補正する。
+  const uintptr_t postTitleShift = g_rowDataLayout7218 ? 0x10 : 0;
   TrackMetaFields m;
   m.title      = read_utf8_str(0x20);
-  m.artist     = read_utf8_str(0xC0);
-  m.album      = read_utf8_str(0xF8);
-  m.genre      = read_utf8_str(0x170);
-  m.label      = read_utf8_str(0x1A8);
-  m.key        = read_utf8_str(0x200);
-  m.origArtist = read_utf8_str(0x280);
-  m.remixer    = read_utf8_str(0x2F0);
-  m.composer   = read_utf8_str(0x328);
-  m.comment    = read_utf8_str(0x350);
-  m.mixName    = read_utf8_str(0x380);
-  m.lyricist   = read_utf8_str(0x448);
-  m.trackBpm   = read_u32_val(0x398);
-  m.trackNumber = read_u32_val(0x340);
+  m.artist     = read_utf8_str(0xC0 + postTitleShift);
+  m.album      = read_utf8_str(0xF8 + postTitleShift);
+  m.genre      = read_utf8_str(0x170 + postTitleShift);
+  m.label      = read_utf8_str(0x1A8 + postTitleShift);
+  m.key        = read_utf8_str(0x200 + postTitleShift);
+  m.origArtist = read_utf8_str(0x280 + postTitleShift);
+  m.remixer    = read_utf8_str(0x2F0 + postTitleShift);
+  m.composer   = read_utf8_str(0x328 + postTitleShift);
+  m.comment    = read_utf8_str(0x350 + postTitleShift);
+  m.mixName    = read_utf8_str(0x380 + postTitleShift);
+  m.lyricist   = read_utf8_str(0x448 + postTitleShift);
+  m.trackBpm   = read_u32_val(0x398 + postTitleShift);
+  m.trackNumber = read_u32_val(0x340 + postTitleShift);
 
   if (m.title.empty()) return;
   if (m.artist == m.title) {
@@ -709,11 +895,7 @@ uintptr_t scan_module_text_section(HMODULE module, const std::vector<int>& patte
   return 0;
 }
 
-uintptr_t find_get_instance() {
-  HMODULE module = GetModuleHandleA(nullptr);
-  const auto sig = parse_signature(kGetInstanceSig);
-  return scan_module_text_section(module, sig);
-}
+uintptr_t find_get_instance();
 
 // .text セクション先頭・サイズを取得するヘルパー
 static void get_text_section(HMODULE module, uint8_t*& outStart, size_t& outSize) {
@@ -732,6 +914,141 @@ static void get_text_section(HMODULE module, uint8_t*& outStart, size_t& outSize
       return;
     }
   }
+}
+
+static uintptr_t direct_call_target(uint8_t* textStart, size_t textSize, size_t offset) {
+  if (!textStart || offset + 5 > textSize || textStart[offset] != 0xE8) {
+    return 0;
+  }
+  int32_t rel = 0;
+  memcpy(&rel, textStart + offset + 1, sizeof(rel));
+  const uintptr_t target = reinterpret_cast<uintptr_t>(textStart + offset + 5) +
+                           static_cast<int64_t>(rel);
+  const uintptr_t textBegin = reinterpret_cast<uintptr_t>(textStart);
+  const uintptr_t textEnd = textBegin + textSize;
+  return (target >= textBegin && target < textEnd) ? target : 0;
+}
+
+static bool matches_pattern_at(uintptr_t address, const std::vector<int>& pattern) {
+  if (!address || pattern.empty()) {
+    return false;
+  }
+  const auto* bytes = reinterpret_cast<const uint8_t*>(address);
+  for (size_t i = 0; i < pattern.size(); ++i) {
+    if (pattern[i] >= 0 && bytes[i] != static_cast<uint8_t>(pattern[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 7.x の公開 wrapper は rcx を一度 dereference して inner getRowDataTrack へ分岐する。
+static uintptr_t find_get_row_data_track_wrapper(uint8_t* textStart, size_t textSize,
+                                                 uintptr_t innerTarget) {
+  if (!textStart || !innerTarget || textSize < 12) {
+    return 0;
+  }
+  for (size_t i = 0; i + 12 <= textSize; ++i) {
+    if (textStart[i] != 0x48 || textStart[i + 1] != 0x8B || textStart[i + 2] != 0x09 ||
+        textStart[i + 3] != 0x48 || textStart[i + 4] != 0x85 || textStart[i + 5] != 0xC9 ||
+        textStart[i + 6] != 0x0F || textStart[i + 7] != 0x85) {
+      continue;
+    }
+    int32_t rel = 0;
+    memcpy(&rel, textStart + i + 8, sizeof(rel));
+    const uintptr_t branchTarget = reinterpret_cast<uintptr_t>(textStart + i + 12) +
+                                   static_cast<int64_t>(rel);
+    if (branchTarget == innerTarget) {
+      return reinterpret_cast<uintptr_t>(textStart + i);
+    }
+  }
+  return 0;
+}
+
+// RowDataTrack ctor -> DatabaseIF::getInstance -> getRowDataTrack wrapper という
+// 実際の呼び出し列から getInstance を特定する。短い singleton シグネチャが
+// 多数の関数に一致する 7.2.18 でも、誤った関数を呼ばないための構造解析。
+static uintptr_t find_get_instance_via_row_data_callsite() {
+  if (!g_initRowDataTrack || !g_getRowDataTrack) {
+    return 0;
+  }
+  HMODULE module = GetModuleHandleA(nullptr);
+  uint8_t* textStart = nullptr;
+  size_t textSize = 0;
+  get_text_section(module, textStart, textSize);
+  if (!textStart || textSize < 32) {
+    return 0;
+  }
+
+  const uintptr_t wrapper = find_get_row_data_track_wrapper(
+      textStart, textSize, reinterpret_cast<uintptr_t>(g_getRowDataTrack));
+  if (!wrapper) {
+    return 0;
+  }
+
+  const uintptr_t ctor = reinterpret_cast<uintptr_t>(g_initRowDataTrack);
+  const auto getInstancePrologue = parse_signature(kGetInstanceSigFallback);
+  std::unordered_map<uintptr_t, int> candidates;
+  for (size_t wrapperCall = 0; wrapperCall + 5 <= textSize; ++wrapperCall) {
+    if (direct_call_target(textStart, textSize, wrapperCall) != wrapper) {
+      continue;
+    }
+
+    const size_t searchBegin = wrapperCall > 96 ? wrapperCall - 96 : 0;
+    size_t ctorCall = static_cast<size_t>(-1);
+    for (size_t i = searchBegin; i + 5 <= wrapperCall; ++i) {
+      if (direct_call_target(textStart, textSize, i) == ctor) {
+        ctorCall = i;
+      }
+    }
+    if (ctorCall == static_cast<size_t>(-1)) {
+      continue;
+    }
+
+    for (size_t i = ctorCall + 5; i + 5 <= wrapperCall; ++i) {
+      const uintptr_t candidate = direct_call_target(textStart, textSize, i);
+      if (!candidate || candidate == ctor || candidate == wrapper ||
+          candidate == reinterpret_cast<uintptr_t>(g_getRowDataTrack)) {
+        continue;
+      }
+      if (!matches_pattern_at(candidate, getInstancePrologue)) {
+        continue;
+      }
+      candidates[candidate] += 1;
+      break;
+    }
+  }
+
+  uintptr_t best = 0;
+  int bestCount = 0;
+  for (const auto& candidate : candidates) {
+    if (candidate.second > bestCount) {
+      best = candidate.first;
+      bestCount = candidate.second;
+    }
+  }
+  return best;
+}
+
+uintptr_t find_get_instance() {
+  const uintptr_t structural = find_get_instance_via_row_data_callsite();
+  if (structural) {
+    return structural;
+  }
+
+  HMODULE module = GetModuleHandleA(nullptr);
+  const auto legacySpecific = parse_signature(kGetInstanceSig701);
+  const uintptr_t legacyAddress = scan_module_text_section(module, legacySpecific);
+  if (legacyAddress) {
+    return legacyAddress;
+  }
+
+  // 7.2.18 で短いパターンを使うと無関係な singleton を選ぶため禁止する。
+  if (g_rowDataLayout7218) {
+    return 0;
+  }
+  const auto fallback = parse_signature(kGetInstanceSigFallback);
+  return scan_module_text_section(module, fallback);
 }
 
 // 「getInstance() を呼んだ直後に呼ばれる関数」を集計し最多のものを返す。
@@ -796,12 +1113,25 @@ uintptr_t find_get_row_data_track() {
 
 uintptr_t find_init_row_data_track() {
   HMODULE module = GetModuleHandleA(nullptr);
+  const auto sig7218 = parse_signature(kInitRowDataTrackSig7218);
+  const uintptr_t address7218 = scan_module_text_section(module, sig7218);
+  if (address7218) {
+    g_rowDataLayout7218 = true;
+    return address7218;
+  }
   const auto sig = parse_signature(kInitRowDataTrackSig);
   return scan_module_text_section(module, sig);
 }
 
 uintptr_t find_destr_row_data_track() {
   HMODULE module = GetModuleHandleA(nullptr);
+  if (g_rowDataLayout7218) {
+    const auto sig7218 = parse_signature(kDestrRowDataTrackSig7218);
+    const uintptr_t address7218 = scan_module_text_section(module, sig7218);
+    if (address7218) {
+      return address7218;
+    }
+  }
   const auto sig = parse_signature(kDestrRowDataTrackSig);
   return scan_module_text_section(module, sig);
 }
@@ -824,28 +1154,38 @@ uintptr_t find_load_file_target() {
   if (address) {
     return address;
   }
+  // 7.2.18 では 7.0.8 の eventLoadFile シグネチャが変化した。
+  // 6.7 用の汎用的なプロローグは別関数に一致するため、安全のため使用しない。
+  // TrackBrowserID の OLVC と UiPlayer polling が同じ情報を補完する。
+  if (g_rowDataLayout7218) {
+    return 0;
+  }
   const auto sig670 = parse_signature(kLoadFileSig670);
   return scan_module_text_section(module, sig670);
 }
 
 bool resolve_player_slots() {
-  if (g_playerSlotsTried) {
-    return g_playerSlotsResolved;
+  if (g_playerSlotsResolved) {
+    return true;
   }
-  g_playerSlotsTried = true;
-
   HMODULE module = GetModuleHandleA(nullptr);
-  const auto pattern = parse_signature(kMainComponentSig7);
-  const uintptr_t mainComponentRef = scan_module_text_section(module, pattern);
-  if (!mainComponentRef) {
-    return false;
-  }
-
+  uintptr_t mainComponentAddr = 0;
   int32_t rel = 0;
-  if (!safe_read_i32(mainComponentRef + 0x4A, rel)) {
-    return false;
+  const auto pattern7218 = parse_signature(kMainComponentSig7218);
+  const uintptr_t mainComponentRef7218 = scan_module_text_section(module, pattern7218);
+  if (mainComponentRef7218) {
+    if (!safe_read_i32(mainComponentRef7218 + 0x2D, rel)) {
+      return false;
+    }
+    mainComponentAddr = mainComponentRef7218 + 0x31 + static_cast<int64_t>(rel);
+  } else {
+    const auto pattern = parse_signature(kMainComponentSig7);
+    const uintptr_t mainComponentRef = scan_module_text_section(module, pattern);
+    if (!mainComponentRef || !safe_read_i32(mainComponentRef + 0x4A, rel)) {
+      return false;
+    }
+    mainComponentAddr = mainComponentRef + 0x4E + static_cast<int64_t>(rel);
   }
-  const uintptr_t mainComponentAddr = mainComponentRef + 0x4E + static_cast<int64_t>(rel);
 
   uintptr_t mainComponent = 0;
   if (!safe_read_ptr(mainComponentAddr, mainComponent) || !mainComponent) {
@@ -875,6 +1215,11 @@ int lookup_deck_from_player(uintptr_t playerPtr) {
   if (!playerPtr) {
     return -1;
   }
+  for (int i = 0; i < 4; ++i) {
+    if (g_playerSlots[i] == playerPtr) {
+      return i;
+    }
+  }
   if (!resolve_player_slots()) {
     return -1;
   }
@@ -884,6 +1229,14 @@ int lookup_deck_from_player(uintptr_t playerPtr) {
     }
   }
   return -1;
+}
+
+void remember_player_slot(int deckOneBased, uintptr_t playerPtr) {
+  if (deckOneBased < 1 || deckOneBased > 4 || !playerPtr) {
+    return;
+  }
+  g_playerSlots[deckOneBased - 1] = playerPtr;
+  g_playerSlotsResolved = true;
 }
 
 bool is_likely_track_id(uint32_t value) {
@@ -911,6 +1264,13 @@ uint32_t extract_track_id_from_olvc_value(uintptr_t rawValue) {
 uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback) {
   if (!playerPtr) {
     return 0;
+  }
+  // 7.2.18 では TrackBrowserID の位置が +0x580 と確定できる。
+  // 空デッキで近接フィールドを曲IDと誤認しないよう、このレイアウトでは
+  // 従来の広域フォールバックを使わない。
+  if (g_rowDataLayout7218) {
+    uint32_t value = 0;
+    return safe_read_u32(playerPtr + 0x580, value) && is_likely_track_id(value) ? value : 0;
   }
   static const uintptr_t kTrackIdOffsets[] = {0x580, 0x57C, 0x584, 0x578, 0x588};
   for (uintptr_t offset : kTrackIdOffsets) {
@@ -1106,6 +1466,17 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
   if (!is_likely_track_id(loadTrackId)) {
     loadTrackId = read_player_track_browser_id(arg1, true);
   }
+  if (deckRaw <= 0 && is_likely_track_id(loadTrackId)) {
+    for (int i = 0; i < 4; ++i) {
+      if (g_lastPlayerTrackId[i] == loadTrackId) {
+        deckRaw = i + 1;
+        break;
+      }
+    }
+  }
+  if (deckRaw > 0) {
+    remember_player_slot(deckRaw, arg1);
+  }
   if (deckRaw > 0) {
     const auto candidates = probe_loadinfo_candidates(arg2);
     if (!candidates.empty()) {
@@ -1196,6 +1567,53 @@ DWORD WINAPI worker_thread(LPVOID) {
   g_olvcHookInstalled = true;
   send_packet("{\"type\":\"log\",\"message\":\"OLVC hook installed\"}");
 
+  // RowDataTrack のレイアウト判定を先に行う。7.2.18 で旧 LoadFile の
+  // 汎用シグネチャへ誤フォールバックすることも、ここで防止できる。
+  const uintptr_t initRowDataTrackAddr = find_init_row_data_track();
+  if (initRowDataTrackAddr) {
+    g_initRowDataTrack = reinterpret_cast<InitRowDataTrackFn>(initRowDataTrackAddr);
+    send_packet(g_rowDataLayout7218
+                    ? "{\"type\":\"log\",\"message\":\"initRowDataTrack found (7.2.18 layout)\"}"
+                    : "{\"type\":\"log\",\"message\":\"initRowDataTrack found (legacy layout)\"}");
+  } else {
+    send_packet("{\"type\":\"log\",\"message\":\"initRowDataTrack signature not found\"}");
+  }
+
+  uintptr_t getRowDataTrackAddr = find_get_row_data_track();
+  if (getRowDataTrackAddr) {
+    g_getRowDataTrack = reinterpret_cast<GetRowDataTrackFn>(getRowDataTrackAddr);
+    send_packet("{\"type\":\"log\",\"message\":\"getRowDataTrack found\"}");
+  }
+
+  const uintptr_t getInstanceAddr = find_get_instance();
+  if (getInstanceAddr) {
+    g_getInstance = reinterpret_cast<GetInstanceFn>(getInstanceAddr);
+    send_packet("{\"type\":\"log\",\"message\":\"getInstance found\"}");
+  } else {
+    send_packet("{\"type\":\"log\",\"message\":\"getInstance signature not found\"}");
+  }
+
+  // 旧版で inner シグネチャが変わっていた場合は、getInstance を使う
+  // 従来のコールサイト解析をもう一度試す。
+  if (!getRowDataTrackAddr && g_getInstance) {
+    getRowDataTrackAddr = find_get_row_data_track();
+    if (getRowDataTrackAddr) {
+      g_getRowDataTrack = reinterpret_cast<GetRowDataTrackFn>(getRowDataTrackAddr);
+      send_packet("{\"type\":\"log\",\"message\":\"getRowDataTrack found via callsite\"}");
+    }
+  }
+  if (!g_getRowDataTrack) {
+    send_packet("{\"type\":\"log\",\"message\":\"getRowDataTrack signature not found\"}");
+  }
+
+  const uintptr_t destrRowDataTrackAddr = find_destr_row_data_track();
+  if (destrRowDataTrackAddr) {
+    g_destrRowDataTrack = reinterpret_cast<DestrRowDataTrackFn>(destrRowDataTrackAddr);
+    send_packet("{\"type\":\"log\",\"message\":\"destrRowDataTrack found\"}");
+  } else {
+    send_packet("{\"type\":\"log\",\"message\":\"destrRowDataTrack signature not found\"}");
+  }
+
   const uintptr_t loadTarget = find_load_file_target();
   if (!loadTarget) {
     send_packet("{\"type\":\"log\",\"message\":\"LoadFile signature not found\"}");
@@ -1225,38 +1643,6 @@ DWORD WINAPI worker_thread(LPVOID) {
     send_packet("{\"type\":\"log\",\"message\":\"NotifyMasterChange hook installed\"}");
   }
 
-  const uintptr_t getInstanceAddr = find_get_instance();
-  if (getInstanceAddr) {
-    g_getInstance = reinterpret_cast<GetInstanceFn>(getInstanceAddr);
-    send_packet("{\"type\":\"log\",\"message\":\"getInstance found\"}");
-  } else {
-    send_packet("{\"type\":\"log\",\"message\":\"getInstance signature not found\"}");
-  }
-
-  const uintptr_t getRowDataTrackAddr = find_get_row_data_track();
-  if (getRowDataTrackAddr) {
-    g_getRowDataTrack = reinterpret_cast<GetRowDataTrackFn>(getRowDataTrackAddr);
-    send_packet("{\"type\":\"log\",\"message\":\"getRowDataTrack found\"}");
-  } else {
-    send_packet("{\"type\":\"log\",\"message\":\"getRowDataTrack signature not found\"}");
-  }
-
-  const uintptr_t initRowDataTrackAddr = find_init_row_data_track();
-  if (initRowDataTrackAddr) {
-    g_initRowDataTrack = reinterpret_cast<InitRowDataTrackFn>(initRowDataTrackAddr);
-    send_packet("{\"type\":\"log\",\"message\":\"initRowDataTrack found\"}");
-  } else {
-    send_packet("{\"type\":\"log\",\"message\":\"initRowDataTrack signature not found\"}");
-  }
-
-  const uintptr_t destrRowDataTrackAddr = find_destr_row_data_track();
-  if (destrRowDataTrackAddr) {
-    g_destrRowDataTrack = reinterpret_cast<DestrRowDataTrackFn>(destrRowDataTrackAddr);
-    send_packet("{\"type\":\"log\",\"message\":\"destrRowDataTrack found\"}");
-  } else {
-    send_packet("{\"type\":\"log\",\"message\":\"destrRowDataTrack signature not found\"}");
-  }
-
   if (g_getInstance && g_getRowDataTrack) {
     if (!g_initRowDataTrack || !g_destrRowDataTrack) {
       send_packet(
@@ -1268,6 +1654,12 @@ DWORD WINAPI worker_thread(LPVOID) {
 
   while (true) {
     poll_player_track_ids();
+    // 7.2.18 では旧 LoadFile フックに依存せず、UiPlayer から取得した
+    // TrackBrowserID を使って同じ RowDataTrack 経路を定期的に更新する。
+    // 旧版で LoadFile フックが有効な場合は従来経路をそのまま使う。
+    if (g_rowDataLayout7218 || !g_loadFileHookInstalled) {
+      poll_track_strings();
+    }
     Sleep(1000);
   }
 }
