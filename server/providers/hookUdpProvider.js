@@ -88,6 +88,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
   const deckState = new Map();
   const deckSignals = new Map();
   const unknownEventNames = new Set();
+  let explicitMasterDeck = null;
+  let explicitMasterUpdatedAt = null;
+  let fallbackMasterDeck = null;
 
   function initDeckState() {
     return {
@@ -169,21 +172,59 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     deckState.set(deck, current);
   }
 
-  function computeMasterDeck() {
-    let winnerDeck = null;
-    let winnerScore = Number.NEGATIVE_INFINITY;
-    for (const [deck, data] of deckState) {
-      const hasPlaybackSignal =
-        Number.isFinite(data.currentTime) ||
-        Number.isFinite(data.remainingTime) ||
-        Number.isFinite(data.totalTime);
-      const score = Number(data.lastSeenAt || 0) + (hasPlaybackSignal ? 1_000_000_000_000 : 0);
-      if (score > winnerScore) {
-        winnerDeck = deck;
-        winnerScore = score;
-      }
+  function isDeckPlaying(data) {
+    if (!data) {
+      return false;
     }
-    return winnerDeck;
+    if (typeof data.explicitIsPlaying === "boolean") {
+      return data.explicitIsPlaying;
+    }
+    return data.lastIsPlaying === true;
+  }
+
+  function deckScore(deck, data) {
+    const hasPlaybackSignal =
+      Number.isFinite(data.currentTime) ||
+      Number.isFinite(data.remainingTime) ||
+      Number.isFinite(data.totalTime);
+    return Number(data.lastSeenAt || 0) + (hasPlaybackSignal ? 1_000_000_000_000 : 0);
+  }
+
+  function pickHighestScore(decks) {
+    return decks.reduce((winner, [deck, data]) => {
+      if (!winner || deckScore(deck, data) > winner.score) {
+        return { deck, score: deckScore(deck, data) };
+      }
+      return winner;
+    }, null)?.deck ?? null;
+  }
+
+  function computeMasterDeck() {
+    if (Number.isInteger(explicitMasterDeck)) {
+      return explicitMasterDeck;
+    }
+
+    const currentData = Number.isInteger(fallbackMasterDeck)
+      ? deckState.get(fallbackMasterDeck)
+      : null;
+    if (currentData && isDeckPlaying(currentData)) {
+      // Once a fallback deck is known to be playing, packets from another
+      // deck must not make master selection oscillate between OLVC sources.
+      return fallbackMasterDeck;
+    }
+
+    const playingDecks = Array.from(deckState.entries()).filter(([, data]) => isDeckPlaying(data));
+    if (playingDecks.length > 0) {
+      fallbackMasterDeck = pickHighestScore(playingDecks);
+      return fallbackMasterDeck;
+    }
+
+    if (Number.isInteger(fallbackMasterDeck) && deckState.has(fallbackMasterDeck)) {
+      return fallbackMasterDeck;
+    }
+
+    fallbackMasterDeck = pickHighestScore(Array.from(deckState.entries()));
+    return fallbackMasterDeck;
   }
 
   function buildDeckPlayback(deckIndex, data) {
@@ -288,7 +329,8 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         (deckPlayback) =>
           Number.isFinite(deckPlayback.positionSec) ||
           Number.isFinite(deckPlayback.remainingSec) ||
-          Number.isFinite(deckPlayback.totalSec)
+          Number.isFinite(deckPlayback.totalSec) ||
+          typeof deckPlayback.isPlaying === "boolean"
       )
       .sort((a, b) => a.deck - b.deck);
     const deckNowPlaying = Array.from(deckState.entries())
@@ -372,6 +414,10 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       deckPlaybacks,
       deckNowPlaying,
       loopStates,
+      masterDeck: masterDeck + 1,
+      masterDeckSource: Number.isInteger(explicitMasterDeck) ? "explicit-master-change" : "playback-fallback",
+      explicitMasterDeck: Number.isInteger(explicitMasterDeck) ? explicitMasterDeck + 1 : null,
+      explicitMasterUpdatedAt,
       realtimeBpm: {
         value: bpmFromRaw(data.bpm),
         source: "rekordbox-hook",
@@ -512,8 +558,15 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     if (packet.type === "master_change") {
       const deckRaw = Number(packet.deck);
       if (Number.isFinite(deckRaw) && deckRaw >= 1 && deckRaw <= 4) {
+        const logicalDeck = normalizeDeckIndex(deckRaw);
+        explicitMasterDeck = logicalDeck;
+        fallbackMasterDeck = logicalDeck;
+        explicitMasterUpdatedAt = new Date().toISOString();
         emitter.emit("master-change", {
           deck: deckRaw,
+          logicalDeck: logicalDeck + 1,
+          source: "explicit-master-change",
+          explicitMasterUpdatedAt,
           updatedAt: new Date().toISOString(),
         });
       }
@@ -521,6 +574,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         connected = true;
         emitStatus(true, "Hook events detected");
       }
+      // Re-emit the current deck snapshot immediately. A master switch can
+      // arrive before a new playhead packet, while @IsPlaying is already true.
+      emitSnapshotFromDecks();
       return;
     }
 
@@ -604,6 +660,12 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         data.trackBrowserId = contentId;
       });
       markDeckSignal(deck, "track-load");
+      emitter.emit("track-loaded", {
+        deck: deck + 1,
+        logicalDeck: deck + 1,
+        contentId: String(Math.trunc(contentId)),
+        updatedAt: new Date().toISOString(),
+      });
       emitter.emit("deck-resolution", {
         type: "track_load",
         deck: deck + 1,
@@ -770,6 +832,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     socket.close();
     socket = null;
     connected = false;
+    explicitMasterDeck = null;
+    explicitMasterUpdatedAt = null;
+    fallbackMasterDeck = null;
   }
 
   return {

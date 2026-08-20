@@ -4,6 +4,29 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
+## v1.1.0 リリースノート
+
+既存のNow Playing本体との後方互換を保ったまま、Rekordbox連携と任意の
+DJ Agent拡張を強化しました。
+
+* Rekordboxの最新インストール検出と、Loop状態・未知イベントの診断経路を追加。
+* DJ Agentは既定OFFのoptional拡張として統合。未接続のSyndocal、MIDI、または
+  global hotkey adapterがあっても本体の起動を妨げません。
+* master deckに応じたdeck-aware MIDI channel routingを追加。
+* ペダルを2段階制御化。Stage 1はF13の設定可能なHP→ChannelFader fade→Cue/Stop
+  （`filter-then-fade`、従来互換のparallelも選択可）、
+  F14のLoopHalf、F15のinactive。authoritative timelineがrunningになるStage 2では、
+  F13/F15が±4 bars、F14がabsolute loop toggleとなり、Rekordbox MIDIは送信しません。
+* Syndocal handoffはsnapshot待ち・切断・再接続をfail-closedにし、eventId/sequence/
+  ACK・pending/rejected/timed-out/send-failedを状態とUIへ反映。
+* read-only APIは従来どおりLANから利用でき、DJ AgentのPOST actionは既定でloopback限定。
+
+検証済み範囲は、Node test 42/42、JavaScript構文・差分検査、Node 22／
+`@yao-pkg/pkg@6.22.0` によるWindows x64配布ビルド、生成server.exeのHTTP smoke、
+optional MIDI/global-hotkey adapterの未接続時継続起動です。Rekordboxのバージョン固有の
+hook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの相互運用は、対象環境での
+実機受入試験が別途必要です。
+
 ## Core Features
 
 * **リアルタイムHookングエンジン**
@@ -22,6 +45,121 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
   * **Sortable.js** を利用した、表示項目の自由なドラッグ＆ドロップ並び替え機能。
   * 必要な項目（Album, Genre, Key, Label, Time, Track BPM）の表示ON/OFF切り替え。
   * スマホ、タブレット、PCのどのサイズにでも対応するレスポンシブデザイン。
+
+## DJ Agent 拡張 (既定OFF)
+
+SyndocalのShow Control、ペダル、rekordbox MIDI出力は、一般利用者向けの
+Now Playing本体とは分離された任意拡張です。既定では無効で、次のいずれかを
+明示した場合だけ、既存Nodeサーバー内で起動します。
+
+~~~powershell
+$env:DJ_AGENT_ENABLED = "true"
+npm start
+~~~
+
+または DJ_AGENT_CONFIG_PATH にJSON設定ファイルを指定します。最小例は次の
+とおりです。Syndocalの既存プロトコルはこのリポジトリに仕様証拠がないため、
+adapterは未設定のままでは利用不可です。汎用JSONを試す場合だけ
+`"adapter": "generic-json"` を明示してください。これは相互運用を証明する
+契約ではなく、実際のSyndocal/KDMX仕様が確定した場合に差し替えるadapter境界です。
+
+~~~json
+{
+  "enabled": true,
+  "allowRemoteActions": false,
+  "syndocal": {
+    "host": "192.168.10.20",
+    "port": 9100,
+    "path": "/ws",
+    "nic": "192.168.10.10",
+    "adapter": "generic-json"
+  },
+  "pedal": {
+    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
+  },
+  "midi": {
+    "device": "Virtual MIDI",
+    "mappings": {
+      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
+      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
+      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
+      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
+    },
+    "deckChannels": { "1": 1, "2": 2 },
+    "filter": { "startValue": 127, "endValue": 0, "durationMs": 2000, "updateIntervalMs": 50 },
+    "releaseFade": {
+      "enabled": true, "mapping": "releaseFade", "target": "deck",
+      "startValue": 127, "endValue": 0, "durationMs": 1000,
+      "updateIntervalMs": 50, "resetAfterStop": true, "resetValue": 127
+    },
+    "releaseMacro": {
+      "enabled": true,
+      "sequence": "filter-then-fade",
+      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
+      "resetAfterStop": true
+    }
+  }
+}
+~~~
+
+DJ_AGENT_ENABLED未設定時はoptionalなWebSocket/MIDI/global-hotkey依存を読み込まず、
+SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、HTTP APIは
+継続します。拡張を有効にした場合も、/api/dj-agent/actions/loop-half、
+/api/dj-agent/actions/filter-close、/api/dj-agent/actions/release、
+/api/dj-agent/actions/track-active は物理ペダルと同じAction経路を使う診断用
+エンドポイントです。Windows global hotkey用adapterとMIDI transportは実行時に
+optional requireされ、未導入なら機能を無効表示して本体を停止させません。
+読み取りAPIはLANから利用できますが、POST actionは既定でIPv4/IPv6 loopback
+だけに限定されます。明示的に `DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` を設定した
+場合のみリモートactionを許可します。ACKが必要なDJ_RELEASE/DJ_LOOP_STATEは
+送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/send-failed
+を `/api/dj-agent/status` とUIに反映します。
+
+Syndocalを無効にしたローカル専用構成では、従来どおりMIDI操作を単独で
+継続します。Syndocal handoffを有効にした構成では、初回接続中・再接続中・
+切断中、および再接続後に権威`DJ_TIMELINE_STATE`を受信するまで、Stage 1の
+F13/F14/F15をfail-closedにしてrekordbox MIDIを送信しません。`idle`/
+`stopped`/`ended`/`reset`のsnapshotが確定した後だけStage 1へ戻ります。
+
+MIDIをRekordboxのmaster deckごとに分ける場合は、`midi.deckChannels` に
+`{"1":1,"2":2}` のようなdeck番号→MIDI channel（1〜16）を指定します。
+loop-half、release、filter rampの全CC送信に適用され、未指定のdeckは各mappingの
+`channel`へfallbackします。実行中のaction resultとDJ_RELEASE/DJ_LOOP_STATEの
+payloadには `targetDeck` と `targetChannel` が含まれます。環境変数では
+`MIDI_DECK_CHANNELS` に同じJSONを指定できます。
+
+### Pedal handoff modes
+
+The physical bindings are an explicit state machine. In Stage 1, F13 is an
+optional release macro. Its default `sequence:"parallel"` keeps the existing
+behavior: Filter HP 64→127 and the master deck's `ChannelFader` 127→0 run in
+parallel for one second. With `sequence:"filter-then-fade"`, the Filter ramp
+must complete successfully before the ChannelFader ramp sends its first MIDI
+message. Only after both ramps succeed does the agent send the deck Cue/Stop,
+restore Filter 64 and Fader 127, send `DJ_RELEASE`, and enter
+`handoff-pending`. Filter or fade failure never sends Stop/Release; a fade
+failure attempts a safe Filter reset and reports the result. If the macro is
+not configured, the legacy direct stop/release path remains available. F14
+keeps the local LoopHalf mapping. F15 is deliberately inactive in Stage 1 and
+sends neither MIDI nor Syndocal events.
+
+Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"` changes the
+mode to `timeline-control`. Stage 2 maps F13/F15 to
+`DJ_TIMELINE_BEAT_JUMP` with `bars:-4/+4`, and F14 to the absolute
+`DJ_TIMELINE_LOOP_SET {"active":boolean}`. Stage 2 never sends Rekordbox MIDI.
+Disconnects, missing snapshots, invalid state broadcasts, and ACK failures are
+fail-closed; a disconnected timeline session never falls back to local MIDI.
+See [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md) for the handoff
+contract and a direct Learn mapping example. The standard Rekordbox CSV uses
+the deck-specific `ChannelFader` control (for example `ChannelFader,,KnobSlider,,B011,B111,...`);
+the CustomMIDI1 example uses Filter CC16 (`B010`) and release-fade CC17
+(`B011`/`B111` for Deck 1/2), with the actual deck channel selected by
+`deckChannels`.
+
+配布時は `@julusian/midi` と `uiohook-napi` をoptionalDependenciesとして解決し、
+Windows native prebuildをpkgのassetsに含めます。機器やnative moduleがない環境でも
+本体は起動継続します。既定adapterの相互運用は未検証です。
+環境変数の導線と既定値は [`.env.example`](.env.example) にまとめています。
 
 ---
 
@@ -89,6 +227,8 @@ git push origin v1.x.x
 ```
 
 ローカルでビルドしたい場合は `npm run build:dist` を実行します。Inno Setup がなければ ZIP で出力されます。
+`server.exe` は `@yao-pkg/pkg@6.22.0` のWindows x64 prebuiltが取得できる
+`node22-win-x64` targetで生成します（`package.json`とbuild scriptで一致）。
 
 ---
 
@@ -111,5 +251,5 @@ Socket.IOイベントは後方互換のまま `loopStates` を含み、ループ
 ## Known Issues & Troubleshooting
 
 - **シグネチャの不一致**: Rekordbox のアップデートが行われた場合、関数のメモリアドレスを検索・フックするための「シグネチャ」が無効になる可能性があります。その場合は `hookdll.cpp` のシグネチャ文字列の再調査および更新が必要です。
-- **補完機能**: `PYTHON_BRIDGE_ENABLED` により、メタデータがHook内で取りきれなかったケースでもデータベース解析等により情報の補完が行われます（既定で有効）。
+- **補完機能**: 現在のserver buildでは `PYTHON_BRIDGE_ENABLED=false` がコード固定されており、環境変数だけではDB補完を有効化できません。再度有効化する場合はコード変更と実行環境での再検証が必要です。
 - **未マップイベント**: 新しいRekordbox環境において、DLLから未知のイベント名が到着した場合は、UIのDEBUG LOGセクションに `Unmapped hook event` として出力されます。

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <cctype>
 #include <cwctype>
 #include <string>
 #include <unordered_set>
@@ -105,6 +106,8 @@ uint32_t g_trackIdMisses[4] = {};
 uint32_t g_loadDetourHits = 0;
 ULONGLONG g_lastTrackDiagLogTick = 0;
 ULONGLONG g_lastLoadDetourLogTick = 0;
+ULONGLONG g_lastLoopDiagTick = 0;
+std::string g_lastLoopDiagKey;
 
 // Loop 状態は OLVC の明示的なプロパティ通知からのみ構築する。
 // レイアウトを推測して UiPlayer のメモリを走査しないので、過去版にも
@@ -376,6 +379,34 @@ bool is_likely_whole_beat_loop_length(uintptr_t rawValue) {
   }
 }
 
+bool is_likely_loop_olvc_name(const char* name) {
+  if (!name || !looks_like_string(name, 96)) {
+    return false;
+  }
+  size_t len = 0;
+  for (; len < 80 && name[len] != '\0'; ++len) {
+    const unsigned char c = static_cast<unsigned char>(name[len]);
+    if (c < 0x20 || c > 0x7E) {
+      return false;
+    }
+  }
+  if (len <= 1 || len >= 80) {
+    return false;
+  }
+  for (size_t i = 0; i + 3 < len; ++i) {
+    const char c0 = static_cast<char>(tolower(static_cast<unsigned char>(name[i])));
+    const char c1 = static_cast<char>(tolower(static_cast<unsigned char>(name[i + 1])));
+    const char c2 = static_cast<char>(tolower(static_cast<unsigned char>(name[i + 2])));
+    const char c3 = static_cast<char>(tolower(static_cast<unsigned char>(name[i + 3])));
+    if (c0 == 'l' && c1 == 'o' && c2 == 'o' && c3 == 'p') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool is_likely_track_id(uint32_t value);
+
 void reset_loop_state_for_track(int deckOneBased, uint32_t trackId) {
   if (deckOneBased < 1 || deckOneBased > 4 || !is_likely_track_id(trackId)) {
     return;
@@ -485,6 +516,62 @@ void observe_loop_olvc(int deckOneBased, const char* name, uintptr_t rawValue) {
   if (changed) {
     send_loop_state_if_changed(deckOneBased);
   }
+}
+
+void send_loop_olvc_diagnostic(int deckOneBased, const char* name, uintptr_t rawValue) {
+  if (deckOneBased < 1 || deckOneBased > 4 || !is_likely_loop_olvc_name(name)) {
+    return;
+  }
+
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  if (g_lastLoopDiagTick != 0 && nowTick - g_lastLoopDiagTick < 250) {
+    return;
+  }
+
+  uint32_t valueAtRaw = 0;
+  const bool hasValueAtRaw = rawValue != 0 && safe_read_u32(rawValue, valueAtRaw);
+  uintptr_t pointerAtRaw = 0;
+  const bool hasPointerAtRaw = rawValue != 0 && safe_read_ptr(rawValue, pointerAtRaw);
+  uint32_t valueAtPointer = 0;
+  const bool hasValueAtPointer =
+      hasPointerAtRaw && pointerAtRaw >= 0x10000 &&
+      pointerAtRaw <= 0x00007FFFFFFFFFFFULL &&
+      safe_read_u32(pointerAtRaw, valueAtPointer);
+
+  std::string key = std::to_string(deckOneBased);
+  key.push_back('|');
+  key += name;
+  key.push_back('|');
+  key += std::to_string(static_cast<unsigned long long>(rawValue));
+  key.push_back('|');
+  key += hasValueAtRaw ? std::to_string(valueAtRaw) : "-";
+  key.push_back('|');
+  key += hasPointerAtRaw ? std::to_string(static_cast<unsigned long long>(pointerAtRaw)) : "-";
+  key.push_back('|');
+  key += hasValueAtPointer ? std::to_string(valueAtPointer) : "-";
+  if (key == g_lastLoopDiagKey) {
+    return;
+  }
+
+  std::string message = "loop-olvc diag deck=";
+  message += std::to_string(deckOneBased);
+  message += " name=";
+  message += name;
+  message += " raw=";
+  message += std::to_string(static_cast<unsigned long long>(rawValue));
+  message += " u32@raw=";
+  message += hasValueAtRaw ? std::to_string(valueAtRaw) : "unreadable";
+  message += " ptr@raw=";
+  message += hasPointerAtRaw
+      ? std::to_string(static_cast<unsigned long long>(pointerAtRaw))
+      : "unreadable";
+  message += " u32@ptr=";
+  message += hasValueAtPointer ? std::to_string(valueAtPointer) : "unreadable";
+
+  const std::string escapedMessage = escape_json(message.c_str());
+  send_packet("{\"type\":\"log\",\"message\":\"" + escapedMessage + "\"}");
+  g_lastLoopDiagTick = nowTick;
+  g_lastLoopDiagKey = key;
 }
 
 void send_track_load(int deckRaw, uint32_t contentId, uintptr_t playerPtr, uintptr_t arg3, uintptr_t arg4) {
@@ -1405,6 +1492,14 @@ uintptr_t __fastcall olvc_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
   const char* name = nullptr;
   if (arg3) {
     name = *reinterpret_cast<const char**>(arg3);
+  }
+
+  // OLVC carries the deck as the same one-based value used by the existing
+  // provider path. Reject out-of-range values rather than guessing a deck.
+  const int loopDeck = arg2 >= 1 && arg2 <= 4 ? static_cast<int>(arg2) : 0;
+  if (loopDeck > 0 && is_likely_loop_olvc_name(name)) {
+    observe_loop_olvc(loopDeck, name, arg4);
+    send_loop_olvc_diagnostic(loopDeck, name, arg4);
   }
 
   if (name != nullptr &&

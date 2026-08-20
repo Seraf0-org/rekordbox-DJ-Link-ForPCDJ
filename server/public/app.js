@@ -36,6 +36,17 @@ const deck2WaveformEl = document.getElementById("deck2Waveform");
 const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
 const resetThemeEl = document.getElementById("resetTheme");
+const djAgentPanelEl = document.getElementById("djAgentPanel");
+const djAgentSyndocalStatusEl = document.getElementById("djAgentSyndocalStatus");
+const djAgentMidiStatusEl = document.getElementById("djAgentMidiStatus");
+const djAgentModeEl = document.getElementById("djAgentMode");
+const djAgentTimelineStateEl = document.getElementById("djAgentTimelineState");
+const djAgentTimelineLoopEl = document.getElementById("djAgentTimelineLoop");
+const djAgentReleaseMacroEl = document.getElementById("djAgentReleaseMacro");
+const djAgentLastEventEl = document.getElementById("djAgentLastEvent");
+const djAgentLastTimelineActionEl = document.getElementById("djAgentLastTimelineAction");
+const djAgentLastAckEl = document.getElementById("djAgentLastAck");
+const djAgentActionResultEl = document.getElementById("djAgentActionResult");
 
 const toggleAlbumEl = document.getElementById("toggleAlbum");
 const toggleGenreEl = document.getElementById("toggleGenre");
@@ -228,6 +239,82 @@ function renderLoopState(loopState, loopStateEl, cardEl) {
   loopStateEl.classList.toggle("active", formatted.active);
   if (cardEl) {
     cardEl.classList.toggle("loop-active", formatted.active);
+  }
+}
+
+function renderDjAgentStatus(status) {
+  const agent = status?.djAgent || {};
+  if (djAgentPanelEl) {
+    djAgentPanelEl.hidden = agent.enabled !== true;
+  }
+  if (agent.enabled !== true) {
+    return;
+  }
+  const syndocal = agent.syndocal || {};
+  const midi = agent.midi || {};
+  if (djAgentSyndocalStatusEl) {
+    djAgentSyndocalStatusEl.textContent = String(syndocal.state || agent.state || "DISCONNECTED").toUpperCase();
+    djAgentSyndocalStatusEl.classList.toggle("connected", syndocal.state === "connected");
+  }
+  if (djAgentMidiStatusEl) {
+    djAgentMidiStatusEl.textContent = midi.ok ? "CONNECTED" : String(midi.message || "UNAVAILABLE");
+  }
+  if (djAgentModeEl) {
+    djAgentModeEl.textContent = String(agent.mode || "dj-control").toUpperCase();
+    djAgentModeEl.classList.toggle("connected", agent.mode === "timeline-control");
+  }
+  if (djAgentTimelineStateEl) {
+    const state = agent.timelineState || "unknown";
+    djAgentTimelineStateEl.textContent = String(state).toUpperCase();
+    djAgentTimelineStateEl.classList.toggle("connected", state === "running");
+  }
+  if (djAgentTimelineLoopEl) {
+    djAgentTimelineLoopEl.textContent = agent.timelineLoopActive == null
+      ? "UNKNOWN"
+      : agent.timelineLoopActive ? "ON" : "OFF";
+  }
+  if (djAgentReleaseMacroEl) {
+    const sequence = agent.releaseMacroSequence || "parallel";
+    const phase = agent.releaseMacroPhase || "idle";
+    const reason = agent.releaseMacroReason || "";
+    djAgentReleaseMacroEl.textContent = `${sequence} · ${phase}${reason ? ` · ${reason}` : ""}`;
+  }
+  if (djAgentLastEventEl) {
+    djAgentLastEventEl.textContent = agent.lastEventType || "-";
+  }
+  if (djAgentLastTimelineActionEl) {
+    const action = agent.lastTimelineAction;
+    const delivery = action?.delivery || {};
+    djAgentLastTimelineActionEl.textContent = action?.action
+      ? `${action.action} · ${String(delivery.state || (action.ok ? "acknowledged" : "pending")).toUpperCase()}`
+      : "-";
+  }
+  if (djAgentLastAckEl) {
+    const ack = syndocal.lastAckResult;
+    djAgentLastAckEl.textContent = ack
+      ? `${String(ack.state || "ACK").toUpperCase()} · ${ack.type || "event"}${ack.message ? ` · ${ack.message}` : ""}`
+      : syndocal.lastAckAt || "-";
+  }
+  if (djAgentActionResultEl) {
+    const action = agent.lastAction;
+    const deliveryState = action?.delivery?.state || action?.delivery?.ackState || null;
+    const state = deliveryState || (action?.ok === true ? "acknowledged" : null);
+    let text = "Ready";
+    let failure = false;
+    if (action?.action) {
+      if (action.ignored === true || action.state === "inactive") {
+        text = `Ignored · ${action.action}${action.reason ? ` · ${action.reason}` : ""}`;
+      } else if (state === "pending") {
+        text = `Pending · ${action.action}`;
+      } else if (action.ok === true) {
+        text = `Success · ${action.action}`;
+      } else {
+        text = `Failed · ${action.action}${action.reason ? ` · ${action.reason}` : ""}`;
+        failure = true;
+      }
+    }
+    djAgentActionResultEl.textContent = text;
+    djAgentActionResultEl.classList.toggle("error", failure);
   }
 }
 
@@ -490,6 +577,7 @@ function render(state) {
   const deckMethods = sourceInfo?.deckMethods || {};
   const rbStatus = rb.ok ? "Rekordbox: OK" : `Rekordbox: ${rb.message || "NG"}`;
   const hookStatus = hook.ok ? "Hook: OK" : `Hook: ${hook.message || "NG"}`;
+  renderDjAgentStatus(status);
   if (statusLineEl) {
     statusLineEl.textContent = `${rbStatus} | ${hookStatus}`;
   }
@@ -588,6 +676,48 @@ function initSortableFields() {
 }
 
 initSortableFields();
+
+for (const button of document.querySelectorAll("[data-dj-action]")) {
+  button.addEventListener("click", async () => {
+    const action = button.getAttribute("data-dj-action");
+    if (!action) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Pending · ${action}`;
+        djAgentActionResultEl.classList.remove("error");
+      }
+      const response = await fetch(`/api/dj-agent/actions/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const result = await response.json().catch(() => ({}));
+      const ignored = result?.ignored === true || result?.result?.ignored === true || result?.result?.state === "inactive";
+      if (djAgentActionResultEl && ignored) {
+        djAgentActionResultEl.textContent = `Ignored · ${action}${result?.result?.reason ? ` · ${result.result.reason}` : ""}`;
+        djAgentActionResultEl.classList.remove("error");
+      } else if (djAgentActionResultEl && result.pending !== true && (!response.ok || result.ok !== true)) {
+        const reason = result?.result?.reason || result?.error || result?.ackState || `HTTP ${response.status}`;
+        djAgentActionResultEl.textContent = `Failed · ${action} · ${reason}`;
+        djAgentActionResultEl.classList.add("error");
+      } else if (djAgentActionResultEl && result.pending === true) {
+        djAgentActionResultEl.textContent = `Pending · ${action} · ACK`;
+      } else if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Success · ${action}`;
+      }
+    } catch (error) {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Failed · ${action} · network error`;
+        djAgentActionResultEl.classList.add("error");
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
 
 fetchInitialState().finally(() => {
   connectSocket();

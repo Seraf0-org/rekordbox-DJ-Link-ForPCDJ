@@ -10,6 +10,13 @@ const { createAbletonLinkProvider } = require("./providers/abletonLinkProvider")
 const { createHookUdpProvider } = require("./providers/hookUdpProvider");
 const { resolveRekordboxExePath } = require("./rekordboxInstall");
 const { upsertLoopState } = require("./loopState");
+const { loadDjAgentConfig } = require("./dj-agent/config");
+const { createSyndocalClient } = require("./dj-agent/syndocalClient");
+const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetector");
+const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
+const { createPedalController } = require("./dj-agent/pedalController");
+const { createShowEventRouter } = require("./dj-agent/showEventRouter");
+const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
 
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
@@ -38,6 +45,7 @@ const ABLETON_LINK_INITIAL_TEMPO = Number(process.env.ABLETON_LINK_INITIAL_TEMPO
 const HOOK_UDP_ENABLED = process.env.HOOK_UDP_ENABLED !== "false";
 const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
+const DJ_AGENT_CONFIG = loadDjAgentConfig();
 
 const app = express();
 const server = http.createServer(app);
@@ -73,6 +81,33 @@ const state = {
     rekordbox: { ok: false, message: "Not initialized", updatedAt: null },
     abletonLink: { ok: false, message: "Not initialized", updatedAt: null, peers: 0 },
     hook: { ok: false, message: "Not initialized", updatedAt: null },
+    djAgent: {
+      enabled: DJ_AGENT_CONFIG.enabled,
+      allowRemoteActions: DJ_AGENT_CONFIG.allowRemoteActions,
+      ok: false,
+      state: DJ_AGENT_CONFIG.enabled ? "not-started" : "disabled",
+      message: DJ_AGENT_CONFIG.enabled
+        ? "DJ Agent not started"
+        : "DJ Agent extension disabled by config",
+      updatedAt: null,
+      syndocal: null,
+      midi: null,
+      pedal: null,
+      mode: "dj-control",
+      timelineState: "unknown",
+      timelineLoopActive: null,
+      timelineId: null,
+      timelinePositionBars: null,
+      timelineSnapshotReady: false,
+      lastTimelineAction: null,
+      lastTimelineWarning: null,
+      releaseMacroSequence: "parallel",
+      releaseMacroPhase: "idle",
+      releaseMacroReason: null,
+      releaseMacroActive: false,
+      lastAction: null,
+      lastActionAt: null,
+    },
   },
   warnings: [],
   debugLogs: [],
@@ -948,6 +983,171 @@ const hookUdpProvider = createHookUdpProvider({
   port: HOOK_UDP_PORT,
 });
 
+const djAgentDetector = createTrackActivityDetector();
+const djAgentSyndocalClient = createSyndocalClient({
+  enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.syndocal.enabled,
+  host: DJ_AGENT_CONFIG.syndocal.host,
+  port: DJ_AGENT_CONFIG.syndocal.port,
+  path: DJ_AGENT_CONFIG.syndocal.path,
+  nic: DJ_AGENT_CONFIG.syndocal.nic,
+  token: DJ_AGENT_CONFIG.syndocal.token,
+  adapter: DJ_AGENT_CONFIG.syndocal.adapter,
+  reconnectMinMs: DJ_AGENT_CONFIG.syndocal.reconnectMinMs,
+  reconnectMaxMs: DJ_AGENT_CONFIG.syndocal.reconnectMaxMs,
+  heartbeatMs: DJ_AGENT_CONFIG.syndocal.heartbeatMs,
+  ackTimeoutMs: DJ_AGENT_CONFIG.syndocal.ackTimeoutMs,
+  stateSyncProvider: () => (djAgentRouter ? djAgentRouter.getStateSync() : {}),
+});
+const djAgentMidi = createRekordboxMidi({
+  enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.midi.enabled,
+  moduleName: DJ_AGENT_CONFIG.midi.moduleName,
+  device: DJ_AGENT_CONFIG.midi.device,
+  port: DJ_AGENT_CONFIG.midi.port,
+  deckChannels: DJ_AGENT_CONFIG.midi.deckChannels,
+  mappings: DJ_AGENT_CONFIG.midi.mappings,
+  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
+  filter: DJ_AGENT_CONFIG.midi.filter,
+});
+let djAgentRouter = null;
+const djAgentPedal = createPedalController({
+  enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.pedal.enabled,
+  bindings: DJ_AGENT_CONFIG.pedal.bindings,
+  moduleName: DJ_AGENT_CONFIG.pedal.moduleName,
+  actionSink: (action) => djAgentRouter?.triggerAction(action),
+});
+djAgentRouter = createShowEventRouter({
+  detector: djAgentDetector,
+  syndocalClient: djAgentSyndocalClient,
+  midi: djAgentMidi,
+  pedal: djAgentPedal,
+  releaseReset: DJ_AGENT_CONFIG.releaseReset,
+  releaseMacro: DJ_AGENT_CONFIG.midi.releaseMacro,
+});
+
+function updateDjAgentStatus() {
+  const routerStatus = djAgentRouter.getStatus();
+  const syndocal = routerStatus.syndocal || {};
+  const enabled = DJ_AGENT_CONFIG.enabled;
+  state.status.djAgent = {
+    ...state.status.djAgent,
+    enabled,
+    ok: enabled && (syndocal.state === "connected" || syndocal.state === "disabled"),
+    state: enabled ? syndocal.state || "not-started" : "disabled",
+    message: enabled
+      ? syndocal.message || "DJ Agent running"
+      : "DJ Agent extension disabled by config",
+    syndocal,
+    midi: routerStatus.midi,
+    pedal: routerStatus.pedal,
+    mode: routerStatus.mode,
+    timelineState: routerStatus.timelineState,
+    timelineLoopActive: routerStatus.timelineLoopActive,
+    timelineId: routerStatus.timelineId,
+    timelinePositionBars: routerStatus.timelinePositionBars,
+    timelineSnapshotReady: routerStatus.timelineSnapshotReady,
+    lastTimelineAction: routerStatus.lastTimelineAction,
+    lastTimelineWarning: routerStatus.lastTimelineWarning,
+    releaseMacroSequence: routerStatus.releaseMacroSequence,
+    releaseMacroPhase: routerStatus.releaseMacroPhase,
+    releaseMacroReason: routerStatus.releaseMacroReason,
+    releaseMacroActive: routerStatus.releaseMacroActive,
+    lastAction: routerStatus.lastAction || state.status.djAgent.lastAction || null,
+    loopDivision: routerStatus.loopDivision,
+    released: routerStatus.released,
+    updatedAt: new Date().toISOString(),
+  };
+  emitState();
+}
+
+if (DJ_AGENT_CONFIG.warning) {
+  mergeWarning(DJ_AGENT_CONFIG.warning);
+}
+
+djAgentSyndocalClient.on("status", updateDjAgentStatus);
+djAgentSyndocalClient.on("ack", updateDjAgentStatus);
+djAgentSyndocalClient.on("delivery", updateDjAgentStatus);
+djAgentMidi.on("status", updateDjAgentStatus);
+djAgentPedal.on("status", updateDjAgentStatus);
+djAgentRouter.on("state", updateDjAgentStatus);
+djAgentRouter.on("warning", (warning) => {
+  if (warning?.message) {
+    mergeWarning(`DJ Agent timeline: ${warning.message}`);
+  }
+  updateDjAgentStatus();
+});
+djAgentRouter.on("action", (actionResult) => {
+  state.status.djAgent = {
+    ...state.status.djAgent,
+    lastAction: actionResult || null,
+    lastActionAt: new Date().toISOString(),
+  };
+  const deliveryState = actionResult?.delivery?.state;
+  if (actionResult?.ok === false && deliveryState && deliveryState !== "pending") {
+    mergeWarning(`DJ Agent action failed: ${actionResult.action} (${actionResult.reason || deliveryState})`);
+  }
+  updateDjAgentStatus();
+});
+djAgentRouter.on("event", (event) => {
+  state.status.djAgent = {
+    ...state.status.djAgent,
+    lastEventType: event?.type || null,
+    lastEventId: event?.eventId || null,
+    lastDelivery: event?.delivery || null,
+  };
+  if (
+    event?.source === "action" &&
+    state.status.djAgent.lastAction?.delivery?.eventId === event.eventId
+  ) {
+    const deliveryState = event.delivery?.state || event.delivery?.ackState;
+    const routerStatus = djAgentRouter.getStatus();
+    const authoritativeRunning = routerStatus.mode === "timeline-control" &&
+      routerStatus.timelineState === "running";
+    state.status.djAgent.lastAction = {
+      ...state.status.djAgent.lastAction,
+      delivery: event.delivery,
+      ok: deliveryState === "acknowledged" && (
+        state.status.djAgent.lastAction.mode === "timeline-control" ||
+        state.status.djAgent.lastAction.midiSent !== false
+      ),
+      phase: event.type === "DJ_RELEASE" &&
+        authoritativeRunning
+        ? routerStatus.releaseMacroPhase
+        : event.type === "DJ_RELEASE" &&
+            ["send-failed", "rejected", "timed-out"].includes(deliveryState)
+          ? "failed"
+        : state.status.djAgent.lastAction.phase,
+      reason: deliveryState === "acknowledged" ? null : event.delivery?.reason || deliveryState,
+    };
+  }
+  if (
+    event?.delivery &&
+    ["send-failed", "rejected", "timed-out"].includes(event.delivery.state)
+  ) {
+    mergeWarning(
+      `DJ Agent event not delivered: ${event.type} (${event.delivery.reason || event.delivery.state})`
+    );
+  }
+  updateDjAgentStatus();
+});
+
+// The extension subscribes to the existing provider events. It does not open
+// another UDP socket and it never injects another DLL.
+hookUdpProvider.on("snapshot", (snapshot) => {
+  if (DJ_AGENT_CONFIG.enabled) {
+    djAgentRouter.onSnapshot(snapshot);
+  }
+});
+hookUdpProvider.on("track-loaded", (event) => {
+  if (DJ_AGENT_CONFIG.enabled) {
+    djAgentRouter.onTrackLoaded(event);
+  }
+});
+hookUdpProvider.on("master-change", (event) => {
+  if (DJ_AGENT_CONFIG.enabled) {
+    djAgentRouter.onMasterChange(event);
+  }
+});
+
 abletonLinkProvider.on("status", (status) => {
   state.status.abletonLink = {
     ...state.status.abletonLink,
@@ -1021,6 +1221,9 @@ hookUdpProvider.on("status", (status) => {
   }
   if (!status.ok && status.message && !status.message.includes("disabled by config")) {
     mergeWarning(status.message);
+    if (/target process exited|waiting for connection/i.test(status.message || "")) {
+      djAgentDetector.reset();
+    }
   }
   emitState();
 });
@@ -1240,7 +1443,7 @@ app.use(express.json());
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Last-Event-ID");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (_req.method === "OPTIONS") {
     res.status(204).end();
     return;
@@ -1291,6 +1494,54 @@ app.get("/api/state", (_req, res) => {
   res.json(buildSnapshot());
 });
 
+function handleDjAgentAction(action, _req, res) {
+  if (!DJ_AGENT_CONFIG.enabled) {
+    res.status(404).json({
+      ok: false,
+      error: "DJ Agent extension is disabled; set DJ_AGENT_ENABLED=true or use DJ_AGENT_CONFIG_PATH",
+    });
+    return;
+  }
+  if (!DJ_AGENT_CONFIG.allowRemoteActions && !isLoopbackRequest(_req)) {
+    res.status(403).json({
+      ok: false,
+      error: "DJ Agent actions are loopback-only unless DJ_AGENT_ALLOW_REMOTE_ACTIONS=true",
+    });
+    return;
+  }
+  const result = djAgentRouter.triggerAction(action);
+  const ackState = result?.delivery?.state || result?.delivery?.ackState || null;
+  const ok = result?.ok === true;
+  const pending = ackState === "pending";
+  const ignored = result?.ignored === true || result?.state === "inactive";
+  res.status(pending ? 202 : ok || ignored ? 200 : 503).json({
+    ok,
+    ackState,
+    pending,
+    ignored,
+    action,
+    result,
+    status: state.status.djAgent,
+  });
+}
+
+// These diagnostics use the same action path as the physical pedal. They are
+// deliberately unavailable while the extension feature gate is off.
+app.post("/api/dj-agent/actions/loop-half", (req, res) => handleDjAgentAction("loop-half", req, res));
+app.post("/api/dj-agent/actions/filter-close", (req, res) => handleDjAgentAction("filter-close", req, res));
+app.post("/api/dj-agent/actions/release", (req, res) => handleDjAgentAction("release", req, res));
+app.post("/api/dj-agent/actions/track-active", (req, res) => handleDjAgentAction("track-active", req, res));
+app.get("/api/dj-agent/status", (_req, res) => {
+  // Status is read-only and remains remotely readable. Disabled is a normal
+  // HTTP 200 response with enabled:false.
+  res.status(200).json({
+    enabled: DJ_AGENT_CONFIG.enabled,
+    allowRemoteActions: DJ_AGENT_CONFIG.allowRemoteActions,
+    status: state.status.djAgent,
+    state: djAgentRouter.getStateSync(),
+  });
+});
+
 function handleEventStream(req, res) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -1333,6 +1584,7 @@ io.on("connection", (socket) => {
 });
 
 function shutdown() {
+  djAgentRouter.stop();
   hookUdpProvider.stop();
   abletonLinkProvider.stop();
   if (pythonBridge) {
@@ -1349,6 +1601,10 @@ if (pythonBridge) {
 }
 abletonLinkProvider.start();
 hookUdpProvider.start();
+if (DJ_AGENT_CONFIG.enabled) {
+  djAgentRouter.start();
+  updateDjAgentStatus();
+}
 
 server.listen(PORT, () => {
   console.log(`rb-output server listening on http://0.0.0.0:${PORT}`);

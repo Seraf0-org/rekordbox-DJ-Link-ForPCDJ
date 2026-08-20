@@ -259,6 +259,46 @@ button:focus {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 52%, transparent);
 }
 
+.dj-agent-panel[hidden] {
+  display: none;
+}
+
+.dj-agent-status,
+.dj-agent-value {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dj-agent-status.connected {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.dj-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.dj-agent-action-result {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 32%, transparent);
+  color: var(--accent-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dj-agent-action-result.error {
+  border-color: #e47f89;
+  color: #e47f89;
+}
+
 #warnings {
   margin: 8px 0 0;
   padding-left: 18px;

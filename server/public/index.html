@@ -79,6 +79,55 @@
         </details>
       </section>
 
+      <section id="djAgentPanel" class="card dj-agent-panel" hidden>
+        <div class="label">DJ AGENT EXTENSION</div>
+        <div class="row">
+          <span class="label">Syndocal</span>
+          <span id="djAgentSyndocalStatus" class="dj-agent-status">DISCONNECTED</span>
+        </div>
+        <div class="row">
+          <span class="label">MIDI</span>
+          <span id="djAgentMidiStatus" class="dj-agent-status">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Pedal Mode</span>
+          <span id="djAgentMode" class="dj-agent-status">DJ-CONTROL</span>
+        </div>
+        <div class="row">
+          <span class="label">Timeline State</span>
+          <span id="djAgentTimelineState" class="dj-agent-status">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Timeline Loop</span>
+          <span id="djAgentTimelineLoop" class="dj-agent-status">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Release Macro</span>
+          <span id="djAgentReleaseMacro" class="dj-agent-value">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Last Show Event</span>
+          <span id="djAgentLastEvent" class="dj-agent-value">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Last Timeline Action</span>
+          <span id="djAgentLastTimelineAction" class="dj-agent-value">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Last ACK</span>
+          <span id="djAgentLastAck" class="dj-agent-value">-</span>
+        </div>
+        <div id="djAgentActionResult" class="dj-agent-action-result" role="status" aria-live="polite" aria-atomic="true">
+          Ready
+        </div>
+        <div class="dj-agent-actions">
+          <button type="button" data-dj-action="loop-half">Test Loop Half</button>
+          <button type="button" data-dj-action="filter-close">Test Filter</button>
+          <button type="button" data-dj-action="release">Test Release</button>
+          <button type="button" data-dj-action="track-active">Test Track Active</button>
+        </div>
+      </section>
+
       <section class="deck-grid">
         <article id="deck1Card" class="card deck-card">
           <div class="deck-content">
