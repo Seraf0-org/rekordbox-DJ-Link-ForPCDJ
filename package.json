@@ -27,8 +27,12 @@
     "node": ">=18.0.0"
   },
   "pkg": {
-    "scripts": ["server/**/*.js"],
+    "scripts": [
+      "server/**/*.js",
+      "node_modules/ws/**/*.js"
+    ],
     "assets": [
+      "node_modules/ws/**/*",
       "node_modules/@julusian/midi/prebuilds/**/*",
       "node_modules/@julusian/midi/**/*.node",
       "node_modules/uiohook-napi/prebuilds/**/*",
