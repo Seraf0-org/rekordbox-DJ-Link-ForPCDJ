@@ -4,6 +4,18 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
+## v1.1.1 リリースノート
+
+Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化しました。
+
+* クロスフェーダーとDeck 1/2のチャンネルフェーダー量をRekordbox内部から取得し、Web UIとAPIへリアルタイム配信。
+* Track BPMの一時的な欠落、再生時間の遅延、ページ再読み込みが必要になる問題を修正。
+* Time欄へ波形付きシークバーを追加し、ループ区間の設定と実際のループ動作を区別。
+* Warningsの折りたたみ、全体幅レイアウト、カスタムスクロールバー、リポジトリ・クレジット付きフッターを追加。
+* WebサーバーによるRekordboxの定期監視、自動起動、自動再注入を廃止。Rekordbox再起動後の注入は明示操作のみ。
+* Syndocalの`generic-json`と`syndocal-envelope-v1`を明示選択可能にし、build identityをread-only APIへ追加。
+* npmとPython依存関係の既知脆弱性監査は0件。Nodeテスト69件、Hook DLLビルド、Rekordbox 7.2.18実機接続を確認済み。
+
 ## v1.1.0 リリースノート
 
 既存のNow Playing本体との後方互換を保ったまま、Rekordbox連携と任意の

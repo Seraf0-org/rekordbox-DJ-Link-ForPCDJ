@@ -21,7 +21,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-alpha14-mixer-faders";
+constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-v1.1.1-mixer-faders";
 constexpr const char* kUdpHost = "127.0.0.1";
 constexpr uint16_t kUdpPort = 22346;
 
