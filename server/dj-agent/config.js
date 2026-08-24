@@ -145,6 +145,9 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, cwd = process.cwd() 
     : asBoolean(merged.enabled, false);
 
   const syndocalFile = pickObject(merged.syndocal);
+  const syndocalToken = Object.hasOwn(env, "SYNDOCAL_TOKEN")
+    ? env.SYNDOCAL_TOKEN
+    : syndocalFile.token;
   const pedalFile = pickObject(merged.pedal);
   const midiFile = pickObject(merged.midi);
   const releaseFadeValue =
@@ -191,15 +194,19 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, cwd = process.cwd() 
       enabled: asBoolean(env.SYNDOCAL_ENABLED, asBoolean(syndocalFile.enabled, enabled)),
       host: String(env.SYNDOCAL_HOST || syndocalFile.host || "127.0.0.1").trim(),
       port: asNumber(env.SYNDOCAL_PORT || syndocalFile.port, 9100, { min: 1, max: 65535 }),
-      path: String(env.SYNDOCAL_PATH || syndocalFile.path || "/ws").trim() || "/ws",
+      path: String(env.SYNDOCAL_PATH || syndocalFile.path || "/dj-link").trim() || "/dj-link",
       nic: String(env.SYNDOCAL_NIC || syndocalFile.nic || syndocalFile.networkInterface || "").trim(),
-      token: String(env.SYNDOCAL_TOKEN || syndocalFile.token || "").trim(),
-      // No protocol is assumed. generic-json must be selected explicitly or
-      // supplied through an adapterFactory at the integration boundary.
-      adapter: String(env.SYNDOCAL_WS_ADAPTER || syndocalFile.adapter || "").trim(),
+      // Preserve the token exactly for the client preflight; do not trim,
+      // persist, or log credentials here.
+      token: typeof syndocalToken === "string" ? syndocalToken : "",
+      adapter: String(env.SYNDOCAL_WS_ADAPTER || syndocalFile.adapter || "generic-json").trim(),
       reconnectMinMs: asNumber(syndocalFile.reconnectMinMs, 500, { min: 50, max: 60_000 }),
       reconnectMaxMs: asNumber(syndocalFile.reconnectMaxMs, 10_000, { min: 250, max: 300_000 }),
-      heartbeatMs: asNumber(syndocalFile.heartbeatMs, 10_000, { min: 1_000, max: 300_000 }),
+      heartbeatMs: asNumber(
+        env.SYNDOCAL_HEARTBEAT_MS ?? syndocalFile.heartbeatMs,
+        5_000,
+        { min: 1_000, max: 300_000 },
+      ),
       ackTimeoutMs: asNumber(syndocalFile.ackTimeoutMs, 5_000, { min: 100, max: 120_000 }),
     },
     pedal: {

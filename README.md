@@ -4,6 +4,18 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
+## v1.1.1 リリースノート
+
+Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化しました。
+
+* クロスフェーダーとDeck 1/2のチャンネルフェーダー量をRekordbox内部から取得し、Web UIとAPIへリアルタイム配信。
+* Track BPMの一時的な欠落、再生時間の遅延、ページ再読み込みが必要になる問題を修正。
+* Time欄へ波形付きシークバーを追加し、ループ区間の設定と実際のループ動作を区別。
+* Warningsの折りたたみ、全体幅レイアウト、カスタムスクロールバー、リポジトリ・クレジット付きフッターを追加。
+* WebサーバーによるRekordboxの定期監視、自動起動、自動再注入を廃止。Rekordbox再起動後の注入は明示操作のみ。
+* Syndocalの`generic-json`と`syndocal-envelope-v1`を明示選択可能にし、build identityをread-only APIへ追加。
+* npmとPython依存関係の既知脆弱性監査は0件。Nodeテスト69件、Hook DLLビルド、Rekordbox 7.2.18実機接続を確認済み。
+
 ## v1.1.0 リリースノート
 
 既存のNow Playing本体との後方互換を保ったまま、Rekordbox連携と任意の
@@ -17,15 +29,18 @@ DJ Agent拡張を強化しました。
   （`filter-then-fade`、従来互換のparallelも選択可）、
   F14のLoopHalf、F15のinactive。authoritative timelineがrunningになるStage 2では、
   F13/F15が±4 bars、F14がabsolute loop toggleとなり、Rekordbox MIDIは送信しません。
-* Syndocal handoffはsnapshot待ち・切断・再接続をfail-closedにし、eventId/sequence/
+* Syndocal handoffはtimeline-controlだけをsnapshot待ち・切断・再接続時にfail-closedにし、eventId/sequence/
   ACK・pending/rejected/timed-out/send-failedを状態とUIへ反映。
 * read-only APIは従来どおりLANから利用でき、DJ AgentのPOST actionは既定でloopback限定。
 
-検証済み範囲は、Node test 42/42、JavaScript構文・差分検査、Node 22／
-`@yao-pkg/pkg@6.22.0` によるWindows x64配布ビルド、生成server.exeのHTTP smoke、
-optional MIDI/global-hotkey adapterの未接続時継続起動です。Rekordboxのバージョン固有の
-hook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの相互運用は、対象環境での
-実機受入試験が別途必要です。
+検証済み範囲は、Node test 54/54、JavaScript構文・差分検査、optional MIDI/global-hotkey
+adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` 相当の配布スクリプトを
+完走し、`dist/server.exe`（SHA-256
+`339ECF6E82EB463F55977F63A137CB0CB52886CD7E2874E87F5AD4724234377B`）と8エントリの
+`dist/rb-output-20260823.zip` を生成しました。packaged serverは隔離ポート8788で起動し、
+`/api/health`、`/`、`/api/dj-agent/status` のsmokeを通過しています。Rekordboxの
+バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
+相互運用は、対象環境での実機受入試験が別途必要です。
 
 ## Core Features
 
@@ -57,11 +72,19 @@ $env:DJ_AGENT_ENABLED = "true"
 npm start
 ~~~
 
-または DJ_AGENT_CONFIG_PATH にJSON設定ファイルを指定します。最小例は次の
-とおりです。Syndocalの既存プロトコルはこのリポジトリに仕様証拠がないため、
-adapterは未設定のままでは利用不可です。汎用JSONを試す場合だけ
-`"adapter": "generic-json"` を明示してください。これは相互運用を証明する
-契約ではなく、実際のSyndocal/KDMX仕様が確定した場合に差し替えるadapter境界です。
+または `DJ_AGENT_CONFIG_PATH` に、リポジトリ外のJSON設定ファイルを指定します。Nodeは
+`.env`を自動ロードしないため、`.env.example`は値の一覧を示すテンプレートです。
+トークンは`SYNDOCAL_TOKEN`などのプロセス環境、または明示した外部設定ファイルから
+読み込みます。Syndocalを有効にする場合は32〜256 UTF-8 bytesで、Unicode control文字や
+空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
+しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
+Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
+unpaired surrogateは拒否します。既定の接続先は
+KDMX互換のflat `generic-json` adapter、`/dj-link`、heartbeat 5000msです。
+adapterは`SYNDOCAL_WS_ADAPTER`で明示選択します。選択できるのは
+`generic-json`(flat frame、ACK 8フィールド固定)と
+`syndocal-envelope-v1`(KDMXレガシーv1 envelope wire、ACK 7フィールド固定)で、
+未設定・未知名はfail-closedとなり黙ってフォールバックしません。
 
 ~~~json
 {
@@ -70,9 +93,10 @@ adapterは未設定のままでは利用不可です。汎用JSONを試す場合
   "syndocal": {
     "host": "192.168.10.20",
     "port": 9100,
-    "path": "/ws",
+    "path": "/dj-link",
     "nic": "192.168.10.10",
-    "adapter": "generic-json"
+    "adapter": "generic-json",
+    "heartbeatMs": 5000
   },
   "pedal": {
     "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
@@ -111,21 +135,37 @@ SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、
 optional requireされ、未導入なら機能を無効表示して本体を停止させません。
 読み取りAPIはLANから利用できますが、POST actionは既定でIPv4/IPv6 loopback
 だけに限定されます。明示的に `DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` を設定した
-場合のみリモートactionを許可します。ACKが必要なDJ_RELEASE/DJ_LOOP_STATEは
-送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/send-failed
-を `/api/dj-agent/status` とUIに反映します。
+場合のみリモートactionを許可します。物理wire event（DJ_MASTER_CHANGED、
+DJ_MASTER_TRACK_ACTIVE、DJ_LOOP_STATE、DJ_RELEASE、DJ_TIMELINE_BEAT_JUMP、
+DJ_TIMELINE_LOOP_SET）はすべてACK必須で、送信直後を成功扱いにせず、
+pending/acknowledged/rejected/timed-out/send-failedを `/api/dj-agent/status` とUIに
+反映します。`accepted`/`duplicate`だけが成功、`no_mapping`/`rejected`はterminal failure、
+`busy`だけが同じ`eventId`・`sequence`・flat shape・socket generationのまま短い指数backoffで
+有限回再送されます。型不足・未知outcome・`ok`不整合のACKはprotocol failureとして無視し、
+ACK timeoutまでpendingを維持します。HELLO/heartbeat/State Sync/timeline requestは
+physical ID capから分離したcontrol ID/sequenceを使い、再接続時に旧physical eventを再送しません。
+timeline state requestのcaller-supplied eventIdは受け付けず、control IDはプロセス内で生成します。
+
+State Sync providerがthrow、null、undefined、またはKDMX flat validationに失敗した場合は、
+空snapshotへ置換せず、state-sync-error/send-failedとstatusへ記録してState Syncもtimeline
+requestも送信しません。valid snapshotを送信できた場合だけtimeline requestを続行します。
+physical caller eventIdはプロセス中再利用不可で、既定262144件のbounded registryが上限到達時に
+fail-closed latchします。sequenceはcontrolを含むsession wire high-waterより厳密に大きい
+safe integerだけを受け付け、rollback/fraction/overflowは送信・予約しません。
 
 Syndocalを無効にしたローカル専用構成では、従来どおりMIDI操作を単独で
-継続します。Syndocal handoffを有効にした構成では、初回接続中・再接続中・
+継続します。Syndocal handoffを有効にした構成でも、初回接続中・再接続中・
 切断中、および再接続後に権威`DJ_TIMELINE_STATE`を受信するまで、Stage 1の
-F13/F14/F15をfail-closedにしてrekordbox MIDIを送信しません。`idle`/
-`stopped`/`ended`/`reset`のsnapshotが確定した後だけStage 1へ戻ります。
+ローカルRekordbox MIDI操作は継続し、失敗するのはネットワーク送信だけです。
+`timeline-control`のStage 2操作は、接続済みかつsnapshot確定時だけ送信します。
+`idle`/`stopped`/`ended`/`reset`のsnapshotを受信するとStage 1へ戻ります。
 
 MIDIをRekordboxのmaster deckごとに分ける場合は、`midi.deckChannels` に
 `{"1":1,"2":2}` のようなdeck番号→MIDI channel（1〜16）を指定します。
 loop-half、release、filter rampの全CC送信に適用され、未指定のdeckは各mappingの
-`channel`へfallbackします。実行中のaction resultとDJ_RELEASE/DJ_LOOP_STATEの
-payloadには `targetDeck` と `targetChannel` が含まれます。環境変数では
+`channel`へfallbackします。実行中のaction resultには `targetDeck` と
+`targetChannel` が含まれます。KDMX flat wire framesはstrict fieldsだけを送信し、
+この診断情報は含めません。環境変数では
 `MIDI_DECK_CHANNELS` に同じJSONを指定できます。
 
 ### Pedal handoff modes
@@ -147,8 +187,9 @@ Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"` changes the
 mode to `timeline-control`. Stage 2 maps F13/F15 to
 `DJ_TIMELINE_BEAT_JUMP` with `bars:-4/+4`, and F14 to the absolute
 `DJ_TIMELINE_LOOP_SET {"active":boolean}`. Stage 2 never sends Rekordbox MIDI.
-Disconnects, missing snapshots, invalid state broadcasts, and ACK failures are
-fail-closed; a disconnected timeline session never falls back to local MIDI.
+Disconnects, missing snapshots, invalid state broadcasts, and ACK failures keep
+timeline-control fail-closed; Stage 1 local MIDI remains available while only
+the network side effect is marked failed or pending.
 See [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md) for the handoff
 contract and a direct Learn mapping example. The standard Rekordbox CSV uses
 the deck-specific `ChannelFader` control (for example `ChannelFader,,KnobSlider,,B011,B111,...`);
@@ -158,7 +199,8 @@ the CustomMIDI1 example uses Filter CC16 (`B010`) and release-fade CC17
 
 配布時は `@julusian/midi` と `uiohook-napi` をoptionalDependenciesとして解決し、
 Windows native prebuildをpkgのassetsに含めます。機器やnative moduleがない環境でも
-本体は起動継続します。既定adapterの相互運用は未検証です。
+本体は起動継続します。flat frameの形状はKDMX strict contractに合わせていますが、
+実際のSyndocal接続・認証・MIDI機器の受入れは対象環境で別途確認が必要です。
 環境変数の導線と既定値は [`.env.example`](.env.example) にまとめています。
 
 ---
@@ -192,11 +234,13 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 
 ### 2. ワンクリック起動 (おすすめ)
 
-プロジェクトルートにあるバッチファイルを実行するだけで、「DLLのビルド確認」→「Webサーバー起動」→「Rekordboxへのインジェクト」→「ブラウザ起動」までを全て自動で処理します。
+先にRekordboxを起動してから、プロジェクトルートにあるバッチファイルを実行してください。「DLLのビルド確認」→「Webサーバー起動」→「起動中のRekordboxへのインジェクト」→「ブラウザ起動」までを処理します。
 
 ```powershell
 start-all.bat
 ```
+
+WebサーバーはRekordboxプロセスを定期監視せず、未起動時の自動起動やフックの自動再注入も行いません。Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実行してください。
 
 ### 個別の手動実行コマンド
 もし各処理を単独で実行したい場合は以下のコマンドを使用します。
@@ -211,9 +255,7 @@ npm start
 # 3. 起動中のRekordboxへDLLの注入
 npm run inject:hook
 ```
-※独自のインストールパスでRekordboxを使用している場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` のように引数指定で注入可能です。
-
-Webサーバーは `C:\Program Files\rekordbox` 配下から最新のインストール版を自動選択します。別の実行ファイルを使う場合は `.env` の `REKORDBOX_EXE_PATH` で明示できます。
+※インジェクターから明示的にRekordboxを起動したい場合に限り、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。通常の起動コマンドやWebサーバーからは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
 
 ---
 
@@ -236,8 +278,13 @@ git push origin v1.x.x
 
 Nodeサーバーからは以下のエンドポイントを通じ、他のシステム（OBS連携等）からでもステータスや現在の状態を取得可能です。
 
-- `GET /api/health` - サーバー監視
-- `GET /api/status` - RekordboxならびにHookエンジンの接続状況
+- `GET /api/health` - サーバー監視。読み取り専用のbuild identity
+  (`build.version`、`build.gitCommit`、`build.sourceFingerprint`。後者2つは
+  ビルド/起動時に`RB_OUTPUT_GIT_COMMIT`/`RB_OUTPUT_SOURCE_FINGERPRINT`と
+  して16進7..64文字で与えた場合のみ表示)を含み、PIDのバージョン特定に使えます。
+  設定パスやcredentialの有無は決して含みません。
+- `GET /api/status` - RekordboxならびにHookエンジンの接続状況(同じ`build`
+  identityを含む)
 - `GET /api/now-playing` - 全デッキの状態（JSON）
 - `GET /api/loops` - デッキごとのループ状態（JSON）
 - `GET /api/stream` - 状態更新と `loop_state` イベントのSSEストリーム

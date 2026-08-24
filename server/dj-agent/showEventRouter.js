@@ -815,21 +815,6 @@ function createShowEventRouter({
     if (mode === "handoff-pending") {
       return blockedAction(normalized, "handoff-pending");
     }
-    const stage1Action = normalized === "release" ||
-      normalized === "loop-half" ||
-      normalized === "loop_half" ||
-      normalized === "loophalf" ||
-      normalized === "filter-close" ||
-      normalized === "filter_close" ||
-      normalized === "filter";
-    if (stage1Action && syndocalEnabled()) {
-      if (!timelineSnapshotReady) {
-        return blockedAction(normalized, "timeline-state-pending");
-      }
-      if (syndocalState() !== "connected") {
-        return blockedAction(normalized, "timeline-network-disconnected");
-      }
-    }
     if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
       loopDivision =
         loopDivisionMax != null &&

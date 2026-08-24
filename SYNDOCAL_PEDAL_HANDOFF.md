@@ -1,10 +1,45 @@
 # Syndocal / Pedal handoff contract
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
-このリポジトリにはKDMX/Syndocalの権威仕様がないため、以下のgeneric-jsonは
-相互運用を証明する専用プロトコルではありません。実契約が確定したら、同じ
-adapter境界に専用adapterを追加してください。未設定のadapter名は利用不可で、
-generic-jsonへ黙ってフォールバックしません。
+
+## 権威ソースとwire契約(2026-08更新)
+
+KDMX/Syndocalの権威実装(`crates/protocol/src/lib.rs`の`DjLinkEnvelope`/
+`DjLinkFlatFrame`/`DjLinkAck`、`crates/io/src/remote_ws.rs`の
+`handle_dj_link_client`)を照合し、次の2つのwire契約が証明されています。
+どちらも`/dj-link`パス専用のWebSocketで、認証は (1) HTTP Host/Origin検証と
+(2) HELLO内トークンの定数時間比較の2面で行われます。Authorizationヘッダは
+無視されます。
+
+- `generic-json`(既定): フラットframe。HELLOのみ
+  `{type,eventId,sequence,protocol:"generic-json",token,capabilities}`を
+  持ち、それ以外はpayloadがルートに展開されます。ACKは8フィールド固定
+  (`type,eventId,ok,message,outcome,sequence,code,stateGeneration`)です。
+  flat wireでは`DJ_TIMELINE_STATE_REQUEST`以降の送信前にsnapshotが要求され
+  ます(SnapshotRequired)。
+- `syndocal-envelope-v1`: レガシーv1 envelope。全frameが
+  `{v:1,type,agentId,sessionId,sequence,eventId,payload}`で、HELLO payloadは
+  `{authToken,version:1,capabilities}`、ACKは7フィールド固定
+  (`v,type,eventId,sequence,outcome,code,stateGeneration`、ok/messageは
+  付与されません)、`DJ_TIMELINE_STATE`はpayload内に
+  `{state,loopActive,timelineId,positionBars}`を持ちます。全frameでHELLOと
+  同じagentId/sessionIdが必要で、不一致は`session_mismatch`拒否、同一形状の
+  HELLO再送はDuplicate扱いで切断されるため、再接続ごとに新しいsessionIdを
+  発行します。envelope wireにはsnapshot前提の順序制約はありません
+  (LegacyV1Direct)。ただしrb-output側は両adapterで接続後の権威snapshot待ち
+  gate(fail-closed)を維持します。
+
+共通の検証境界: frameは64KiB以下、文字列は1..256バイトかつ制御文字なし、
+sequenceは1..=9_007_199_254_740_991、トークンは32..256バイト、capabilitiesは
+32個以下、loop divisionは0..=63、beat jump barsは-4/4のみ、trackBpmは
+0..=1000。不正・未知frameは`rejected` ACK(code付き)または無視+warningと
+なり、成功扱いしません。冪等性はeventId単位で、再送は`duplicate`、保持期間
+外の再送は`event_id_not_retained`、sequence巻き戻りは`sequence_rollback`、
+処理中は`busy`(`in_flight`)が返ります。busyは有限回の指数バックオフ再試行
+で回復します。
+
+adapter名は明示設定のみで、未設定・未知名は利用不可(fail-closed)であり、
+generic-jsonへの黙ってフォールバックはしません。
 
 ## 接続と状態同期
 
@@ -29,7 +64,10 @@ Syndocalは現在の権威状態を`DJ_TIMELINE_STATE`で返してください�
 ```
 
 `state`は`idle`、`running`、`stopped`、`ended`、`reset`のいずれか、
-`loopActive`はbooleanです。不正値・未知の`DJ_TIMELINE_*`は無視しwarningに
+`loopActive`はbooleanです。`syndocal-envelope-v1`では同じ内容が
+`{v:1,type:"DJ_TIMELINE_STATE",agentId,sessionId,sequence,eventId,
+payload:{state,loopActive,timelineId,positionBars}}`のpayload内に
+入ります。不正値・未知の`DJ_TIMELINE_*`は無視しwarningに
 します。`running`を受信した時だけ`dj-control`から`timeline-control`へ入り、
 `idle`/`stopped`/`ended`/`reset`で`dj-control`へ戻ります。F13での
 `DJ_RELEASE`受理だけではtimelineへ切り替わりません。
@@ -97,16 +135,27 @@ ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` bro
 ## eventId / ACK / 順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
-eventIdで冪等処理し、同じIDを二重適用しません。ACKは次の形を推奨します。
+eventIdで冪等処理し、同じIDを二重適用しません。generic-json(flat) wireの
+ACKは次の8フィールド固定形です。
 
 ```json
 {
   "type": "ACK",
   "eventId": "...",
   "ok": true,
-  "message": "accepted"
+  "message": "accepted",
+  "outcome": "accepted",
+  "sequence": 42,
+  "code": null,
+  "stateGeneration": 7
 }
 ```
+
+`syndocal-envelope-v1` wireでは`v:1`が先頭に付き、`ok`/`message`は付与され
+ず、7フィールド(`v,type,eventId,sequence,outcome,code,stateGeneration`)固定
+です。`outcome`は`accepted`/`duplicate`/`no_mapping`/`rejected`/`busy`で、
+`accepted`と`duplicate`のみ成功扱いです。それ以外の形式・未知outcomeは
+拒否しwarningにします。
 
 送信直後は`pending`であり、`ok:true`ではありません。最終deliveryは
 `acknowledged`、`rejected`、`timed-out`、`send-failed`のいずれかです。

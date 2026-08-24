@@ -1,6 +1,8 @@
 const LOOP_FIELDS = [
   "deck",
   "active",
+  "activeKnown",
+  "activeSource",
   "startMs",
   "endMs",
   "startBeat",
@@ -77,6 +79,18 @@ function normalizeLoopState(payload, { maxDeck = 4, source = "rekordbox-hook" } 
     firstValue(payload, ["lengthBeats", "length_beats", "loopLengthBeats", "loop_length_beats", "beats"]),
   );
 
+  // Rekordbox clears an unset loop by publishing 0 for both time boundaries.
+  // Treat any complete, non-positive range as absent so the Web UI does not
+  // display a misleading `SET · 0.00→0.00s` state after loop-out.
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs <= startMs) {
+    startMs = null;
+    endMs = null;
+  }
+  if (Number.isFinite(startBeat) && Number.isFinite(endBeat) && endBeat <= startBeat) {
+    startBeat = null;
+    endBeat = null;
+  }
+
   if (Number.isFinite(startBeat) && Number.isFinite(endBeat) && !Number.isFinite(lengthBeats)) {
     lengthBeats = endBeat - startBeat;
   }
@@ -87,7 +101,15 @@ function normalizeLoopState(payload, { maxDeck = 4, source = "rekordbox-hook" } 
     lengthBeats = Math.abs(lengthBeats);
   }
 
-  const active = firstBoolean(payload, ["active", "isActive", "loopActive", "loop_active"]);
+  const activeNames = ["active", "isActive", "loopActive", "loop_active"];
+  const active = firstBoolean(payload, activeNames);
+  const activeKnownValue = firstBoolean(payload, ["activeKnown", "active_known"]);
+  const hasActiveField = activeNames.some((name) => Object.prototype.hasOwnProperty.call(payload, name));
+  const activeKnown = activeKnownValue == null
+    ? hasActiveField
+      ? active != null
+      : null
+    : activeKnownValue;
   const updatedAt =
     typeof payload.updatedAt === "string" && payload.updatedAt.trim()
       ? payload.updatedAt
@@ -95,7 +117,12 @@ function normalizeLoopState(payload, { maxDeck = 4, source = "rekordbox-hook" } 
 
   return {
     deck,
-    active,
+    active: activeKnown === false ? null : active,
+    activeKnown,
+    activeSource:
+      typeof payload.activeSource === "string" && payload.activeSource.trim()
+        ? payload.activeSource
+        : null,
     startMs,
     endMs,
     startBeat,
@@ -121,7 +148,9 @@ function mergeLoopState(previous, next) {
       if (next[field] != null) merged[field] = next[field];
       continue;
     }
-    if (next[field] != null || (field === "active" && next[field] !== null)) {
+    if (field === "active" && next.activeKnown === false) {
+      merged.active = null;
+    } else if (next[field] != null || (field === "active" && next[field] !== null)) {
       merged[field] = next[field];
     } else if (!Object.prototype.hasOwnProperty.call(merged, field)) {
       merged[field] = null;

@@ -10,7 +10,7 @@ function normalizePlaybackSeconds(rawValue) {
 }
 
 function bpmFromRaw(rawValue) {
-  if (!Number.isFinite(rawValue)) {
+  if (!Number.isFinite(rawValue) || rawValue <= 0) {
     return null;
   }
   if (rawValue > 500) {
@@ -96,6 +96,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     return {
       bpm: null,
       currentTime: null,
+      currentTimeUpdatedAt: 0,
       totalTime: null,
       remainingTime: null,
       lastPositionSec: null,
@@ -170,6 +171,53 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     mutator(current);
     current.lastSeenAt = Date.now();
     deckState.set(deck, current);
+  }
+
+  function reconcileLoopActivityFromPlayback(data, previousCurrentTime = null) {
+    const loop = data?.loopState;
+    const currentMs = data?.currentTime == null ? NaN : Number(data.currentTime);
+    const previousMs = previousCurrentTime == null ? NaN : Number(previousCurrentTime);
+    const startMs = loop?.startMs == null ? NaN : Number(loop.startMs);
+    const endMs = loop?.endMs == null ? NaN : Number(loop.endMs);
+    if (
+      !loop ||
+      !Number.isFinite(currentMs) ||
+      !Number.isFinite(startMs) ||
+      !Number.isFinite(endMs) ||
+      endMs <= startMs
+    ) {
+      return null;
+    }
+
+    const toleranceMs = Math.min(250, Math.max(80, (endMs - startMs) * 0.08));
+    let nextActive = null;
+    let activeSource = null;
+    if (currentMs > endMs + toleranceMs) {
+      nextActive = false;
+      activeSource = "playhead-passed-loop-end";
+    } else if (
+      Number.isFinite(previousMs) &&
+      previousMs >= endMs - toleranceMs &&
+      currentMs <= startMs + toleranceMs &&
+      currentMs < previousMs - toleranceMs
+    ) {
+      nextActive = true;
+      activeSource = "playhead-loop-wrap";
+    }
+    if (nextActive == null || loop.active === nextActive) {
+      return null;
+    }
+
+    const updated = {
+      ...loop,
+      active: nextActive,
+      activeKnown: true,
+      activeSource,
+      updatedAt: new Date().toISOString(),
+      source: "rekordbox-hook-playback-observed",
+    };
+    data.loopState = updated;
+    return updated;
   }
 
   function isDeckPlaying(data) {
@@ -304,6 +352,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       deck: deckIndex + 1,
       bpm: bpmFromRaw(data.bpm),
       positionSec: Number.isFinite(positionSec) ? positionSec : null,
+      positionObservedAt: data.currentTimeUpdatedAt
+        ? new Date(data.currentTimeUpdatedAt).toISOString()
+        : new Date(now).toISOString(),
       remainingSec: Number.isFinite(remainingSec) ? remainingSec : null,
       totalSec: Number.isFinite(totalSec) ? totalSec : null,
       isEstimated: false,
@@ -526,6 +577,76 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       return;
     }
 
+    if (packet.type === "mixer_state_probe") {
+      const numberOrNull = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+      const normalizeProbeValue = (value) => Array.isArray(value)
+        ? value.map((item) => normalizeProbeValue(item))
+        : numberOrNull(value);
+      const values = Object.fromEntries(
+        Object.entries(packet)
+          .filter(([key]) => /^c\d+$/.test(key))
+          .map(([key, value]) => [key, normalizeProbeValue(value)]),
+      );
+      emitter.emit("mixer-state-probe", {
+        unit: numberOrNull(packet.unit),
+        address: numberOrNull(packet.address),
+        values,
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (packet.type === "crossfader_probe") {
+      const value = Number(packet.value);
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        return;
+      }
+      emitter.emit("crossfader-probe", {
+        value,
+        address: Number.isFinite(Number(packet.address)) ? Number(packet.address) : null,
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (packet.type === "mixer_state") {
+      const clampUnit = (value) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.min(1, Math.max(0, number)) : null;
+      };
+      const crossfader = clampUnit(packet.crossfader);
+      const channelFaders = Array.isArray(packet.channelFaders)
+        ? packet.channelFaders.slice(0, 2).map(clampUnit)
+        : [];
+      if (crossfader == null || channelFaders.length !== 2 || channelFaders.includes(null)) {
+        return;
+      }
+      emitter.emit("mixer-state", {
+        crossfader,
+        channelFaders,
+        source: "rekordbox-hook-7.2.18",
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (packet.type === "mixer_probe") {
+      const name = String(packet.name || "");
+      if (!isLikelyHookEventName(name)) {
+        return;
+      }
+      emitter.emit("mixer-probe", {
+        deck: Number.isFinite(Number(packet.deck)) ? Number(packet.deck) : null,
+        name,
+        raw: Number.isFinite(Number(packet.raw)) ? Number(packet.raw) : null,
+        u32AtRaw: Number.isFinite(Number(packet.u32AtRaw)) ? Number(packet.u32AtRaw) : null,
+        pointerAtRaw: Number.isFinite(Number(packet.pointerAtRaw)) ? Number(packet.pointerAtRaw) : null,
+        u32AtPointer: Number.isFinite(Number(packet.u32AtPointer)) ? Number(packet.u32AtPointer) : null,
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
     if (packet.type === "cid_probe") {
       const deckRaw = Number(packet.deck);
       if (!Number.isFinite(deckRaw)) {
@@ -692,10 +813,12 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       const sourceDeckIndex = loop.deck - 1;
       const deck = ((sourceDeckIndex % logicalDeckCount) + logicalDeckCount) % logicalDeckCount;
       const logicalLoop = { ...loop, deck: deck + 1 };
+      let reconciledLoop = null;
       updateDeckState(deck, (data) => {
         data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], logicalLoop)[0] || logicalLoop;
+        reconciledLoop = reconcileLoopActivityFromPlayback(data);
       });
-      emitter.emit("loop-state", logicalLoop);
+      emitter.emit("loop-state", reconciledLoop || logicalLoop);
       if (!connected) {
         connected = true;
         emitStatus(true, "Hook events detected");
@@ -741,9 +864,20 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         }
         markDeckSignal(deck, "playback");
       } else if (name === "@OriginalBPM") {
-        data.originalBpm = value;
+        // Rekordbox emits transient zero values while its deck model is being
+        // refreshed. Keep the last valid original BPM so TRACK BPM does not
+        // alternate between a real value and an empty value in the UI.
+        if (Number.isFinite(value) && value > 0) {
+          data.originalBpm = value;
+        }
       } else if (name === "@CurrentTime") {
+        const previousCurrentTime = data.currentTime;
         data.currentTime = value;
+        data.currentTimeUpdatedAt = Date.now();
+        const reconciledLoop = reconcileLoopActivityFromPlayback(data, previousCurrentTime);
+        if (reconciledLoop) {
+          queueMicrotask(() => emitter.emit("loop-state", reconciledLoop));
+        }
         markDeckSignal(deck, "playback");
       } else if (name === "@MixPointLinkRemainingTime") {
         data.remainingTime = value;

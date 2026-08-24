@@ -8,7 +8,6 @@ const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
 const { createAbletonLinkProvider } = require("./providers/abletonLinkProvider");
 const { createHookUdpProvider } = require("./providers/hookUdpProvider");
-const { resolveRekordboxExePath } = require("./rekordboxInstall");
 const { upsertLoopState } = require("./loopState");
 const { loadDjAgentConfig } = require("./dj-agent/config");
 const { createSyndocalClient } = require("./dj-agent/syndocalClient");
@@ -17,6 +16,7 @@ const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
+const { createBuildIdentity } = require("./buildIdentity");
 
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
@@ -29,11 +29,6 @@ const BRIDGE_SCRIPT =
 const CONTENT_LOOKUP_SCRIPT =
   process.env.REKORDBOX_CONTENT_LOOKUP_SCRIPT ||
   path.resolve(__dirname, "..", "python", "content_lookup.py");
-const HOOK_INJECT_SCRIPT =
-  process.env.REKORDBOX_INJECT_SCRIPT ||
-  path.resolve(__dirname, "..", "scripts", "inject_hook.py");
-const REKORDBOX_EXE_PATH = resolveRekordboxExePath();
-
 function buildSpawnCmd(exeName, scriptPath, extraArgs) {
   if (isPackaged) return [path.join(_exeDir, exeName), extraArgs];
   return [PYTHON_BIN, [scriptPath, ...extraArgs]];
@@ -47,6 +42,8 @@ const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
 const DJ_AGENT_CONFIG = loadDjAgentConfig();
 
+const BUILD_IDENTITY = createBuildIdentity();
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -59,6 +56,12 @@ const state = {
   deckNowPlaying: [],
   deckPlaybacks: [],
   loopStates: [],
+  mixerState: {
+    crossfader: null,
+    channelFaders: [null, null],
+    source: null,
+    updatedAt: null,
+  },
   playback: {
     positionSec: null,
     remainingSec: null,
@@ -145,110 +148,6 @@ function broadcastSse(eventName, payload) {
 }
 
 let lastStateFingerprint = "";
-const hookRuntime = {
-  pid: null,
-  lastSignalAt: 0,
-  targetExited: false,
-  recovering: false,
-  lastRecoveryAt: 0,
-};
-
-function tryRecoverHook() {
-  if (hookRuntime.recovering) {
-    return;
-  }
-  const now = Date.now();
-  if (now - hookRuntime.lastRecoveryAt < 15000) {
-    return;
-  }
-  hookRuntime.recovering = true;
-  hookRuntime.lastRecoveryAt = now;
-  const args = ["--process-name", "rekordbox.exe", "--wait-seconds", "4", "--handoff-seconds", "20"];
-  if (REKORDBOX_EXE_PATH) {
-    args.push("--launch-path", REKORDBOX_EXE_PATH);
-  }
-  const [_injCmd, _injArgs] = buildSpawnCmd("inject_hook.exe", HOOK_INJECT_SCRIPT, args);
-  const child = spawn(_injCmd, _injArgs, {
-    cwd: isPackaged ? _exeDir : path.resolve(__dirname, ".."),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stderr = "";
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
-  });
-  child.on("close", (code) => {
-    hookRuntime.recovering = false;
-    if (code === 0) {
-      pushDebugLog("hook-recovery", "Hook auto-recovery attempt completed");
-    } else {
-      pushDebugLog("hook-recovery", `Hook auto-recovery failed (${code})`, {
-        stderr: stderr.trim() || null,
-      });
-    }
-    emitState();
-  });
-  child.on("error", (error) => {
-    hookRuntime.recovering = false;
-    pushDebugLog("hook-recovery", "Hook auto-recovery spawn error", {
-      message: error?.message || String(error),
-    });
-    emitState();
-  });
-}
-
-function isProcessAlive(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function clearRealtimeState(reasonMessage) {
-  state.nowPlaying = null;
-  state.recentTracks = [];
-  state.deckNowPlaying = [];
-  state.deckPlaybacks = [];
-  state.loopStates = [];
-  state.playback = {
-    positionSec: null,
-    remainingSec: null,
-    isEstimated: true,
-    isPlaying: null,
-    updatedAt: new Date().toISOString(),
-  };
-  state.realtimeBpm = {
-    value: null,
-    source: null,
-    peers: null,
-    isPlaying: null,
-    updatedAt: null,
-  };
-  state.capabilities = {
-    ...state.capabilities,
-    nowPlayingSource: "unknown",
-    playheadSource: "unknown",
-    realtimeBpmSource: "unknown",
-  };
-  state.status.hook = {
-    ...state.status.hook,
-    ok: false,
-    message: reasonMessage,
-    updatedAt: new Date().toISOString(),
-  };
-  state.sourceInfo = {
-    nowPlayingMethod: "unknown",
-    deckMethods: {
-      1: "unknown",
-      2: "unknown",
-    },
-  };
-  pushDebugLog("hook-reset", reasonMessage);
-}
 
 function mergeWarning(message) {
   if (!message) {
@@ -330,6 +229,7 @@ function buildSnapshot() {
     deckNowPlaying: state.deckNowPlaying,
     deckPlaybacks: state.deckPlaybacks,
     loopStates: state.loopStates,
+    mixerState: state.mixerState,
     playback: state.playback,
     realtimeBpm: state.realtimeBpm,
     capabilities: state.capabilities,
@@ -348,6 +248,7 @@ function emitState() {
     deckNowPlaying: state.deckNowPlaying,
     deckPlaybacks: state.deckPlaybacks,
     loopStates: state.loopStates,
+    mixerState: state.mixerState,
     playback: state.playback,
     realtimeBpm: state.realtimeBpm,
     capabilities: state.capabilities,
@@ -390,6 +291,11 @@ const failedContentCandidates = new Map();
 
 const EXT_FIELDS = ["album", "genre", "key", "label", "origArtist", "remixer", "composer", "comment", "mixName", "lyricist", "waveform"];
 
+function isPositiveFinite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0;
+}
+
 function normalizeResolvedMetadata(payload, contentId) {
   if (!payload || payload.ok === false) {
     return null;
@@ -402,8 +308,8 @@ function normalizeResolvedMetadata(payload, contentId) {
     contentId: String(payload.contentId || contentId),
     title: payload.title || null,
     artist: payload.artist || null,
-    trackBpm: Number.isFinite(payload.trackBpm) ? payload.trackBpm : null,
-    durationSec: Number.isFinite(payload.durationSec) ? payload.durationSec : null,
+    trackBpm: isPositiveFinite(payload.trackBpm) ? Number(payload.trackBpm) : null,
+    durationSec: isPositiveFinite(payload.durationSec) ? Number(payload.durationSec) : null,
     trackNo: Number.isFinite(payload.trackNo) ? payload.trackNo : null,
     ...extended,
     source: "rekordbox-hook-live",
@@ -671,8 +577,16 @@ function mergeDeckEntryMetadata(entry, metadata) {
     ...entry,
     title: metadata.title || entry.title || null,
     artist: metadata.artist || entry.artist || null,
-    durationSec: Number.isFinite(metadata.durationSec) ? metadata.durationSec : entry.durationSec ?? null,
-    trackBpm: Number.isFinite(entry.trackBpm) ? entry.trackBpm : metadata.trackBpm ?? null,
+    durationSec: isPositiveFinite(metadata.durationSec)
+      ? Number(metadata.durationSec)
+      : isPositiveFinite(entry.durationSec)
+        ? Number(entry.durationSec)
+        : null,
+    trackBpm: isPositiveFinite(entry.trackBpm)
+      ? Number(entry.trackBpm)
+      : isPositiveFinite(metadata.trackBpm)
+        ? Number(metadata.trackBpm)
+        : null,
     trackNo: Number.isFinite(entry.trackNo) ? entry.trackNo : metadata.trackNo ?? null,
     ...extended,
     source: "rekordbox-hook-live",
@@ -806,19 +720,33 @@ function applyMasterNowPlayingFromDecks() {
   if (!target) {
     return false;
   }
+  const targetContentId = target.contentId ? String(target.contentId) : null;
+  const previousContentId = state.nowPlaying?.contentId ? String(state.nowPlaying.contentId) : null;
+  const previous = targetContentId && previousContentId === targetContentId ? state.nowPlaying : {};
+  const extended = {};
+  for (const field of EXT_FIELDS) {
+    extended[field] = target[field] ?? previous?.[field] ?? null;
+  }
   const nextNowPlaying = {
-    ...(state.nowPlaying || {}),
-    contentId: target.contentId || state.nowPlaying?.contentId || null,
+    ...previous,
+    contentId: targetContentId || previousContentId || null,
     title:
       target.title ||
-      state.nowPlaying?.title ||
+      previous?.title ||
       (target.contentId ? `ID ${target.contentId}` : null),
-    artist: target.artist || state.nowPlaying?.artist || null,
-    durationSec: Number.isFinite(target.durationSec)
-      ? target.durationSec
-      : state.nowPlaying?.durationSec ?? null,
-    trackNo: Number.isFinite(target.trackNo) ? target.trackNo : state.nowPlaying?.trackNo ?? null,
-    trackBpm: Number.isFinite(target.trackBpm) ? target.trackBpm : state.nowPlaying?.trackBpm ?? null,
+    artist: target.artist || previous?.artist || null,
+    durationSec: isPositiveFinite(target.durationSec)
+      ? Number(target.durationSec)
+      : isPositiveFinite(previous?.durationSec)
+        ? Number(previous.durationSec)
+        : null,
+    trackNo: Number.isFinite(target.trackNo) ? target.trackNo : previous?.trackNo ?? null,
+    trackBpm: isPositiveFinite(target.trackBpm)
+      ? Number(target.trackBpm)
+      : isPositiveFinite(previous?.trackBpm)
+        ? Number(previous.trackBpm)
+        : null,
+    ...extended,
     source: "rekordbox-hook-live",
   };
   const changed = JSON.stringify(state.nowPlaying) !== JSON.stringify(nextNowPlaying);
@@ -863,7 +791,22 @@ function hydrateDeckNowPlayingMetadata() {
   }
 
   const pending = state.deckNowPlaying
-    .filter((entry) => entry && entry.contentId && !entry.title && !entry.artist)
+    .filter((entry) => {
+      if (!entry?.contentId) {
+        return false;
+      }
+      const key = String(entry.contentId);
+      if (contentMetadataCache.has(key)) {
+        return false;
+      }
+      return (
+        !entry.title ||
+        !entry.artist ||
+        !isPositiveFinite(entry.trackBpm) ||
+        !isPositiveFinite(entry.durationSec) ||
+        !entry.waveform
+      );
+    })
     .map(async (entry) => {
       const key = String(entry.contentId);
       if (shouldSkipFailedCandidate(key)) {
@@ -875,7 +818,11 @@ function hydrateDeckNowPlayingMetadata() {
         markFailedCandidate(key);
         return;
       }
-      upsertDeckNowPlayingEntry(entry.deck, mergeDeckEntryMetadata(entry, resolvedMetadata));
+      const current = state.deckNowPlaying.find((item) => Number(item?.deck) === Number(entry.deck));
+      if (!current || String(current.contentId || "") !== key) {
+        return;
+      }
+      upsertDeckNowPlayingEntry(entry.deck, mergeDeckEntryMetadata(current, resolvedMetadata));
     });
   if (pending.length === 0 && Array.isArray(state.deckPlaybacks) && state.deckPlaybacks.length > 0) {
     const missingDecks = state.deckPlaybacks
@@ -1158,9 +1105,6 @@ abletonLinkProvider.on("status", (status) => {
   }
   if (!status.ok && status.message && !status.message.includes("disabled by config")) {
     mergeWarning(status.message);
-    if (/target process exited/i.test(status.message)) {
-      tryRecoverHook();
-    }
   }
   emitState();
 });
@@ -1203,13 +1147,6 @@ abletonLinkProvider.on("bpm", (bpm) => {
 });
 
 hookUdpProvider.on("status", (status) => {
-  if (Number.isFinite(status?.pid)) {
-    hookRuntime.pid = Number(status.pid);
-  }
-  if (status.ok && /connected|events detected/i.test(status.message || "")) {
-    hookRuntime.lastSignalAt = Date.now();
-    hookRuntime.targetExited = false;
-  }
   state.status.hook = {
     ...state.status.hook,
     ...status,
@@ -1229,8 +1166,6 @@ hookUdpProvider.on("status", (status) => {
 });
 
 hookUdpProvider.on("snapshot", (snapshot) => {
-  hookRuntime.lastSignalAt = Date.now();
-  hookRuntime.targetExited = false;
   if (snapshot.playback) {
     state.playback = {
       ...state.playback,
@@ -1247,16 +1182,22 @@ hookUdpProvider.on("snapshot", (snapshot) => {
     }
   }
   if (Array.isArray(snapshot.deckNowPlaying) && snapshot.deckNowPlaying.length > 0) {
-    state.deckNowPlaying = snapshot.deckNowPlaying.map((entry) =>
-      mergeDeckEntryMetadata(
-        sanitizeDeckEntryText({
-          ...entry,
-          sourceMethod: entry?.title || entry?.artist ? "hook-track-meta" : "hook-track-load",
-          updatedAt: entry?.updatedAt || new Date().toISOString(),
-        }),
-        null
-      )
+    const previousByDeck = new Map(
+      state.deckNowPlaying.map((entry) => [Number(entry?.deck), entry])
     );
+    state.deckNowPlaying = snapshot.deckNowPlaying.map((entry) => {
+      const sanitized = sanitizeDeckEntryText({
+        ...entry,
+        sourceMethod: entry?.title || entry?.artist ? "hook-track-meta" : "hook-track-load",
+        updatedAt: entry?.updatedAt || new Date().toISOString(),
+      });
+      const previous = previousByDeck.get(Number(entry?.deck));
+      const sameTrack =
+        previous?.contentId &&
+        sanitized?.contentId &&
+        String(previous.contentId) === String(sanitized.contentId);
+      return mergeDeckEntryMetadata(sanitized, sameTrack ? previous : null);
+    });
     for (const entry of state.deckNowPlaying) {
       setDeckMethod(Number(entry.deck), inferDeckMethod(entry));
     }
@@ -1401,43 +1342,50 @@ hookUdpProvider.on("unknown-event", (name) => {
 });
 
 hookUdpProvider.on("hook-log", (message) => {
-  mergeWarning(`[hook] ${message}`);
+  if (/\b(?:failed|error)\b/i.test(message)) {
+    mergeWarning(`[hook] ${message}`);
+  }
   pushDebugLog("hook-log", message);
   emitState();
 });
 
-setInterval(() => {
-  if (
-    ((!state.status.hook?.ok && /target process exited/i.test(state.status.hook?.message || "")) ||
-      (!hookRuntime.pid && /listener started/i.test(state.status.hook?.message || "")))
-  ) {
-    tryRecoverHook();
-  }
-  if (
-    !hookRuntime.pid &&
-    !hookRuntime.lastSignalAt &&
-    /listener started/i.test(state.status.hook.message || "") &&
-    (state.nowPlaying !== null || state.deckNowPlaying.length > 0 || state.deckPlaybacks.length > 0)
-  ) {
-    clearRealtimeState("Hook waiting for connection");
-    emitState();
-    return;
-  }
-  if (!hookRuntime.pid) {
-    return;
-  }
-  if (isProcessAlive(hookRuntime.pid)) {
-    return;
-  }
-  if (hookRuntime.targetExited) {
-    return;
-  }
-  hookRuntime.targetExited = true;
-  hookRuntime.lastSignalAt = 0;
-  hookRuntime.pid = null;
-  clearRealtimeState("Hook target process exited");
+hookUdpProvider.on("mixer-probe", (probe) => {
+  pushDebugLog(
+    "mixer-probe",
+    `${probe.name} raw=${probe.raw ?? "-"} u32@raw=${probe.u32AtRaw ?? "-"} ptr@raw=${probe.pointerAtRaw ?? "-"} u32@ptr=${probe.u32AtPointer ?? "-"}`,
+    { deck: probe.deck }
+  );
   emitState();
-}, 1000);
+});
+
+hookUdpProvider.on("mixer-state-probe", (probe) => {
+  pushDebugLog(
+    "mixer-state-probe",
+    `unit=${probe.unit ?? "-"} values=${JSON.stringify(probe.values)}`,
+    { unit: probe.unit }
+  );
+  emitState();
+});
+
+hookUdpProvider.on("crossfader-probe", (probe) => {
+  pushDebugLog(
+    "crossfader-probe",
+    `value=${probe.value.toFixed(6)} address=${probe.address ?? "-"}`,
+  );
+  emitState();
+});
+
+hookUdpProvider.on("mixer-state", (mixerState) => {
+  state.mixerState = {
+    crossfader: mixerState.crossfader,
+    channelFaders: [...mixerState.channelFaders],
+    source: mixerState.source,
+    updatedAt: mixerState.updatedAt,
+  };
+  io.emit("mixer_state", state.mixerState);
+  broadcastSse("mixer_state", state.mixerState);
+  emitState();
+});
 
 app.use(express.json());
 app.use((_req, res, next) => {
@@ -1453,7 +1401,11 @@ app.use((_req, res, next) => {
 app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    build: { ...BUILD_IDENTITY },
+  });
 });
 
 app.get("/api/status", (_req, res) => {
@@ -1461,10 +1413,12 @@ app.get("/api/status", (_req, res) => {
     status: state.status,
     capabilities: state.capabilities,
     loopStates: state.loopStates,
+    mixerState: state.mixerState,
     warnings: state.warnings,
     sourceInfo: state.sourceInfo,
     debugLogs: state.debugLogs,
     updatedAt: state.updatedAt,
+    build: { ...BUILD_IDENTITY },
   });
 });
 

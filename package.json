@@ -1,6 +1,6 @@
 {
   "name": "rb-output",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Rekordbox now-playing and realtime BPM viewer for LAN devices",
   "main": "server/index.js",
   "scripts": {
@@ -27,14 +27,20 @@
     "node": ">=18.0.0"
   },
   "pkg": {
-    "scripts": ["server/**/*.js"],
+    "scripts": [
+      "server/**/*.js",
+      "node_modules/ws/**/*.js"
+    ],
     "assets": [
+      "node_modules/ws/**/*",
       "node_modules/@julusian/midi/prebuilds/**/*",
       "node_modules/@julusian/midi/**/*.node",
       "node_modules/uiohook-napi/prebuilds/**/*",
       "node_modules/uiohook-napi/**/*.node"
     ],
-    "targets": ["node22-win-x64"],
+    "targets": [
+      "node22-win-x64"
+    ],
     "outputPath": "dist"
   },
   "dependencies": {
