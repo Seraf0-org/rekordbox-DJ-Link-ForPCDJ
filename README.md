@@ -222,11 +222,13 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 
 ### 2. ワンクリック起動 (おすすめ)
 
-プロジェクトルートにあるバッチファイルを実行するだけで、「DLLのビルド確認」→「Webサーバー起動」→「Rekordboxへのインジェクト」→「ブラウザ起動」までを全て自動で処理します。
+先にRekordboxを起動してから、プロジェクトルートにあるバッチファイルを実行してください。「DLLのビルド確認」→「Webサーバー起動」→「起動中のRekordboxへのインジェクト」→「ブラウザ起動」までを処理します。
 
 ```powershell
 start-all.bat
 ```
+
+WebサーバーはRekordboxプロセスを定期監視せず、未起動時の自動起動やフックの自動再注入も行いません。Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実行してください。
 
 ### 個別の手動実行コマンド
 もし各処理を単独で実行したい場合は以下のコマンドを使用します。
@@ -241,16 +243,7 @@ npm start
 # 3. 起動中のRekordboxへDLLの注入
 npm run inject:hook
 ```
-※独自のインストールパスでRekordboxを使用している場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` のように引数指定で注入可能です。
-
-Webサーバーは `C:\Program Files\rekordbox` 配下から最新のインストール版を自動選択します。別の実行ファイルを使う場合は、Nodeを起動する同じPowerShell/launcher processへ環境変数を設定します。
-
-~~~powershell
-$env:REKORDBOX_EXE_PATH = "D:\path\to\rekordbox.exe"
-npm start
-~~~
-
-Nodeは `.env` を自動ロードしないため、`.env`へ書くだけでは反映されません。注入時に別の実行ファイルを指定する場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使います。
+※インジェクターから明示的にRekordboxを起動したい場合に限り、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。通常の起動コマンドやWebサーバーからは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
 
 ---
 

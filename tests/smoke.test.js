@@ -145,6 +145,48 @@ test("hook udp provider can be created disabled", () => {
   assert.equal(typeof provider.on, "function");
 });
 
+test("hook udp provider normalizes native mixer fader state", async (t) => {
+  const port = 44_000 + Math.floor(Math.random() * 500);
+  const provider = createHookUdpProvider({ enabled: true, port });
+  t.after(() => provider.stop());
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Hook provider did not bind")), 1_000);
+    provider.on("status", (status) => {
+      if (status.message?.includes("listener started")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  const mixerEvent = new Promise((resolve) => {
+    let handled = false;
+    provider.on("mixer-state", (event) => {
+      if (!handled) {
+        handled = true;
+        resolve(event);
+      }
+    });
+  });
+  provider.start();
+  await started;
+
+  const sender = dgram.createSocket("udp4");
+  t.after(() => sender.close());
+  const body = Buffer.from(JSON.stringify({
+    type: "mixer_state",
+    crossfader: 1.2,
+    channelFaders: [-0.1, 0.75],
+  }));
+  await new Promise((resolve, reject) => {
+    sender.send(body, port, "127.0.0.1", (error) => error ? reject(error) : resolve());
+  });
+  const event = await mixerEvent;
+  assert.equal(event.crossfader, 1);
+  assert.deepEqual(event.channelFaders, [0, 0.75]);
+  assert.equal(event.source, "rekordbox-hook-7.2.18");
+  assert.match(event.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
 test("rekordbox install directory versions are parsed strictly", () => {
   assert.deepEqual(parseVersionFromDirectory("rekordbox 7.2.18"), [7, 2, 18]);
   assert.deepEqual(parseVersionFromDirectory("Rekordbox 7.2.13"), [7, 2, 13]);
@@ -202,6 +244,37 @@ test("loop state updates preserve boundaries when native hook only sends inactiv
   assert.equal(merged.startBeat, 8);
   assert.equal(merged.endBeat, 12);
   assert.deepEqual(upsertLoopState([], merged), [merged]);
+});
+
+test("unknown loop activity clears stale active state while retaining the configured range", () => {
+  const active = normalizeLoopState({
+    deck: 1,
+    active: true,
+    activeKnown: true,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  const rangeOnly = normalizeLoopState({
+    deck: 1,
+    activeKnown: false,
+    startMs: 37_513,
+    endMs: 38_513,
+  });
+  const merged = mergeLoopState(active, rangeOnly);
+  assert.equal(merged.active, null);
+  assert.equal(merged.activeKnown, false);
+  assert.equal(merged.startMs, 37_513);
+  assert.equal(merged.endMs, 38_513);
+});
+
+test("cleared or inverted loop boundaries are not treated as a configured range", () => {
+  const cleared = normalizeLoopState({ deck: 1, activeKnown: false, startMs: 0, endMs: 0 });
+  assert.equal(cleared.startMs, null);
+  assert.equal(cleared.endMs, null);
+
+  const inverted = normalizeLoopState({ deck: 2, startBeat: 32, endBeat: 16 });
+  assert.equal(inverted.startBeat, null);
+  assert.equal(inverted.endBeat, null);
 });
 
 test("DJ Agent configuration remains off without an explicit gate", () => {
@@ -1430,6 +1503,105 @@ test("playback fallback stays stable across non-playing deck packets", async (t)
   assert.equal(snapshots.at(-1).source, "explicit-master-change");
 });
 
+test("hook snapshots retain valid original BPM across transient zero packets", async (t) => {
+  const port = 47_000 + Math.floor(Math.random() * 1_000);
+  const provider = createHookUdpProvider({ enabled: true, port });
+  const snapshots = [];
+  provider.on("snapshot", (snapshot) => snapshots.push(snapshot));
+  t.after(() => provider.stop());
+
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Hook provider did not bind")), 1_000);
+    provider.on("status", (status) => {
+      if (status.message?.includes("listener started")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  provider.start();
+  await started;
+
+  const sender = dgram.createSocket("udp4");
+  t.after(() => sender.close());
+  const send = (packet) => new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(packet));
+    sender.send(body, port, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
+  });
+
+  await send({ type: "track_meta", deck: 1, title: "Stable BPM", artist: "Artist", trackBpm: 12_800 });
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 1_000 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const observedAt = snapshots.at(-1).deckPlaybacks[0].positionObservedAt;
+
+  await send({ type: "olvc", deck: 1, name: "@OriginalBPM", value: 0 });
+  await send({ type: "olvc", deck: 1, name: "@BPM", value: 12_800 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(snapshots.at(-1).deckNowPlaying[0].trackBpm, 128);
+  assert.equal(snapshots.at(-1).deckPlaybacks[0].positionObservedAt, observedAt);
+
+  await send({ type: "olvc", deck: 1, name: "@OriginalBPM", value: 13_000 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(snapshots.at(-1).deckNowPlaying[0].trackBpm, 130);
+});
+
+test("hook playback distinguishes configured loop boundaries from actual looping", async (t) => {
+  const port = 48_000 + Math.floor(Math.random() * 1_000);
+  const provider = createHookUdpProvider({ enabled: true, port });
+  const loopEvents = [];
+  const snapshots = [];
+  provider.on("loop-state", (loop) => loopEvents.push(loop));
+  provider.on("snapshot", (snapshot) => snapshots.push(snapshot));
+  t.after(() => provider.stop());
+
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Hook provider did not bind")), 1_000);
+    provider.on("status", (status) => {
+      if (status.message?.includes("listener started")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  provider.start();
+  await started;
+
+  const sender = dgram.createSocket("udp4");
+  t.after(() => sender.close());
+  const send = (packet) => new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(packet));
+    sender.send(body, port, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
+  });
+
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 42_280 });
+  await send({
+    type: "loop_state",
+    deck: 1,
+    active: true,
+    activeKnown: true,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(loopEvents.at(-1).active, false);
+  assert.equal(loopEvents.at(-1).activeSource, "playhead-passed-loop-end");
+  assert.equal(snapshots.at(-1).loopStates[0].active, false);
+
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 28_450 });
+  await send({
+    type: "loop_state",
+    deck: 1,
+    activeKnown: false,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 27_520 });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(loopEvents.at(-1).active, true);
+  assert.equal(loopEvents.at(-1).activeSource, "playhead-loop-wrap");
+  assert.equal(snapshots.at(-1).loopStates[0].active, true);
+});
+
 test("action security normalizes IPv4, IPv4-mapped IPv6, and IPv6 loopback", () => {
   assert.equal(isLoopbackAddress("127.0.0.1"), true);
   assert.equal(isLoopbackAddress("127.22.4.9"), true);
@@ -2585,6 +2757,8 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
 });
 
 test("physical IDs and sequences fail closed before reservation while controls outlive the physical cap", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+
   class IdentityCapWebSocket extends EventEmitter {
     static instances = [];
 
@@ -2709,7 +2883,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   }).reason, "event-id-conflicts-with-control");
   assert.equal(capClient.getStatus().physicalEventIdLatched, true);
   assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } }).reason, "event-id-admission-limit");
-  await new Promise((resolve) => setTimeout(resolve, 6_000));
+  t.mock.timers.tick(4_097);
   const controlFrames = capSocket.sent.filter((frame) => [
     "DJ_AGENT_HELLO",
     "DJ_STATE_SYNC",
@@ -3127,4 +3301,16 @@ test("native optional dependency and pkg asset configuration keep source/package
   const clientSource = fs.readFileSync(path.join(__dirname, "..", "server", "dj-agent", "syndocalClient.js"), "utf8");
   assert.match(clientSource, /require\("ws"\)/);
   assert.equal(resolveWebSocketImplementation("rb-output-test-missing-ws"), null);
+});
+
+test("web server does not monitor or automatically launch Rekordbox", () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, "..", "server", "index.js"), "utf8");
+  assert.doesNotMatch(serverSource, /tryRecoverHook|hookRuntime|HOOK_INJECT_SCRIPT|REKORDBOX_EXE_PATH/);
+  assert.doesNotMatch(serverSource, /process\.kill\([^)]*,\s*0\)/);
+
+  const injectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "inject_hook.py"),
+    "utf8",
+  );
+  assert.match(injectorSource, /"--handoff-seconds"[\s\S]*?default=0/);
 });

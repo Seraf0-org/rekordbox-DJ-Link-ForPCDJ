@@ -186,8 +186,8 @@ def main() -> int:
     parser.add_argument(
         "--handoff-seconds",
         type=int,
-        default=90,
-        help="Watch for spawned replacement process and reinject",
+        default=0,
+        help="Optional seconds to watch for a launcher handoff (disabled by default)",
     )
     args = parser.parse_args()
 

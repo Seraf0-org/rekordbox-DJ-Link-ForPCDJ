@@ -8,10 +8,6 @@
   </head>
   <body>
     <main class="container">
-      <header class="card">
-        <h1>Rekordbox DJ Link</h1>
-      </header>
-
       <section class="card settings-panel">
         <div class="settings-grid">
           <label class="setting">
@@ -128,6 +124,43 @@
         </div>
       </section>
 
+      <section class="card mixer-panel" aria-label="Mixer fader state">
+        <div class="mixer-heading">
+          <span class="label">MIXER</span>
+          <span id="mixerUpdated" class="mixer-updated">Waiting for fader data</span>
+        </div>
+        <div class="crossfader-row">
+          <span class="mixer-side-label">DECK 1</span>
+          <div id="crossfaderTrack" class="crossfader-track" role="meter" aria-label="Crossfader" aria-valuemin="0" aria-valuemax="100">
+            <span id="crossfaderThumb" class="crossfader-thumb"></span>
+          </div>
+          <span class="mixer-side-label">DECK 2</span>
+          <span id="crossfaderValue" class="mixer-value">-</span>
+        </div>
+        <div class="channel-fader-grid">
+          <div class="channel-fader-readout">
+            <div class="channel-fader-heading">
+              <span class="label">CH FADER 1</span>
+              <span id="deck1OutputState" class="output-state">-</span>
+            </div>
+            <div id="deck1FaderTrack" class="channel-fader-track" role="meter" aria-label="Deck 1 channel fader" aria-valuemin="0" aria-valuemax="100">
+              <span id="deck1FaderFill" class="channel-fader-fill"></span>
+            </div>
+            <span id="deck1FaderValue" class="mixer-value">-</span>
+          </div>
+          <div class="channel-fader-readout">
+            <div class="channel-fader-heading">
+              <span class="label">CH FADER 2</span>
+              <span id="deck2OutputState" class="output-state">-</span>
+            </div>
+            <div id="deck2FaderTrack" class="channel-fader-track" role="meter" aria-label="Deck 2 channel fader" aria-valuemin="0" aria-valuemax="100">
+              <span id="deck2FaderFill" class="channel-fader-fill"></span>
+            </div>
+            <span id="deck2FaderValue" class="mixer-value">-</span>
+          </div>
+        </div>
+      </section>
+
       <section class="deck-grid">
         <article id="deck1Card" class="card deck-card">
           <div class="deck-content">
@@ -228,10 +261,15 @@
         </article>
       </section>
 
-      <section class="card">
-        <div class="label">WARNINGS</div>
-        <ul id="warnings"></ul>
-      </section>
+      <details class="card warning-panel">
+        <summary class="warning-summary">
+          <span class="label">WARNINGS</span>
+          <span id="warningCount" class="warning-count" aria-label="警告件数">0</span>
+        </summary>
+        <div class="warning-list-scroll">
+          <ul id="warnings"></ul>
+        </div>
+      </details>
 
       <section class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -240,6 +278,15 @@
         </div>
         <ul id="debugLogs"></ul>
       </section>
+
+      <footer class="app-footer">
+        <span class="footer-title">Rekordbox DJ Link</span>
+        <span class="footer-meta">
+          <a href="https://github.com/Seraf0-org/rekordbox-DJ-Link-ForPCDJ" target="_blank" rel="noreferrer">Repository</a>
+          <span aria-hidden="true">/</span>
+          <span>Credit: Seraf() / KTN</span>
+        </span>
+      </footer>
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>

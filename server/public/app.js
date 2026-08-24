@@ -1,6 +1,7 @@
 const statusLineEl = document.getElementById("statusLine");
 const sourceLineEl = document.getElementById("sourceLine");
 const warningsEl = document.getElementById("warnings");
+const warningCountEl = document.getElementById("warningCount");
 const debugLogsEl = document.getElementById("debugLogs");
 
 const deck1TitleEl = document.getElementById("deck1Title");
@@ -33,6 +34,19 @@ const deck2LoopStateEl = document.getElementById("deck2LoopState");
 const deck2CardEl = document.getElementById("deck2Card");
 const deck2WaveformEl = document.getElementById("deck2Waveform");
 
+const mixerUpdatedEl = document.getElementById("mixerUpdated");
+const crossfaderTrackEl = document.getElementById("crossfaderTrack");
+const crossfaderThumbEl = document.getElementById("crossfaderThumb");
+const crossfaderValueEl = document.getElementById("crossfaderValue");
+const deck1FaderTrackEl = document.getElementById("deck1FaderTrack");
+const deck1FaderFillEl = document.getElementById("deck1FaderFill");
+const deck1FaderValueEl = document.getElementById("deck1FaderValue");
+const deck1OutputStateEl = document.getElementById("deck1OutputState");
+const deck2FaderTrackEl = document.getElementById("deck2FaderTrack");
+const deck2FaderFillEl = document.getElementById("deck2FaderFill");
+const deck2FaderValueEl = document.getElementById("deck2FaderValue");
+const deck2OutputStateEl = document.getElementById("deck2OutputState");
+
 const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
 const resetThemeEl = document.getElementById("resetTheme");
@@ -60,6 +74,11 @@ const ACCENT_STORAGE_KEY = "rb-output-accent";
 const DEFAULT_THEME = "dark";
 const DEFAULT_ACCENT = "#47e1a8";
 const lastRealtimeBpmByDeck = { 1: null, 2: null };
+const lastTrackBpmByDeck = { 1: null, 2: null };
+let latestState = null;
+let lastWarningsFingerprint = "";
+let lastDebugLogsFingerprint = "";
+let stateFetchInFlight = null;
 
 function normalizeTheme(value) {
   return value === "light" ? "light" : "dark";
@@ -211,10 +230,15 @@ function formatLoopState(loopState) {
     return { text: "-", active: false };
   }
   const active = loopState.active === true;
-  const status = active ? "ACTIVE" : loopState.active === false ? "OFF" : "UNKNOWN";
   const lengthBeats = Number(loopState.lengthBeats);
   const startBeat = Number(loopState.startBeat);
   const endBeat = Number(loopState.endBeat);
+  const startMs = Number(loopState.startMs);
+  const endMs = Number(loopState.endMs);
+  const hasBoundaries =
+    (Number.isFinite(startBeat) && Number.isFinite(endBeat)) ||
+    (Number.isFinite(startMs) && Number.isFinite(endMs));
+  const status = active ? "ACTIVE" : loopState.active === false ? "OFF" : hasBoundaries ? "SET" : "UNKNOWN";
   if (Number.isFinite(lengthBeats) && lengthBeats > 0) {
     const lengthText = `${Number(lengthBeats.toFixed(2))} beats`;
     if (Number.isFinite(startBeat) && Number.isFinite(endBeat)) {
@@ -222,8 +246,6 @@ function formatLoopState(loopState) {
     }
     return { text: `${status} · ${lengthText}`, active };
   }
-  const startMs = Number(loopState.startMs);
-  const endMs = Number(loopState.endMs);
   if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
     return { text: `${status} · ${(startMs / 1000).toFixed(2)}→${(endMs / 1000).toFixed(2)}s`, active };
   }
@@ -319,8 +341,17 @@ function renderDjAgentStatus(status) {
 }
 
 function renderWarnings(items) {
-  warningsEl.innerHTML = "";
   const warnings = Array.isArray(items) ? items : [];
+  if (warningCountEl) {
+    warningCountEl.textContent = String(warnings.length);
+    warningCountEl.classList.toggle("has-warnings", warnings.length > 0);
+  }
+  const fingerprint = JSON.stringify(warnings);
+  if (fingerprint === lastWarningsFingerprint) {
+    return;
+  }
+  lastWarningsFingerprint = fingerprint;
+  warningsEl.innerHTML = "";
   if (!warnings.length) {
     const li = document.createElement("li");
     li.textContent = "No warnings";
@@ -338,8 +369,13 @@ function renderDebugLogs(items) {
   if (!debugLogsEl) {
     return;
   }
-  debugLogsEl.innerHTML = "";
   const logs = Array.isArray(items) ? items.slice(-14).reverse() : [];
+  const fingerprint = JSON.stringify(logs);
+  if (fingerprint === lastDebugLogsFingerprint) {
+    return;
+  }
+  lastDebugLogsFingerprint = fingerprint;
+  debugLogsEl.innerHTML = "";
   if (!logs.length) {
     const li = document.createElement("li");
     li.textContent = "No debug logs";
@@ -360,19 +396,44 @@ function drawWaveform(canvasEl, base64Data, ratio) {
   if (!canvasEl) return;
   const ctx = canvasEl.getContext('2d');
   
-  canvasEl.width = canvasEl.clientWidth || 300;
-  canvasEl.height = canvasEl.clientHeight || 48;
+  const targetWidth = canvasEl.clientWidth || 300;
+  const targetHeight = canvasEl.clientHeight || 48;
+  if (canvasEl.width !== targetWidth) canvasEl.width = targetWidth;
+  if (canvasEl.height !== targetHeight) canvasEl.height = targetHeight;
   
-  if (!base64Data) {
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-color').trim() || '#47e1a8';
+  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
+
+  const drawFallbackSeekbar = () => {
+    const centerY = Math.floor(canvasEl.height / 2);
+    const x = Math.min(canvasEl.width, Math.max(0, (ratio / 100) * canvasEl.width));
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    ctx.fillStyle = muted;
+    ctx.fillRect(0, centerY - 1, canvasEl.width, 2);
+    ctx.fillStyle = accent;
+    ctx.fillRect(0, centerY - 2, x, 4);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(Math.max(0, x - 1), 0, 2, canvasEl.height);
+  };
+
+  if (!base64Data) {
     canvasEl.dataset.waveraw = "";
     canvasEl._cachedHeights = null;
+    drawFallbackSeekbar();
     return;
   }
   
   if (canvasEl.dataset.waveraw !== base64Data || !canvasEl._cachedHeights) {
     canvasEl.dataset.waveraw = base64Data;
-    const bin = atob(base64Data);
+    let bin = "";
+    try {
+      bin = atob(base64Data);
+    } catch {
+      canvasEl.dataset.waveraw = "";
+      canvasEl._cachedHeights = null;
+      drawFallbackSeekbar();
+      return;
+    }
     const heights = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) {
       heights[i] = bin.charCodeAt(i);
@@ -381,10 +442,12 @@ function drawWaveform(canvasEl, base64Data, ratio) {
   }
   
   const heights = canvasEl._cachedHeights;
+  if (!heights?.length) {
+    drawFallbackSeekbar();
+    return;
+  }
   
   ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-color').trim() || '#47e1a8';
-  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
   
   const barWidth = canvasEl.width / heights.length;
   const maxH = 31;
@@ -411,7 +474,21 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   const realtimeRaw = playback?.bpm == null ? NaN : Number(playback.bpm);
   const realtimeBpm =
     Number.isFinite(realtimeRaw) && realtimeRaw > 0 ? realtimeRaw : (fallbackRealtimeBpm == null ? NaN : Number(fallbackRealtimeBpm));
-  const trackBpm = track?.trackBpm == null ? NaN : Number(track.trackBpm);
+  const trackBpmRaw = track?.trackBpm == null ? NaN : Number(track.trackBpm);
+  const trackIdentity = track?.contentId
+    ? `id:${track.contentId}`
+    : track?.title || track?.artist
+      ? `text:${track?.title || ""}\u0000${track?.artist || ""}`
+      : "";
+  if (trackIdentity && Number.isFinite(trackBpmRaw) && trackBpmRaw > 0) {
+    lastTrackBpmByDeck[deckNumber] = { identity: trackIdentity, value: trackBpmRaw };
+  }
+  const cachedTrackBpm = lastTrackBpmByDeck[deckNumber];
+  const trackBpm = Number.isFinite(trackBpmRaw) && trackBpmRaw > 0
+    ? trackBpmRaw
+    : cachedTrackBpm?.identity === trackIdentity
+      ? Number(cachedTrackBpm.value)
+      : NaN;
   const pos = playback?.positionSec == null ? NaN : Number(playback.positionSec);
   const totalRaw = playback?.totalSec == null ? NaN : Number(playback.totalSec);
   const durationFallback = track?.durationSec == null ? NaN : Number(track.durationSec);
@@ -465,6 +542,73 @@ function renderDeckCard(track, playback, view, fallbackRealtimeBpm = null, deckN
   }
 }
 
+function renderMixerState(mixerState, deckPlaybacks) {
+  const clampUnit = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(1, Math.max(0, number)) : NaN;
+  };
+  const crossfader = clampUnit(mixerState?.crossfader);
+  const channelFaders = Array.isArray(mixerState?.channelFaders)
+    ? mixerState.channelFaders.map(clampUnit)
+    : [];
+  const hasMixer = Number.isFinite(crossfader) &&
+    channelFaders.length >= 2 &&
+    Number.isFinite(channelFaders[0]) &&
+    Number.isFinite(channelFaders[1]);
+
+  if (!hasMixer) {
+    if (mixerUpdatedEl) mixerUpdatedEl.textContent = "Waiting for fader data";
+    if (crossfaderValueEl) crossfaderValueEl.textContent = "-";
+    if (crossfaderThumbEl) crossfaderThumbEl.style.left = "50%";
+    for (const view of [
+      { fill: deck1FaderFillEl, value: deck1FaderValueEl, output: deck1OutputStateEl, card: deck1CardEl },
+      { fill: deck2FaderFillEl, value: deck2FaderValueEl, output: deck2OutputStateEl, card: deck2CardEl },
+    ]) {
+      if (view.fill) view.fill.style.width = "0%";
+      if (view.value) view.value.textContent = "-";
+      if (view.output) {
+        view.output.textContent = "-";
+        view.output.classList.remove("live", "muted");
+      }
+      view.card?.classList.remove("is-audible");
+    }
+    return;
+  }
+
+  const crossPercent = Math.round(crossfader * 100);
+  if (crossfaderThumbEl) crossfaderThumbEl.style.left = `${crossPercent}%`;
+  if (crossfaderValueEl) crossfaderValueEl.textContent = `${crossPercent}%`;
+  crossfaderTrackEl?.setAttribute("aria-valuenow", String(crossPercent));
+  if (mixerUpdatedEl) mixerUpdatedEl.textContent = "LIVE · Rekordbox faders";
+
+  const crossGain = [
+    crossfader <= 0.5 ? 1 : (1 - crossfader) * 2,
+    crossfader >= 0.5 ? 1 : crossfader * 2,
+  ];
+  const channelViews = [
+    { deck: 1, value: channelFaders[0], track: deck1FaderTrackEl, fill: deck1FaderFillEl, text: deck1FaderValueEl, output: deck1OutputStateEl, card: deck1CardEl },
+    { deck: 2, value: channelFaders[1], track: deck2FaderTrackEl, fill: deck2FaderFillEl, text: deck2FaderValueEl, output: deck2OutputStateEl, card: deck2CardEl },
+  ];
+  for (let index = 0; index < channelViews.length; index += 1) {
+    const view = channelViews[index];
+    const percent = Math.round(view.value * 100);
+    const effectiveLevel = view.value * crossGain[index];
+    const playback = deckPlaybacks.find((item) => Number(item?.deck) === view.deck);
+    const isPlaying = playback?.isPlaying === true;
+    const isMuted = effectiveLevel <= 0.01;
+    const isLive = isPlaying && !isMuted;
+    if (view.fill) view.fill.style.width = `${percent}%`;
+    if (view.text) view.text.textContent = `${percent}%`;
+    view.track?.setAttribute("aria-valuenow", String(percent));
+    if (view.output) {
+      view.output.textContent = isMuted ? "MUTED" : isLive ? "LIVE" : "OPEN";
+      view.output.classList.toggle("live", isLive);
+      view.output.classList.toggle("muted", isMuted);
+    }
+    view.card?.classList.toggle("is-audible", isLive);
+  }
+}
+
 function pickRecentTrackByBpm(recentTracks, targetBpm, excludedIds = new Set()) {
   if (!Array.isArray(recentTracks) || !Number.isFinite(targetBpm) || targetBpm <= 0) {
     return null;
@@ -493,6 +637,7 @@ function pickRecentTrackByBpm(recentTracks, targetBpm, excludedIds = new Set()) 
 }
 
 function render(state) {
+  latestState = state;
   window.__rbLastState = state;
   const deckNowPlaying = Array.isArray(state?.deckNowPlaying) ? state.deckNowPlaying : [];
   const recentTracks = Array.isArray(state?.recentTracks) ? state.recentTracks : [];
@@ -534,6 +679,28 @@ function render(state) {
   );
   let deck1Track = deck1KnownTrack || deck1FallbackTrack || null;
   let deck2Track = deck2KnownTrack || deck2FallbackTrack || null;
+  const mergeMasterFallback = (track, deck) => {
+    const fallback = Number(playback?.deck) === deck ? state?.nowPlaying : null;
+    if (!fallback) {
+      return track;
+    }
+    const trackId = track?.contentId ? String(track.contentId) : null;
+    const fallbackId = fallback?.contentId ? String(fallback.contentId) : null;
+    if (trackId && fallbackId && trackId !== fallbackId) {
+      return track;
+    }
+    return {
+      ...(track || {}),
+      contentId: trackId || fallbackId || null,
+      title: track?.title || fallback.title || null,
+      artist: track?.artist || fallback.artist || null,
+      durationSec: Number(track?.durationSec) > 0 ? track.durationSec : fallback.durationSec ?? null,
+      trackBpm: Number(track?.trackBpm) > 0 ? track.trackBpm : fallback.trackBpm ?? null,
+      waveform: track?.waveform || fallback.waveform || null,
+    };
+  };
+  deck1Track = mergeMasterFallback(deck1Track, 1);
+  deck2Track = mergeMasterFallback(deck2Track, 2);
   const deck1RealtimeFallback = Number(realtimeBpm?.deck) === 1 ? Number(realtimeBpm?.value) : null;
   const deck2RealtimeFallback = Number(realtimeBpm?.deck) === 2 ? Number(realtimeBpm?.value) : null;
 
@@ -571,6 +738,8 @@ function render(state) {
     loopStateEl: deck2LoopStateEl,
   }, deck2RealtimeFallback, 2, loopStates.find((item) => Number(item?.deck) === 2));
 
+  renderMixerState(state?.mixerState, deckPlaybacks);
+
   const rb = status.rekordbox || {};
   const hook = status.hook || {};
   const sourceInfo = state?.sourceInfo || {};
@@ -598,14 +767,91 @@ function render(state) {
   renderDebugLogs(state?.debugLogs || []);
 }
 
+function estimatePosition(playback, loopState, nowMs) {
+  let position = Number(playback?.positionSec);
+  if (!Number.isFinite(position) || position < 0) {
+    return NaN;
+  }
+  const observedAt = Date.parse(playback?.positionObservedAt || playback?.updatedAt || "");
+  if (playback?.isPlaying === true && Number.isFinite(observedAt)) {
+    const ageSec = Math.min(1.25, Math.max(0, (nowMs - observedAt) / 1000));
+    position += ageSec;
+  }
+  const loopStart = Number(loopState?.startMs) / 1000;
+  const loopEnd = Number(loopState?.endMs) / 1000;
+  if (loopState?.active === true && Number.isFinite(loopStart) && Number.isFinite(loopEnd) && loopEnd > loopStart) {
+    const length = loopEnd - loopStart;
+    if (position >= loopEnd) {
+      position = loopStart + ((position - loopStart) % length);
+    }
+  } else {
+    const total = Number(playback?.totalSec);
+    if (Number.isFinite(total) && total > 0) {
+      position = Math.min(total, position);
+    }
+  }
+  return position;
+}
+
+function renderLivePlaybackFrame() {
+  const nowMs = Date.now();
+  const state = latestState;
+  if (state) {
+    const deckPlaybacks = Array.isArray(state.deckPlaybacks) ? state.deckPlaybacks : [];
+    const deckTracks = Array.isArray(state.deckNowPlaying) ? state.deckNowPlaying : [];
+    const loopStates = Array.isArray(state.loopStates) ? state.loopStates : [];
+    const views = [
+      { deck: 1, positionEl: deck1PositionTextEl, waveformEl: deck1WaveformEl },
+      { deck: 2, positionEl: deck2PositionTextEl, waveformEl: deck2WaveformEl },
+    ];
+    for (const view of views) {
+      const playback = deckPlaybacks.find((item) => Number(item?.deck) === view.deck) ||
+        (Number(state.playback?.deck) === view.deck ? state.playback : null);
+      if (!playback) {
+        continue;
+      }
+      const loopState = loopStates.find((item) => Number(item?.deck) === view.deck);
+      const position = estimatePosition(playback, loopState, nowMs);
+      const total = Number(playback.totalSec);
+      const track = deckTracks.find((item) => Number(item?.deck) === view.deck);
+      const masterFallback = Number(state.playback?.deck) === view.deck ? state.nowPlaying : null;
+      const waveform = track?.waveform || masterFallback?.waveform || null;
+      const ratio = Number.isFinite(position) && Number.isFinite(total) && total > 0
+        ? Math.min(100, Math.max(0, (position / total) * 100))
+        : 0;
+      view.positionEl.textContent = formatDuration(position);
+      drawWaveform(view.waveformEl, waveform, ratio);
+    }
+  }
+  window.requestAnimationFrame(renderLivePlaybackFrame);
+}
+
 async function fetchInitialState() {
-  const response = await fetch("/api/now-playing");
-  const state = await response.json();
-  render(state);
+  if (stateFetchInFlight) {
+    return stateFetchInFlight;
+  }
+  stateFetchInFlight = fetch("/api/now-playing", { cache: "no-store" })
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response.json();
+    })
+    .then((state) => render(state))
+    .catch(() => {})
+    .finally(() => {
+      stateFetchInFlight = null;
+    });
+  return stateFetchInFlight;
 }
 
 function connectSocket() {
+  if (typeof io !== "function") {
+    return null;
+  }
   const socket = io();
+  window.__rbSocket = socket;
+  socket.on("connect", () => fetchInitialState());
   socket.on("state", (state) => render(state));
   socket.on("loop_state", (loopState) => {
     if (!window.__rbLastState || !loopState) {
@@ -620,6 +866,14 @@ function connectSocket() {
     window.__rbLastState = { ...window.__rbLastState, loopStates: next };
     render(window.__rbLastState);
   });
+  socket.on("mixer_state", (mixerState) => {
+    if (!window.__rbLastState || !mixerState) {
+      return;
+    }
+    window.__rbLastState = { ...window.__rbLastState, mixerState };
+    render(window.__rbLastState);
+  });
+  return socket;
 }
 
 loadThemeSettings();
@@ -719,6 +973,7 @@ for (const button of document.querySelectorAll("[data-dj-action]")) {
   });
 }
 
-fetchInitialState().finally(() => {
-  connectSocket();
-});
+connectSocket();
+fetchInitialState();
+window.setInterval(fetchInitialState, 1_000);
+window.requestAnimationFrame(renderLivePlaybackFrame);
