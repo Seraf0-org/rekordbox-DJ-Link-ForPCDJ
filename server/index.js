@@ -3,6 +3,34 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const isPackaged = typeof process.pkg !== "undefined";
 const _exeDir = isPackaged ? path.dirname(process.execPath) : null;
+
+// Installed-release verification mode: `server.exe --verify-install` checks
+// the installed tree (install-manifest, sidecar identity, exe binding and, in
+// packaged builds, the embedded commitment against the running executable)
+// and exits 0/1 WITHOUT starting the server. start-rb.bat runs it before
+// normal startup so a tampered or foreign installation never launches.
+if (process.argv.includes("--verify-install")) {
+  const { verifyInstalledInstall } = require("./installVerification");
+  function argValue(flag) {
+    const index = process.argv.indexOf(flag);
+    return index >= 0 ? process.argv[index + 1] : undefined;
+  }
+  const targetDir = argValue("--install-dir") || _exeDir || process.cwd();
+  const outcome = verifyInstalledInstall({ exeDir: path.resolve(targetDir) });
+  for (const warning of outcome.warnings) console.warn(`warning: ${warning}`);
+  if (!outcome.ok) {
+    for (const failure of outcome.failures) console.error(`- ${failure}`);
+    console.error(`installation verification FAILED for ${targetDir}`);
+    process.exit(1);
+  }
+  console.log(`installation verification OK for ${targetDir}`);
+  console.log(`identityHash: ${outcome.identityHash}`);
+  // Truthful scope label: only a packaged run proves the compiled-in
+  // commitment; system-Node runs are manifest-level checks (layers A-C).
+  console.log(isPackaged ? "provenance: verified-packaged" : "provenance: manifest-only (system Node; no embedded-commitment proof)");
+  process.exit(0);
+}
+
 const express = require("express");
 const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
@@ -16,7 +44,7 @@ const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
-const { createBuildIdentity } = require("./buildIdentity");
+const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
@@ -42,7 +70,10 @@ const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
 const DJ_AGENT_CONFIG = loadDjAgentConfig();
 
-const BUILD_IDENTITY = createBuildIdentity();
+// Packaged mode fails closed here: a missing or malformed build-identity.json
+// next to the executable throws before the HTTP server starts. Runtime env
+// vars can never forge packaged provenance.
+const BUILD_IDENTITY = resolveBuildIdentity();
 
 const app = express();
 const server = http.createServer(app);

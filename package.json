@@ -1,6 +1,6 @@
 {
   "name": "rb-output",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Rekordbox now-playing and realtime BPM viewer for LAN devices",
   "main": "server/index.js",
   "scripts": {
@@ -11,6 +11,8 @@
     "inject:hook": ".venv\\Scripts\\python scripts/inject_hook.py",
     "hook:prepare": "npm run build:hook && npm run inject:hook",
     "build:dist": "powershell -ExecutionPolicy Bypass -File scripts/build-dist.ps1",
+    "preflight": "node scripts/preflight.js",
+    "verify:install": "node scripts/verify-install.js --install-dir",
     "test": "node --test"
   },
   "keywords": [
@@ -46,6 +48,9 @@
   "dependencies": {
     "express": "^5.2.1",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "6.22.0"
   },
   "optionalDependencies": {
     "@ktamas77/abletonlink": "^1.2.3",

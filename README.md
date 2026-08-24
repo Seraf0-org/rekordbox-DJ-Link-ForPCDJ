@@ -4,6 +4,31 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
+## v1.1.2 リリースノート
+
+配布物の真正性検証（provenance）を大幅に強化しました。
+
+* **exe本体へのprovenanceバインディング**: パッケージング前に正準リリースidentityと
+  コミットメントを生成し、そのコミットメントをserver.exe自体にコンパイル同梱します。
+  パッケージ後にsidecar (`build-identity.json`) が実測したexeのSHA-256を束ねます。
+  起動時は「exe内蔵コミットメント ↔ sidecar identity」「実行中exeの実測ハッシュ ↔
+  sidecar binding」を検証し、全て成立するまで `verified-packaged` を表示しません
+  （旧リリースの再再生・外部coherentセットの持ち込みは起動前異常終了）。
+* **`server.exe --verify-install`**: インストール済みツリー（install-manifest、
+  identity、exe束縛）をサーバー起動なしで検証するモードを追加。`start-rb.bat` は
+  通常起動の前にこの検証を行い、失敗時は起動しません。システムNodeに非依存です。
+* **注釈付きタグ必須**: リリースpreflightは `git cat-file -t` で対象がannotated tag
+  オブジェクトであることを要求し、lightweight tagを拒否します。
+* **ツールチェーン固定**: `npm ci`（lockfile厳密）、pkgは `@yao-pkg/pkg@6.22.0` の
+  ローカルpin呼び出しのみ（`npx --yes`廃止）、`python/requirements.txt` は
+  PyInstaller/psutil含め完全ピン留め。未ピンのpip installは廃止しました。
+* **マニフェスト経路強化**: スラッシュ/バックスラッシュ両方のtraverse、ドライブ文字、
+  UNC、絶対パス、重複エントリ、正規化脱出、予約デバイス名、シンボリックリンクを
+  fail-closedで拒否します。
+* **配布物**: ZIPを常に生成し、Inno Setupがある環境ではインストーラーと両方を1つの
+  `dist/release-manifest.json` に束ねます。生成物はすべて `dist/` 配下に出力され、
+  再実行してもワークツリーが汚れません。
+
 ## v1.1.1 リリースノート
 
 Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化しました。
@@ -222,10 +247,13 @@ Windows native prebuildをpkgのassetsに含めます。機器やnative module�
 リポジトリをクローン後、NodeパッケージとPythonライブラリをインストールします。
 
 ```powershell
-npm install
+npm ci
 python -m venv .venv
 .venv\Scripts\pip install -r python\requirements.txt
 ```
+
+`npm ci` はロックされた開発依存 `@yao-pkg/pkg@6.22.0` もインストールします。
+release build では追加の `npm install` や `--no-save` は使用しません。
 
 #### C++コンパイラの導入
 DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用します。`g++` の候補は以下の通りです。
@@ -261,16 +289,17 @@ npm run inject:hook
 
 ## 配布用インストーラーのビルド
 
-GitHub にバージョンタグを push すると CI が自動でインストーラーをビルドし、Releases に添付します。
+GitHub にバージョンタグを push すると CI が自動でインストーラーとZIPをビルドし、Releases に添付します。タグは必ずannotated tagで作成してください（lightweight tagはpreflightが拒否します）。
 
 ```powershell
-git tag v1.x.x
+git tag -a v1.x.x -m "release v1.x.x"
 git push origin v1.x.x
 ```
 
-ローカルでビルドしたい場合は `npm run build:dist` を実行します。Inno Setup がなければ ZIP で出力されます。
-`server.exe` は `@yao-pkg/pkg@6.22.0` のWindows x64 prebuiltが取得できる
-`node22-win-x64` targetで生成します（`package.json`とbuild scriptで一致）。
+ローカルでビルドしたい場合は `npm run build:dist` を実行します。ZIPは常に生成され、
+Inno Setup 6がある環境ではインストーラーも併せて生成されます。`server.exe` は
+`npm ci` によりローカルへ固定インストールされた `@yao-pkg/pkg@6.22.0`
+（`node_modules\.bin`）でのみ生成されます。
 
 ---
 
@@ -279,15 +308,58 @@ git push origin v1.x.x
 Nodeサーバーからは以下のエンドポイントを通じ、他のシステム（OBS連携等）からでもステータスや現在の状態を取得可能です。
 
 - `GET /api/health` - サーバー監視。読み取り専用のbuild identity
-  (`build.version`、`build.gitCommit`、`build.sourceFingerprint`。後者2つは
-  ビルド/起動時に`RB_OUTPUT_GIT_COMMIT`/`RB_OUTPUT_SOURCE_FINGERPRINT`と
-  して16進7..64文字で与えた場合のみ表示)を含み、PIDのバージョン特定に使えます。
+  (`build.version`、`build.gitCommit`、`build.sourceFingerprint`、`build.generatedAt`) と、
+  明示的な`build.provenance`オブジェクト(`status`/`identityHash`/`exeSha256`/
+  `measuredExeSha256`/`commitmentVerified`/`releaseTag`/`commit`/`tree`/
+  `packageLockHash`/`wireContracts`/`tools`等)を含みます。
+  パッケージ版(server.exe)では (1) ビルド時にexe内へコンパイルされたリリース
+  コミットメントと同一ディレクトリの`build-identity.json`(identity部分)の一致、および
+  (2) 実行中server.exe自体の実測SHA-256とsidecar `executableBinding.exeSha256` の一致を
+  起動時に検証し、不成立なら起動前に異常終了します。旧リリースsidecarの再利用や
+  別exeへの差し替えはfail-closedです。ランタイム環境変数
+  `RB_OUTPUT_GIT_COMMIT`/`RB_OUTPUT_SOURCE_FINGERPRINT`は開発モードでのみ使われ、
+  パッケージ版のprovenanceを偽造できません。
   設定パスやcredentialの有無は決して含みません。
 - `GET /api/status` - RekordboxならびにHookエンジンの接続状況(同じ`build`
   identityを含む)
 - `GET /api/now-playing` - 全デッキの状態（JSON）
 - `GET /api/loops` - デッキごとのループ状態（JSON）
 - `GET /api/stream` - 状態更新と `loop_state` イベントのSSEストリーム
+
+### リリースprovenanceの検証 (QA/運用者向け)
+
+`npm run build:dist` は fail-closed な手順で実行されます:
+preflight(汚れた/未追跡ツリー・短いSHA・HEAD/注釈付きタグ不一致・
+package.json/package-lock.json/installer.iss のバージョン不整合を拒否) →
+`dist\build-identity.json`(core identity)と `server\embedded-commitment.js`
+(exeにコンパイルされるコミットメント。生成ソースはgitignoreされ、
+`server/buildIdentity.js` のリテラルrequireと pkg.scripts の
+`server/**/*.js` グロブの二重機構で必ずexeに同梱される) を生成 →
+pkgでserver.exeをパッケージ (コミットメントを同梱) →
+`scripts/bind-executable.js` が実測exeハッシュをsidecarに
+追記 → `dist\install-manifest.json` 生成 (全ペイロードのSHA-256) → ZIPと
+インストーラーを作成 → 外部 `dist\release-manifest.json`
+(両アーティファクトのハッシュとinstall-manifestハッシュを束ねる。自己ハッシュは
+含まないため再帰なし)。
+
+インストール済みツリーの検証は2段階です:
+
+```
+# 1) フル検証（推奨・システムNode不要。exe内蔵コミットメントも検証）
+"C:\Program Files\DJLinkForPCDJ\server.exe" --verify-install
+
+# 2) マニフェスト層の外部検証（システムNodeがある場合）
+node scripts\verify-install.js --install-dir "C:\Program Files\DJLinkForPCDJ"
+```
+
+`start-rb.bat` は通常起動の前に必ず 1) を実行し、失敗時はサーバーを起動しません。
+正準フォーマット、identityハッシュ、全ペイロードのハッシュ、実行中exeとの束縛を
+検証し、欠落・改変ファイルは非ゼロで拒否します。
+
+**境界の明示**: マニフェスト束縛は決定論的なハッシュチェーンであり、完全な再現
+ビルドやデジタル署名（Authenticode等）の保証ではありません。攻撃者がファイル全体を
+再生成できる場合はhash-onlyの束縛では防げず、リリース鍵による署名やHSM管理が
+今後の課題です。
 
 詳細なイベント契約は [API.md](API.md) を参照してください。既存の `state`
 Socket.IOイベントは後方互換のまま `loopStates` を含み、ループ更新時には

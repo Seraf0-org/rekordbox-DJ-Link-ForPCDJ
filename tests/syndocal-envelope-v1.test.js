@@ -464,6 +464,7 @@ test("build identity is read-only, redacted for non-hex input, and version-match
     gitCommit: "abcdef1234567890abcdef1234567890abcdef12",
     sourceFingerprint: "deadbeef",
     generatedAt: "2026-08-24T00:00:00.000Z",
+    provenance: { status: "dev-unverified", identitySource: null, identityHash: null },
   });
   const serialized = JSON.stringify(identity);
   assert.equal(serialized.includes(TEST_TOKEN), false);

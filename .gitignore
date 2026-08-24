@@ -8,3 +8,6 @@ __pycache__/
 .env
 native/bin/
 native/third_party/
+# Generated pre-package by scripts/generate-build-identity.js --emit-module;
+# compiled into server.exe via the literal require in server/buildIdentity.js.
+/server/embedded-commitment.js
