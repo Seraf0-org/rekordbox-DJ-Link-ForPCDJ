@@ -157,8 +157,10 @@ When Stage 2 is active, the pedal aliases are:
 
 `DJ_TIMELINE_STATE` is an inbound generic-json adapter message. It must include
 `state` and a boolean `loopActive`; `timelineId` and `positionBars` are
-optional. A connected client requests a fresh snapshot after hello and after
-each reconnect. Timeline actions require that snapshot and a connected socket,
+optional. With the `syndocal-envelope-v1` adapter the same fields arrive nested
+inside the v1 envelope `payload` object. A connected client requests a fresh
+snapshot after hello and after each reconnect. Timeline actions require that
+snapshot and a connected socket,
 and use the same eventId/sequence/ACK delivery states as other action events.
 The full Japanese integration contract is in
 [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md).

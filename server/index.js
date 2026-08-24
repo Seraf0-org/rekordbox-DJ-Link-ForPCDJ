@@ -17,6 +17,7 @@ const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
+const { createBuildIdentity } = require("./buildIdentity");
 
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
@@ -46,6 +47,8 @@ const HOOK_UDP_ENABLED = process.env.HOOK_UDP_ENABLED !== "false";
 const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
 const DJ_AGENT_CONFIG = loadDjAgentConfig();
+
+const BUILD_IDENTITY = createBuildIdentity();
 
 const app = express();
 const server = http.createServer(app);
@@ -1453,7 +1456,11 @@ app.use((_req, res, next) => {
 app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    build: { ...BUILD_IDENTITY },
+  });
 });
 
 app.get("/api/status", (_req, res) => {
@@ -1465,6 +1472,7 @@ app.get("/api/status", (_req, res) => {
     sourceInfo: state.sourceInfo,
     debugLogs: state.debugLogs,
     updatedAt: state.updatedAt,
+    build: { ...BUILD_IDENTITY },
   });
 });
 

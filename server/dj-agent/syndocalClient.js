@@ -507,6 +507,13 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
   if (name === "generic-json") {
     return { adapterObject: createGenericJsonAdapter({ token }), error: null };
   }
+  if (name === "syndocal-envelope-v1") {
+    try {
+      return { adapterObject: createSyndocalEnvelopeV1Adapter({ token }), error: null };
+    } catch (error) {
+      return { adapterObject: null, error: error?.message || String(error) };
+    }
+  }
   if (!name) {
     return {
       adapterObject: null,
@@ -591,6 +598,365 @@ function validateTypedAck(message) {
   return { valid: true, eventId, outcome: message.outcome };
 }
 
+// Dedicated KDMX/Syndocal legacy v1 envelope wire contract, traced from
+// KDMX crates/protocol/src/lib.rs (DjLinkEnvelope/DjLinkAck and bounds) and
+// crates/io/src/remote_ws.rs (handle_dj_link_client envelope branch). The
+// envelope path is a distinct wire format from generic-json flat frames:
+// every frame carries {v,type,agentId,sessionId,sequence,eventId,payload},
+// typed payloads are deny-unknown-fields, and the server serializes
+// DjLinkAck without ok/message on this wire.
+const ENVELOPE_V1_PROTOCOL_VERSION = 1;
+const ENVELOPE_V1_MAX_SEQUENCE = 9_007_199_254_740_991;
+const ENVELOPE_V1_MAX_FRAME_BYTES = 64 * 1024;
+const ENVELOPE_V1_AGENT_ID = "rb-output-dj-agent";
+const ENVELOPE_ACK_FIELDS = ["v", "type", "eventId", "sequence", "outcome", "code", "stateGeneration"];
+
+function envelopeStringOk(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= MAX_STRING_UTF8_BYTES &&
+    !hasUnicodeControl(value)
+  );
+}
+
+function validateEnvelopeAck(message) {
+  if (!isPlainRecord(message)) {
+    return { valid: false, reason: "ack-not-object" };
+  }
+  if (!hasExactFields(message, ENVELOPE_ACK_FIELDS)) {
+    return { valid: false, reason: "ack-fields-invalid" };
+  }
+  if (message.v !== ENVELOPE_V1_PROTOCOL_VERSION) {
+    return { valid: false, reason: "ack-version-invalid" };
+  }
+  if (message.type !== "ACK") {
+    return { valid: false, reason: "ack-type-mismatch" };
+  }
+  const eventId = normalizeIdentity(message.eventId);
+  if (!eventId || eventId !== message.eventId) {
+    return { valid: false, reason: "ack-event-id-invalid" };
+  }
+  if (
+    !Number.isSafeInteger(message.sequence) ||
+    message.sequence < 1 ||
+    message.sequence > ENVELOPE_V1_MAX_SEQUENCE
+  ) {
+    return { valid: false, reason: "ack-sequence-invalid" };
+  }
+  if (!Number.isSafeInteger(message.stateGeneration) || message.stateGeneration < 0) {
+    return { valid: false, reason: "ack-state-generation-invalid" };
+  }
+  if (typeof message.outcome !== "string" || !ACK_OUTCOMES.has(message.outcome)) {
+    return { valid: false, reason: "ack-outcome-invalid" };
+  }
+  if (
+    message.code !== null &&
+    !envelopeStringOk(message.code)
+  ) {
+    return { valid: false, reason: "ack-code-invalid" };
+  }
+  return { valid: true, eventId, outcome: message.outcome };
+}
+
+// Typed payload encoders mirror the KDMX DjLink*Payload serde structs
+// exactly (required fields present, optional fields omitted when null,
+// numeric/string bounds enforced before any send).
+function encodeEnvelopeMasterChanged(payload = {}) {
+  const masterDeck = optionalField(payload, "masterDeck", normalizeDeck);
+  const deck = optionalField(payload, "deck", normalizeDeck);
+  const playing = Object.hasOwn(payload, "isPlaying")
+    ? optionalBooleanField(payload, "isPlaying")
+    : optionalBooleanField(payload, "playing");
+  const master = optionalBooleanField(payload, "master");
+  if (!masterDeck.valid || !deck.valid || (!masterDeck.value && !deck.value) || !playing.valid || !master.valid) {
+    return null;
+  }
+  const encoded = {};
+  if (masterDeck.value) encoded.masterDeck = masterDeck.value;
+  if (deck.value) encoded.deck = deck.value;
+  encoded.isPlaying = playing.value != null ? playing.value : false;
+  encoded.master = master.value != null ? master.value : true;
+  return encoded;
+}
+
+function encodeEnvelopeMasterTrackActive(payload = {}) {
+  const deck = normalizeDeck(Object.hasOwn(payload, "deck") ? payload.deck : payload.masterDeck);
+  const playSessionId = normalizeOptionalString(payload.playSessionId);
+  const playing = Object.hasOwn(payload, "isPlaying")
+    ? optionalBooleanField(payload, "isPlaying")
+    : optionalBooleanField(payload, "playing");
+  const master = optionalBooleanField(payload, "master");
+  if (deck == null || playSessionId == null || !playing.valid || playing.value !== true || !master.valid) {
+    return null;
+  }
+  const encoded = { deck, playSessionId, isPlaying: true };
+  for (const field of ["contentId", "title", "artist", "deckId", "startedAt"]) {
+    const result = optionalField(payload, field, normalizeOptionalString);
+    if (!result.valid) return null;
+    if (result.value != null) encoded[field] = result.value;
+  }
+  const trackBpm = optionalNumberField(payload, "trackBpm");
+  if (!trackBpm.valid || (trackBpm.value != null && (trackBpm.value < 0 || trackBpm.value > 1_000))) return null;
+  if (trackBpm.value != null) encoded.trackBpm = trackBpm.value;
+  const positionSec = optionalNumberField(payload, "positionSec");
+  if (!positionSec.valid || (positionSec.value != null && positionSec.value < 0)) return null;
+  if (positionSec.value != null) encoded.positionSec = positionSec.value;
+  encoded.master = master.value == null ? true : master.value;
+  return encoded;
+}
+
+function encodeEnvelopeLoopState(payload = {}) {
+  const division = optionalNumberField(payload, "division");
+  const enabled = optionalBooleanField(payload, "enabled");
+  if (
+    !division.valid ||
+    division.value == null ||
+    !Number.isInteger(division.value) ||
+    division.value < 0 ||
+    division.value > 63 ||
+    !enabled.valid
+  ) {
+    return null;
+  }
+  return { division: division.value, enabled: enabled.value == null ? true : enabled.value };
+}
+
+function encodeEnvelopeRelease(payload = {}) {
+  const state = optionalField(payload, "state", normalizeOptionalString);
+  if (!state.valid) return null;
+  const encoded = {};
+  if (state.value != null) encoded.state = state.value;
+  return encoded;
+}
+
+function encodeEnvelopeBeatJump(payload = {}) {
+  const bars = optionalNumberField(payload, "bars");
+  const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
+  if (
+    !bars.valid ||
+    bars.value == null ||
+    !Number.isInteger(bars.value) ||
+    ![-4, 4].includes(bars.value) ||
+    !timelineId.valid ||
+    timelineId.value == null
+  ) {
+    return null;
+  }
+  return { bars: bars.value, timelineId: timelineId.value };
+}
+
+function encodeEnvelopeLoopSet(payload = {}) {
+  const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
+  const active = optionalBooleanField(payload, "active");
+  if (!timelineId.valid || timelineId.value == null || !active.valid || active.value == null) {
+    return null;
+  }
+  return { active: active.value, timelineId: timelineId.value };
+}
+
+function encodeEnvelopeTypedEvent(type, payload) {
+  switch (type) {
+    case "DJ_MASTER_CHANGED":
+      return encodeEnvelopeMasterChanged(payload);
+    case "DJ_MASTER_TRACK_ACTIVE":
+      return encodeEnvelopeMasterTrackActive(payload);
+    case "DJ_LOOP_STATE":
+      return encodeEnvelopeLoopState(payload);
+    case "DJ_RELEASE":
+      return encodeEnvelopeRelease(payload);
+    case "DJ_TIMELINE_BEAT_JUMP":
+      return encodeEnvelopeBeatJump(payload);
+    case "DJ_TIMELINE_LOOP_SET":
+      return encodeEnvelopeLoopSet(payload);
+    default:
+      return null;
+  }
+}
+
+function createSyndocalEnvelopeV1Adapter({ token = "" } = {}) {
+  // The HELLO authToken must satisfy the KDMX DjLinkHelloPayload bounds
+  // before any connection is attempted; fail at factory time instead of
+  // sending an unauthenticated HELLO.
+  if (!validToken(token)) {
+    throw new Error("Syndocal syndocal-envelope-v1 token is required and must be 32..256 UTF-8 bytes");
+  }
+  const sessionIdFor = () => {
+    // KDMX requires every envelope frame to repeat the HELLO agentId/sessionId
+    // (a mismatch is rejected as session_mismatch), while a repeated HELLO
+    // shape is admitted as Duplicate and the socket is closed. A fresh
+    // session identity is minted per HELLO so reconnects never replay.
+    if (!sessionId) {
+      sessionId = `rb-output-${Date.now().toString(36)}-${makeId()}`;
+    }
+    return sessionId;
+  };
+  let sessionId = null;
+  function envelopeFrame({ type, eventId, sequence }, payload) {
+    const sessionIdValue = sessionIdFor();
+    if (!sessionIdValue) {
+      return null;
+    }
+    return {
+      v: ENVELOPE_V1_PROTOCOL_VERSION,
+      type,
+      agentId: ENVELOPE_V1_AGENT_ID,
+      sessionId: sessionIdValue,
+      sequence,
+      eventId,
+      payload,
+    };
+  }
+  return {
+    name: "syndocal-envelope-v1",
+    validateAck: validateEnvelopeAck,
+    encodeHello({ eventId, sequence }) {
+      // A new connection must not inherit a previous session identity.
+      sessionId = null;
+      return envelopeFrame({ type: "DJ_AGENT_HELLO", eventId, sequence }, {
+        authToken: token,
+        version: ENVELOPE_V1_PROTOCOL_VERSION,
+        capabilities: [
+          "DJ_MASTER_CHANGED",
+          "DJ_MASTER_TRACK_ACTIVE",
+          "DJ_LOOP_STATE",
+          "DJ_RELEASE",
+          "DJ_TIMELINE_BEAT_JUMP",
+          "DJ_TIMELINE_LOOP_SET",
+          "DJ_TIMELINE_STATE_REQUEST",
+          "DJ_STATE_SYNC",
+        ],
+      });
+    },
+    encodeEvent(event) {
+      if (!isPlainRecord(event) || typeof event.type !== "string") {
+        return null;
+      }
+      if (!SUPPORTED_EVENT_TYPES.has(event.type)) {
+        return null;
+      }
+      // KDMX DjLinkTimelineStateRequestPayload is an empty deny-unknown-fields
+      // struct; the request never carries payload fields on this wire.
+      const encoded = event.type === "DJ_TIMELINE_STATE_REQUEST"
+        ? {}
+        : encodeEnvelopeTypedEvent(event.type, isPlainRecord(event.payload) ? event.payload : {});
+      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1) {
+        return null;
+      }
+      const eventId = normalizeIdentity(event.eventId);
+      if (!eventId) return null;
+      return encoded
+        ? envelopeFrame({ type: event.type, eventId, sequence: event.sequence }, encoded)
+        : null;
+    },
+    encodeStateSync({ eventId, sequence, state }) {
+      if (!Number.isSafeInteger(sequence) || sequence < 1) return null;
+      const eventIdValue = normalizeIdentity(eventId);
+      if (!eventIdValue) return null;
+      const flat = encodeFlatStateSync(state);
+      if (!flat) return null;
+      const payload = { released: flat.released };
+      if (flat.loopDivision != null) payload.loopDivision = flat.loopDivision;
+      if (flat.masterDeck != null) payload.masterDeck = flat.masterDeck;
+      if (flat.masterTrack != null) payload.masterTrack = flat.masterTrack;
+      return envelopeFrame(
+        { type: "DJ_STATE_SYNC", eventId: eventIdValue, sequence },
+        payload,
+      );
+    },
+    encodeHeartbeat({ eventId, sequence }) {
+      return envelopeFrame({ type: "DJ_HEARTBEAT", eventId, sequence }, {});
+    },
+    encodeTimelineStateRequest({ eventId, sequence }) {
+      return envelopeFrame({ type: "DJ_TIMELINE_STATE_REQUEST", eventId, sequence }, {});
+    },
+    decode(data) {
+      let text;
+      if (typeof data === "string") {
+        text = data;
+      } else if (Buffer.isBuffer(data)) {
+        text = data.toString("utf8");
+      } else if (data && typeof data === "object" && typeof data.data !== "undefined") {
+        return this.decode(data.data);
+      } else {
+        return null;
+      }
+      if (Buffer.byteLength(text, "utf8") > ENVELOPE_V1_MAX_FRAME_BYTES) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        return isPlainRecord(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    },
+    isAck(message) {
+      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V1_PROTOCOL_VERSION && message.type === "ACK");
+    },
+    isStateSyncRequest() {
+      // The KDMX DJ Link server never solicits state sync on the v1
+      // envelope wire; it only broadcasts DJ_TIMELINE_STATE frames.
+      return false;
+    },
+    isTimelineState(message) {
+      return Boolean(
+        isPlainRecord(message) &&
+          message.v === ENVELOPE_V1_PROTOCOL_VERSION &&
+          message.type === "DJ_TIMELINE_STATE"
+      );
+    },
+    decodeTimelineState(message) {
+      if (
+        !isPlainRecord(message) ||
+        message.v !== ENVELOPE_V1_PROTOCOL_VERSION ||
+        message.type !== "DJ_TIMELINE_STATE"
+      ) {
+        return null;
+      }
+      if (!envelopeStringOk(message.agentId) || !envelopeStringOk(message.sessionId)) {
+        return null;
+      }
+      if (
+        !Number.isSafeInteger(message.sequence) ||
+        message.sequence < 1 ||
+        message.sequence > ENVELOPE_V1_MAX_SEQUENCE
+      ) {
+        return null;
+      }
+      const payload = message.payload;
+      if (!isPlainRecord(payload)) return null;
+      const fields = ["state", "loopActive", "timelineId", "positionBars"];
+      if (!hasExactFields(payload, fields)) {
+        return null;
+      }
+      if (typeof payload.state !== "string" || !TIMELINE_STATES.has(payload.state)) {
+        return null;
+      }
+      if (typeof payload.loopActive !== "boolean") {
+        return null;
+      }
+      const eventId = normalizeIdentity(message.eventId);
+      const timelineId = normalizeIdentity(payload.timelineId);
+      if (!eventId || eventId !== message.eventId || !timelineId || timelineId !== payload.timelineId) {
+        return null;
+      }
+      if (!Number.isSafeInteger(payload.positionBars) || payload.positionBars < 0) {
+        return null;
+      }
+      return {
+        type: "DJ_TIMELINE_STATE",
+        state: payload.state,
+        loopActive: payload.loopActive,
+        timelineId,
+        positionBars: payload.positionBars,
+        eventId,
+        sequence: message.sequence,
+      };
+    },
+  };
+}
+
 function createSyndocalClient({
   enabled = false,
   host = "127.0.0.1",
@@ -618,10 +984,17 @@ function createSyndocalClient({
 } = {}) {
   const emitter = new EventEmitter();
   const resolvedAdapter = resolveAdapter({ adapter, adapterFactory, token });
-  const adapterObject = resolvedAdapter.adapterObject;
   let adapterError = resolvedAdapter.error;
-  if (enabled && adapterObject?.name === "generic-json" && !validToken(token)) {
-    adapterError = "Syndocal generic-json token is required and must be 32..256 UTF-8 bytes";
+  const adapterObject = resolvedAdapter.adapterObject;
+  // Both proven wire contracts require a bounded HELLO credential; the
+  // envelope adapter additionally enforces this at factory time.
+  if (
+    enabled &&
+    adapterObject &&
+    (adapterObject.name === "generic-json" || adapterObject.name === "syndocal-envelope-v1") &&
+    !validToken(token)
+  ) {
+    adapterError = "Syndocal token is required and must be 32..256 UTF-8 bytes";
   }
   const url = `ws://${host}:${port}${String(path || "/dj-link").startsWith("/") ? path : `/${path}`}`;
   const ackTypes = new Set([
@@ -1000,7 +1373,9 @@ function createSyndocalClient({
         Object.hasOwn(message, "code")
       ));
     if (looksLikeAck || adapterObject.isAck?.(message)) {
-      const validation = validateTypedAck(message);
+      const validation = typeof adapterObject.validateAck === "function"
+        ? adapterObject.validateAck(message)
+        : validateTypedAck(message);
       if (!validation.valid) {
         const failure = { reason: validation.reason, message };
         emitter.emit("protocol-failure", failure);
@@ -1082,10 +1457,20 @@ function createSyndocalClient({
   }
 
   function publicMessage(message) {
-    if (!message || typeof message !== "object" || !Object.hasOwn(message, "token")) {
+    if (!message || typeof message !== "object") {
       return message;
     }
-    return { ...message, token: "[redacted]" };
+    let result = message;
+    if (Object.hasOwn(result, "token")) {
+      result = { ...result, token: "[redacted]" };
+    }
+    if (
+      isPlainRecord(result.payload) &&
+      Object.hasOwn(result.payload, "authToken")
+    ) {
+      result = { ...result, payload: { ...result.payload, authToken: "[redacted]" } };
+    }
+    return result;
   }
 
   function sendRaw(message, {
@@ -1947,10 +2332,12 @@ function createSyndocalClient({
 module.exports = {
   createGenericJsonAdapter,
   createSyndocalClient,
+  createSyndocalEnvelopeV1Adapter,
   encodeFlatEvent,
   encodeFlatStateSync,
   normalizeTimelineState,
   resolveAdapter,
   resolveWebSocketImplementation,
+  validateEnvelopeAck,
   validateTypedAck,
 };

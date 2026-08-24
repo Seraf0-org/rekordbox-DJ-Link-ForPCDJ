@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-alpha10-loop";
+constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-alpha11-loop";
 constexpr const char* kUdpHost = "127.0.0.1";
 constexpr uint16_t kUdpPort = 22346;
 

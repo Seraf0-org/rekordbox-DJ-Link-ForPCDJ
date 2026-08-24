@@ -69,6 +69,10 @@ npm start
 Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
 unpaired surrogateは拒否します。既定の接続先は
 KDMX互換のflat `generic-json` adapter、`/dj-link`、heartbeat 5000msです。
+adapterは`SYNDOCAL_WS_ADAPTER`で明示選択します。選択できるのは
+`generic-json`(flat frame、ACK 8フィールド固定)と
+`syndocal-envelope-v1`(KDMXレガシーv1 envelope wire、ACK 7フィールド固定)で、
+未設定・未知名はfail-closedとなり黙ってフォールバックしません。
 
 ~~~json
 {
@@ -269,8 +273,13 @@ git push origin v1.x.x
 
 Nodeサーバーからは以下のエンドポイントを通じ、他のシステム（OBS連携等）からでもステータスや現在の状態を取得可能です。
 
-- `GET /api/health` - サーバー監視
-- `GET /api/status` - RekordboxならびにHookエンジンの接続状況
+- `GET /api/health` - サーバー監視。読み取り専用のbuild identity
+  (`build.version`、`build.gitCommit`、`build.sourceFingerprint`。後者2つは
+  ビルド/起動時に`RB_OUTPUT_GIT_COMMIT`/`RB_OUTPUT_SOURCE_FINGERPRINT`と
+  して16進7..64文字で与えた場合のみ表示)を含み、PIDのバージョン特定に使えます。
+  設定パスやcredentialの有無は決して含みません。
+- `GET /api/status` - RekordboxならびにHookエンジンの接続状況(同じ`build`
+  identityを含む)
 - `GET /api/now-playing` - 全デッキの状態（JSON）
 - `GET /api/loops` - デッキごとのループ状態（JSON）
 - `GET /api/stream` - 状態更新と `loop_state` イベントのSSEストリーム
