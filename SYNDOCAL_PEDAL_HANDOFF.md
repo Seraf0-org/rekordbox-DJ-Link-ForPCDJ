@@ -28,10 +28,18 @@ fixtureはこのversionだけを参照します。依存packageのversion、sche
 contractはこのproduct bumpで変更しません。新しいtag、identity-bound artifact、GitHub Release、
 hardware acceptanceは後続のrelease supervisor gateでのみ作成・主張できます。
 
-公演運用はinstallerが作るスタートメニュー／デスクトップの`DJLinkForPCDJ`
-shortcutから起動し、インストール先`start-rb.bat`のpayload検証を必ず通します。
-source checkoutの`start-all.bat`は開発専用であり、既存DLLの存在を成功扱いせず毎回
-Hookを再ビルド・provenance検証します。公演受入れには使用しません。
+検証済みv1.1.4 installerの公開後は、スタートメニュー／デスクトップの
+`DJLinkForPCDJ` shortcutから起動し、インストール先`start-rb.bat`のpayload検証を
+必ず通します。公開済みv1.1.3 shortcutは現行受入れに使用しません。
+
+v1.1.4 installerが未公開の現在は、2026-08-30公演の対象DJ PCに限りREADME
+「v1.1.4未公開期間の公演前source acceptance」を暫定正規経路とします。checkout外の
+JSONへhost `192.168.50.1`、NIC `192.168.50.2`、one-time token、adapter
+`syndocal-envelope-v2`、Setup列挙に完全一致する`CustomMIDI1` name+portを設定し、
+同じPowerShellで`DJ_AGENT_CONFIG_PATH`を指定して`.\start-all.bat`を実行します。
+`REKORDBOX_EXE_PATH`は退役済みで、残っていれば明示的に失敗します。source launcherは
+既存DLLを成功扱いせず、毎回Hookを再ビルド・provenance検証します。この例外は対象DJ PC
+のpre-release acceptanceだけで、一般配布完成の主張ではありません。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
 `refs/tags/v*`の削除とnon-fast-forward更新を禁止します。workflowも

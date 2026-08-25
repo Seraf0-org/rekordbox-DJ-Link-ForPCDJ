@@ -226,22 +226,34 @@ Syndocalが返す権威`DJ_TIMELINE_STATE`が有効になるまでtimeline操作
 `syndocal-envelope-v2`だけです。旧flat/v1名、未知名、曖昧な別名はfail-closedで、
 変換・fallback・legacy adapterはありません。
 
+次は2026-08-30公演のpre-release source acceptanceで使用する現在の構成です。
+実ファイルはcheckout外（例：`C:\SyndocalShow\dj-agent-v1.1.4.json`）へ置き、
+`<SYNDOCAL_ONE_TIME_TOKEN>`だけをSyndocalが表示した現在のtokenへ置換します。
+tokenをrepository、スクリーンショット、ログへ保存しません。`MIDI_PORT: 1`はDJ PCの
+Setup列挙で`CustomMIDI1`がport 1と表示された場合だけ正しく、列挙値が違えばその整数へ
+完全一致で直します。名前だけ、推測値、暗黙port 0は拒否されます。
+
 ~~~json
 {
   "enabled": true,
   "syndocal": {
-    "host": "192.168.10.20",
+    "enabled": true,
+    "host": "192.168.50.1",
     "port": 9100,
     "path": "/dj-link",
-    "nic": "192.168.10.10",
+    "nic": "192.168.50.2",
+    "token": "<SYNDOCAL_ONE_TIME_TOKEN>",
     "adapter": "syndocal-envelope-v2",
     "heartbeatMs": 5000
   },
   "pedal": {
+    "enabled": true,
     "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
   },
   "midi": {
-    "device": "Virtual MIDI",
+    "enabled": true,
+    "device": "CustomMIDI1",
+    "port": 1,
     "mappings": {
       "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
       "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
@@ -402,14 +414,77 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 - [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
 - [MSYS2](https://www.msys2.org/) (mingw-w64)
 
-### 2. インストール済みリリースの起動（公演運用）
+### 2. 検証済みv1.1.4インストール済みリリースの起動
 
-Rekordboxを先に起動し、スタートメニューまたはデスクトップの
+この経路は、v1.1.4のtag・identity-bound artifact・対象DJ PCでの検証が完了した後だけ
+公演運用に使用します。公開済みv1.1.3は使用禁止であり、v1.1.4未公開期間に既存shortcutを
+起動して代用してはいけません。検証済みv1.1.4をインストールした後は、Rekordboxを先に
+起動し、スタートメニューまたはデスクトップの
 `DJLinkForPCDJ` ショートカットを実行してください。これはインストール先の
 `start-rb.bat` を起動し、署名済みmanifestと全payloadを検証してからserverとHookを
-開始します。公演運用ではsource checkoutの `start-all.bat` を使用しません。
+開始します。
 
-### 3. Source checkoutのワンクリック起動（開発専用）
+### 3. v1.1.4未公開期間の公演前source acceptance（現在の暫定正規経路）
+
+検証済みv1.1.4 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
+明示してsourceを起動します。`start-all.bat`は`.env`やSetup画面の選択を保存・読込
+しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定し直して
+ランチャーを再実行してください。
+
+```powershell
+# 旧overrideはclean-break済み。まず全scopeを確認します。
+"Process", "User", "Machine" | ForEach-Object {
+  "${_}: $([Environment]::GetEnvironmentVariable('REKORDBOX_EXE_PATH', $_))"
+}
+
+# Machineが非空ならここで停止し、下の管理者専用ブロックを先に実行します。
+$machineValue = [Environment]::GetEnvironmentVariable("REKORDBOX_EXE_PATH", "Machine")
+if (-not [string]::IsNullOrWhiteSpace($machineValue)) {
+  throw "REKORDBOX_EXE_PATH remains in Machine scope. Clear it in an elevated PowerShell first."
+}
+
+# Machineが空であることを確認後、Userと現在のshellを削除します。
+[Environment]::SetEnvironmentVariable("REKORDBOX_EXE_PATH", $null, "User")
+Remove-Item Env:REKORDBOX_EXE_PATH -ErrorAction SilentlyContinue
+```
+
+最初のブロックがMachine scopeで停止した場合だけ、管理者PowerShellで次を実行します。
+
+```powershell
+# 管理者PowerShellのみ
+[Environment]::SetEnvironmentVariable("REKORDBOX_EXE_PATH", $null, "Machine")
+```
+
+その後、管理者PowerShellを閉じ、通常権限の新しいPowerShellで最初の通常権限ブロックを
+もう一度実行します。Machineが空になったことを確認してUser/Processを削除できたら、
+開いているPowerShellをすべて閉じます。最後に通常権限の新しいPowerShellで残存値を
+fail-closed確認してから起動します。
+
+```powershell
+$remaining = "Process", "User", "Machine" | Where-Object {
+  -not [string]::IsNullOrWhiteSpace(
+    [Environment]::GetEnvironmentVariable("REKORDBOX_EXE_PATH", $_)
+  )
+}
+if ($remaining) {
+  throw "REKORDBOX_EXE_PATH remains in: $($remaining -join ', ')"
+}
+
+$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.4.json"
+.\start-all.bat
+```
+
+起動後に`http://localhost:8787`のSetup/statusで、Agent enabled、token configured、
+adapter `syndocal-envelope-v2`、host `192.168.50.1`、local NIC `192.168.50.2`、MIDI
+`CustomMIDI1`と現在列挙されたexact portを確認します。この画面の`token configured`や
+WebSocketの`connected`だけではHELLO/auth成功を証明しません。次にSyndocal側のpeerで
+HELLO/authとstate sync、generation、heartbeatを確認し、最後に物理イベントの相関ACKを
+受入れ証跡にします。一項目でも不一致なら公演同期を開始しません。
+
+このsource経路は現在の対象DJ PCでのpre-release acceptance例外です。一般配布の
+installer完成を主張するものではありません。
+
+#### Source launcherの動作
 
 プロジェクトルートにあるバッチファイルを実行してください。「DLLの再ビルドと
 provenance検証」→「このcheckoutが所有するWebサーバーを現在の環境変数で再起動」→
@@ -419,7 +494,7 @@ provenance検証」→「このcheckoutが所有するWebサーバーを現在�
 起動中の場合はDLLを保持しているため、いったんRekordboxを終了してから実行してください。
 
 ```powershell
-start-all.bat
+.\start-all.bat
 ```
 
 WebサーバーはRekordboxプロセスを定期監視せず、フックの自動再注入も行いません。
@@ -449,7 +524,14 @@ literalと`[::1]`のようなURL形式を受け付け、bind前にraw literalへ
 含む非空の不正値は、意図せず全IPv4インターフェイスへ公開しないよう起動時に
 fail-closedで拒否します。全インターフェイス公開が不要な場合は、必ず特定NICまたは
 `127.0.0.1`（IPv6 local-onlyなら`::1`）を明示してください。
-※インジェクターから明示的にRekordboxを起動したい場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。`--launch-installed` は対応するインストール済み最新版だけを選びます。Webサーバー単体からは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
+※`REKORDBOX_EXE_PATH`は退役済みです。設定が残っていればインジェクターは明示エラーで
+停止するため、User/System/現在のshellから削除してください。`--launch-path`は任意パス
+overrideではなく、列挙された対応版（7.2.13／7.2.14／7.2.18）のcanonical installと
+完全一致する`rekordbox.exe`だけを受理します。`--launch-installed`は実行中の対応版を
+優先し、なければ対応するインストール済み最新版だけを選びます。未対応版または別install
+だけが実行中なら注入せずfail-closeします。Webサーバー単体からは自動実行されません。
+ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ`--handoff-seconds 90`を
+追加してください。
 
 ---
 
