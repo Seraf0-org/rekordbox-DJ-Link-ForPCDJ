@@ -212,7 +212,10 @@ function createRekordboxMidi({
       output = factory();
       const selection = choosePort(output);
       if (!selection || typeof output.openPort !== "function") {
-        updateStatus({ ok: false, available: true, message: "No configured MIDI output device found" });
+        const message = device && port == null
+          ? "MIDI_DEVICE requires the matching MIDI_PORT"
+          : "No configured MIDI output device found";
+        updateStatus({ ok: false, available: true, message });
         releaseOutput(output);
         output = null;
         return;

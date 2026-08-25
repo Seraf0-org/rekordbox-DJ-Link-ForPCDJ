@@ -13,6 +13,7 @@ const REPO_ROOT = path.join(__dirname, "..");
 const RELEASE_WORKFLOW_PATH = path.join(REPO_ROOT, ".github", "workflows", "release.yml");
 const MINHOOK_CACHE = path.join(REPO_ROOT, "native", "third_party", "minhook");
 const HOOK_SOURCE = path.join(REPO_ROOT, "native", "hookdll", "hookdll.cpp");
+const PATH_ENV_NAME = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "Path";
 const SCRIPT = fs.readFileSync(SCRIPT_PATH, "utf8");
 const WINDOWS_DESKTOP_BOOTSTRAP = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP_PATH, "utf8");
 const RELEASE_WORKFLOW = fs.readFileSync(RELEASE_WORKFLOW_PATH, "utf8");
@@ -30,6 +31,31 @@ const BOOTSTRAP_STATE_CONTENT = [
 // Emitted by the race wrapper on every trusted compiler invocation so the
 // Windows PowerShell 5.1 stderr-tolerance behavior is exercised end to end.
 const STDERR_NOISE_TEXT = "rb-build-hook-native-stderr-noise";
+let cachedTrustedMachineGit = undefined;
+
+function trustedMachineGitExecutableForTests() {
+  if (cachedTrustedMachineGit !== undefined) return cachedTrustedMachineGit;
+  const script = [
+    "$roots=@()",
+    "foreach($key in @('HKLM:\\SOFTWARE\\GitForWindows','HKLM:\\SOFTWARE\\WOW6432Node\\GitForWindows')){",
+    "  $registered=Get-ItemProperty -LiteralPath $key -Name InstallPath -ErrorAction SilentlyContinue",
+    "  if($null -ne $registered){$roots+=$registered.InstallPath}",
+    "}",
+    "$roots+=(Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Git')",
+    "$roots+=(Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Git')",
+    "foreach($root in @($roots|Where-Object{-not [string]::IsNullOrWhiteSpace($_)}|Select-Object -Unique)){",
+    "  $candidate=Join-Path $root 'cmd\\git.exe'",
+    "  if(Test-Path -LiteralPath $candidate -PathType Leaf){[Console]::Out.Write([IO.Path]::GetFullPath($candidate));exit 0}",
+    "}",
+    "exit 1",
+  ].join(";");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  cachedTrustedMachineGit = result.status === 0 ? result.stdout.trim() : "";
+  return cachedTrustedMachineGit;
+}
 
 function tempRoot(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -52,7 +78,19 @@ function makeProjectFixture(t) {
   fs.copyFileSync(HOOK_SOURCE, path.join(root, "native", "hookdll", "hookdll.cpp"));
   const cache = path.join(root, "native", "third_party", "minhook");
   fs.mkdirSync(path.dirname(cache), { recursive: true });
-  fs.cpSync(MINHOOK_CACHE, cache, { recursive: true });
+  // Node 22.22.1 on Windows can access-violate inside recursive fs.cpSync when
+  // its source directory is under this non-ASCII OneDrive checkout. A no-
+  // hardlink local clone is deterministic, avoids sharing mutable object files
+  // with the repository cache, and adds no network dependency.
+  const clone = spawnSync("git", [
+    "clone", "--quiet", "--local", "--no-hardlinks", "--no-checkout",
+    MINHOOK_CACHE, cache,
+  ], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(clone.status, 0, `local MinHook fixture clone failed:\n${clone.stdout}\n${clone.stderr}`);
+  git(cache, ["remote", "set-url", "origin", MINHOOK_REPO]);
   // The source checkout may have been materialized under a user's global
   // autocrlf setting. Normalize the copied fixture before the child script
   // deliberately disables global config.
@@ -63,12 +101,19 @@ function makeProjectFixture(t) {
 
 function runBuild(root, extraEnv = {}, pathPrefix = "", extraArgs = []) {
   const output = path.join(root, "native", "bin", "rb_hook.dll");
-  const pathName = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "Path";
-  const inheritedPath = extraEnv[pathName] || process.env[pathName] || "";
+  const callerProvidedPath = Object.prototype.hasOwnProperty.call(extraEnv, PATH_ENV_NAME);
+  let inheritedPath = callerProvidedPath ? extraEnv[PATH_ENV_NAME] : (process.env[PATH_ENV_NAME] || "");
+  const trustedMachineGit = trustedMachineGitExecutableForTests();
+  if (!callerProvidedPath && trustedMachineGit) {
+    // Codex can prepend its own trusted-for-Codex runtime Git, which production
+    // correctly rejects. Default fixtures model a normal machine installation;
+    // explicit PATH tests below remain authoritative and are never rewritten.
+    inheritedPath = `${path.dirname(trustedMachineGit)};${inheritedPath}`;
+  }
   const env = {
     ...process.env,
     ...extraEnv,
-    [pathName]: `${pathPrefix}C:\\msys64\\mingw64\\bin;${inheritedPath}`,
+    [PATH_ENV_NAME]: `${pathPrefix}C:\\msys64\\mingw64\\bin;${inheritedPath}`,
     // Exercise the same pwsh7/Git-Bash inherited module path that made the
     // pre-shared bootstrap launcher fail. Production must normalize it itself.
     PSModulePath: [
@@ -91,6 +136,18 @@ function runBuild(root, extraEnv = {}, pathPrefix = "", extraArgs = []) {
     timeout: 120_000,
   });
   return { ...result, output };
+}
+
+function pathWithoutGitCommands() {
+  return String(process.env[PATH_ENV_NAME] || "")
+    .split(path.delimiter)
+    .filter((entry) => {
+      const directory = entry.trim().replace(/^"|"$/g, "");
+      if (!directory) return false;
+      return !["git.exe", "git.cmd", "git.bat"].some((name) =>
+        fs.existsSync(path.join(directory, name)));
+    })
+    .join(path.delimiter);
 }
 
 function makeNetworkUnavailable() {
@@ -377,6 +434,10 @@ test("Git resolution rejects caller PATH shims and fixes one trusted absolute ex
   assert.match(SCRIPT, /&\s+\$gitExecutable\s+-C\s+\$WorkingDirectory/);
   assert.doesNotMatch(SCRIPT, /&\s+git\s+-C\s+\$WorkingDirectory/);
   assert.match(SCRIPT, /outside the trusted Git for Windows installation roots/);
+  assert.match(SCRIPT, /if \(\$commands\.Count -gt 0\)/);
+  assert.match(SCRIPT, /Join-Path \$root "cmd\\git\.exe"/);
+  assert.match(SCRIPT, /Machine-wide Git for Windows is required/);
+  assert.doesNotMatch(SCRIPT, /LOCALAPPDATA|GitHubDesktop|codex-runtimes/i);
 });
 
 test("Git trust roots derive only from registry and OS known-folder APIs", () => {
@@ -456,6 +517,36 @@ test("native git.exe outside trusted installation roots is rejected before execu
   assert.notEqual(result.status, 0, "git.exe outside trusted roots was accepted");
   assert.match(`${result.stdout}\n${result.stderr}`, /outside the trusted Git for Windows installation roots/);
   assert.equal(fs.existsSync(result.output), false, "hook DLL was produced after trusted-root rejection");
+});
+
+test("missing caller PATH Git falls back only to canonical machine-wide Git for Windows", (t) => {
+  const trustedGit = trustedMachineGitExecutableForTests();
+  if (!trustedGit) {
+    t.skip("canonical machine-wide Git for Windows is unavailable");
+    return;
+  }
+  const fixture = makeProjectFixture(t);
+  const sanitizedPath = pathWithoutGitCommands();
+  const probe = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "if (@(Get-Command git -All -ErrorAction SilentlyContinue).Count -eq 0) { exit 0 } else { exit 91 }",
+  ], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, [PATH_ENV_NAME]: sanitizedPath },
+  });
+  assert.equal(probe.status, 0, `test precondition failed: caller PATH still resolves Git\n${probe.stdout}\n${probe.stderr}`);
+
+  const blocker = makeNetworkUnavailable();
+  const result = runBuild(fixture.root, {
+    ...blocker.env,
+    [PATH_ENV_NAME]: sanitizedPath,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /Using validated pinned MinHook cache offline/);
+  assert.equal(fs.existsSync(result.output), true, "canonical trusted-Git fallback did not produce the hook DLL");
 });
 
 test("caller PATH g++ shim is rejected by compiler provenance validation", (t) => {
@@ -630,6 +721,50 @@ test("owned state after rename recovers offline by verifying destination and rem
   assert.equal(fs.existsSync(recovery.output), true, "recovery did not produce the hook DLL");
 });
 
+test("owned complete pinned staging recovers offline after a pre-rename interruption", (t) => {
+  const fixture = makeProjectFixture(t);
+  const thirdParty = path.join(fixture.root, "native", "third_party");
+  const staging = path.join(thirdParty, "minhook.bootstrap");
+  const state = path.join(thirdParty, "minhook.bootstrap.state");
+  fs.renameSync(fixture.cache, staging);
+  fs.writeFileSync(state, BOOTSTRAP_STATE_CONTENT);
+
+  const blocker = makeNetworkUnavailable();
+  const recovery = runBuild(fixture.root, blocker.env, blocker.pathPrefix);
+  assert.equal(recovery.status, 0, `${recovery.stdout}\n${recovery.stderr}`);
+  assert.equal(fs.existsSync(fixture.cache), true, "verified staging was not renamed into the final cache");
+  assert.equal(fs.existsSync(staging), false, "verified staging remained after recovery");
+  assert.equal(fs.existsSync(state), false, "owned state remained after recovery");
+  assert.equal(git(fixture.cache, ["rev-parse", "HEAD"]).stdout.trim(), MINHOOK_COMMIT);
+  assert.equal(fs.existsSync(recovery.output), true, "recovery did not produce the hook DLL");
+});
+
+test("owned complete staging with a hidden raw source mutation is rejected and preserved", (t) => {
+  const fixture = makeProjectFixture(t);
+  const thirdParty = path.join(fixture.root, "native", "third_party");
+  const staging = path.join(thirdParty, "minhook.bootstrap");
+  const state = path.join(thirdParty, "minhook.bootstrap.state");
+  fs.renameSync(fixture.cache, staging);
+  fs.writeFileSync(state, BOOTSTRAP_STATE_CONTENT);
+  const mutated = path.join(staging, "src", "hde", "hde64.h");
+  fs.appendFileSync(mutated, "\r\nbootstrap-race-mutation\r\n");
+  git(staging, ["update-index", "--assume-unchanged", "src/hde/hde64.h"]);
+  assert.equal(
+    git(staging, ["status", "--porcelain=1", "--untracked-files=all"]).stdout.trim(),
+    "",
+    "fixture mutation was not hidden from ordinary Git status",
+  );
+
+  const result = runBuild(fixture.root);
+  assert.notEqual(result.status, 0, "mutated owned staging was accepted");
+  assert.match(`${result.stdout}\n${result.stderr}`, /assume-unchanged|raw worktree hash mismatch/i);
+  assert.equal(fs.existsSync(fixture.cache), false, "mutated staging became the final cache");
+  assert.equal(fs.existsSync(staging), true, "mutated staging was deleted");
+  assert.equal(fs.existsSync(state), true, "owned state was removed after mutation rejection");
+  assert.equal(fs.readFileSync(mutated, "utf8").endsWith("bootstrap-race-mutation\r\n"), true);
+  assert.equal(fs.existsSync(result.output), false, "hook DLL was produced from mutated staging");
+});
+
 test("destination and owned staging conflict refuses ambiguous recovery", (t) => {
   const fixture = makeProjectFixture(t);
   const thirdParty = path.join(fixture.root, "native", "third_party");
@@ -646,6 +781,41 @@ test("destination and owned staging conflict refuses ambiguous recovery", (t) =>
   assert.equal(fs.existsSync(path.join(staging, "staging-entry.txt")), true, "staging contents were not preserved");
   assert.equal(fs.existsSync(state), true, "owned state marker was removed during refusal");
   assert.equal(fs.existsSync(result.output), false, "hook DLL was produced despite ambiguous recovery");
+});
+
+test("owned bootstrap state refuses a staging junction before enumeration", (t) => {
+  const root = makeSourceOnlyProject(t, "rb-minhook-owned-junction-");
+  const thirdParty = path.join(root, "native", "third_party");
+  const target = path.join(root, "owned-junction-target");
+  const staging = path.join(thirdParty, "minhook.bootstrap");
+  const state = path.join(thirdParty, "minhook.bootstrap.state");
+  fs.mkdirSync(thirdParty, { recursive: true });
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "must-not-be-enumerated.txt"), "preserve");
+  let linked = false;
+  try {
+    fs.symlinkSync(target, staging, "junction");
+    linked = fs.lstatSync(staging).isSymbolicLink();
+  } catch {
+    linked = false;
+  }
+  if (!linked) {
+    t.skip("junction creation is not permitted in this environment");
+    return;
+  }
+  fs.writeFileSync(state, BOOTSTRAP_STATE_CONTENT);
+
+  const guardIndex = SCRIPT.indexOf('Assert-NoReparsePathChain -Path $bootstrapRoot -Label "MinHook bootstrap recovery directory"');
+  const enumerateIndex = SCRIPT.indexOf("$bootstrapEntries = @(Get-ChildItem", guardIndex);
+  assert.ok(guardIndex >= 0 && enumerateIndex > guardIndex, "reparse guard must precede staging enumeration");
+
+  const result = runBuild(root);
+  assert.notEqual(result.status, 0, "owned staging junction was accepted");
+  assert.match(`${result.stdout}\n${result.stderr}`, /reparse point; refusing to trust it/i);
+  assert.equal(fs.lstatSync(staging).isSymbolicLink(), true, "staging junction was removed or replaced");
+  assert.equal(fs.readFileSync(path.join(target, "must-not-be-enumerated.txt"), "utf8"), "preserve");
+  assert.equal(fs.existsSync(state), true, "owned state was removed after junction rejection");
+  assert.equal(fs.existsSync(result.output), false, "hook DLL was produced from a staging junction");
 });
 
 test("unowned bootstrap staging blocks bootstrap without any deletion", (t) => {
@@ -929,16 +1099,19 @@ test("trusted compiler stderr noise with a zero exit keeps the build green", (t)
   );
 });
 
-test("the first linker must be the exact MSVC link.exe beside the selected cl.exe", () => {
-  assert.match(SCRIPT, /Immediately before cl\.exe runs/);
+test("MSVC linker and object inputs are exact, measured, warning-fatal, and staged", () => {
   assert.match(SCRIPT, /\$expectedLinker = Join-Path \$clDirectory "link\.exe"/);
   assert.match(SCRIPT, /Assert-RegularFile -Path \$expectedLinker -Label "MSVC link"/);
   assert.match(SCRIPT, /Assert-NoReparsePathChain -Path \$expectedLinker -Label "MSVC link"/);
-  assert.match(SCRIPT, /Get-Command link -All/);
-  assert.match(SCRIPT, /First resolved linker is not a native link\.exe/);
-  assert.match(SCRIPT, /First linker on PATH is not the pinned MSVC link\.exe/);
-  assert.match(SCRIPT, /Git usr\\bin\\link\.exe can never win/);
-  assert.doesNotMatch(SCRIPT, /&\s+link(?:\.exe)?\b/);
+  assert.match(SCRIPT, /Get-TrustedFileEvidence -Path \$expectedLinker -Label "MSVC linker"/);
+  assert.match(SCRIPT, /Invoke-TrustedNativeExecutable -Label "link" -ExecutablePath \$linkerEvidence\.Path/);
+  assert.match(SCRIPT, /Assert-TrustedFileEvidence -Evidence \$linkerEvidence -Label "MSVC linker"/);
+  assert.match(SCRIPT, /Get-TrustedFileEvidence -Path \$objectPath -Label "MSVC compiled object"/);
+  assert.match(SCRIPT, /Assert-TrustedFileEvidence -Evidence \$evidence -Label "MSVC compiled object"/);
+  assert.match(SCRIPT, /"\/DLL",\s*"\/WX"/);
+  assert.match(SCRIPT, /obj\.staging\./);
+  assert.match(SCRIPT, /Remove-MsvcObjectStagingDirectory/);
+  assert.doesNotMatch(SCRIPT, /Get-Command link -All/);
 });
 
 test("Git pin verification is locale-independent and strips Git noise and paths", () => {

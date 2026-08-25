@@ -1201,7 +1201,12 @@ bool init_udp() {
   }
   g_destination.sin_family = AF_INET;
   g_destination.sin_port = htons(kUdpPort);
-  g_destination.sin_addr.s_addr = inet_addr(kUdpHost);
+  if (InetPtonA(AF_INET, kUdpHost, &g_destination.sin_addr) != 1) {
+    closesocket(g_socket);
+    g_socket = INVALID_SOCKET;
+    WSACleanup();
+    return false;
+  }
   return true;
 }
 

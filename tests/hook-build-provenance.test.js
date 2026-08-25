@@ -10,6 +10,7 @@ const { spawnSync } = require("node:child_process");
 const REPO_ROOT = path.join(__dirname, "..");
 const SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "build-hook.ps1");
 const SCRIPT = fs.readFileSync(SCRIPT_PATH, "utf8");
+const HOOK_SOURCE = fs.readFileSync(path.join(REPO_ROOT, "native", "hookdll", "hookdll.cpp"), "utf8");
 
 const CALLER_CONTROLLED_ENVIRONMENT_NAMES = [
   "CC",
@@ -71,6 +72,22 @@ test("hook build pins Vista-and-newer x64 flags and fails first-party warnings",
   assert.match(SCRIPT, /VC\\Auxiliary\\Build\\vcvars64\.bat/);
   assert.match(SCRIPT, /bin\\Hostx64\\x64\\cl\.exe/);
   assert.match(SCRIPT, /Assert-MsvcEnvironmentWasInitializedByVcvars/);
+  assert.match(HOOK_SOURCE, /InetPtonA\(AF_INET, kUdpHost, &g_destination\.sin_addr\)/);
+  assert.doesNotMatch(HOOK_SOURCE, /\binet_addr\s*\(/);
+  assert.match(SCRIPT, /\$minHookCompileUnits\s*=\s*@\(/);
+  const commonStart = SCRIPT.indexOf("$clCommonArgs = @(");
+  const hookArgsStart = SCRIPT.indexOf("$clArgs = $clCommonArgs", commonStart);
+  const minHookArgsStart = SCRIPT.indexOf("$minHookArgs = $clCommonArgs", hookArgsStart);
+  const linkArgsStart = SCRIPT.indexOf("$linkArgs = @(", minHookArgsStart);
+  assert.ok(commonStart >= 0 && hookArgsStart > commonStart && minHookArgsStart > hookArgsStart && linkArgsStart > minHookArgsStart);
+  const commonBlock = SCRIPT.slice(commonStart, hookArgsStart);
+  const hookArgsBlock = SCRIPT.slice(hookArgsStart, minHookArgsStart);
+  const minHookArgsBlock = SCRIPT.slice(minHookArgsStart, linkArgsStart);
+  assert.match(commonBlock, /"\/W4"[\s\S]*?"\/WX"/);
+  assert.doesNotMatch(commonBlock, /"\/wd(?:4201|4244|4310|4701)"/);
+  assert.match(hookArgsBlock, /"\/std:c\+\+17"[\s\S]*?"\/EHsc"/);
+  assert.doesNotMatch(hookArgsBlock, /"\/wd(?:4201|4244|4310|4701)"/);
+  assert.match(minHookArgsBlock, /"\/wd4201"[\s\S]*?"\/wd4244"[\s\S]*?"\/wd4310"[\s\S]*?"\/wd4701"/);
 });
 
 test("hook build rechecks source compiler and MinHook evidence around compilation and validates an AMD64 PE DLL", () => {
@@ -79,6 +96,21 @@ test("hook build rechecks source compiler and MinHook evidence around compilatio
   assert.match(SCRIPT, /function\s+Get-CompilerEvidence/);
   assert.match(SCRIPT, /"--version"/);
   assert.match(SCRIPT, /"\/Bv"/);
+  assert.match(SCRIPT, /\[int\[\]\]\$AllowedExitCodes\s*=\s*@\(0\)/);
+  assert.match(SCRIPT, /\$versionAllowedExitCodes\s*=\s*if \(\$CompilerKind -ceq "cl"\) \{ @\(0, 2\) \}/);
+  assert.match(SCRIPT, /\$versionAllowedExitCodes\s*=\s*if \(\$Evidence\.CompilerKind -ceq "cl"\) \{ @\(0, 2\) \}/);
+  assert.match(SCRIPT, /Invoke-TrustedNativeExecutable -Label "cl" -ExecutablePath \$clExecutable -ArgumentList \$clArgs\s*$/m);
+  assert.match(SCRIPT, /Invoke-TrustedNativeExecutable -Label "link" -ExecutablePath \$linkerEvidence\.Path -ArgumentList \$linkArgs\s*$/m);
+  assert.match(SCRIPT, /Get-TrustedFileEvidence -Path \$objectPath -Label "MSVC compiled object"/);
+  assert.match(SCRIPT, /Assert-TrustedFileEvidence -Evidence \$evidence -Label "MSVC compiled object"/);
+  assert.match(SCRIPT, /Get-TrustedFileEvidence -Path \$expectedLinker -Label "MSVC linker"/);
+  assert.match(SCRIPT, /Assert-TrustedFileEvidence -Evidence \$linkerEvidence -Label "MSVC linker"/);
+  assert.match(SCRIPT, /"\/DLL",\s*"\/WX"/);
+  assert.match(SCRIPT, /function\s+Remove-MsvcObjectStagingDirectory/);
+  assert.match(SCRIPT, /obj\.staging\." \+ \[Guid\]::NewGuid/);
+  assert.match(SCRIPT, /Hook build or post-compile verification failed;[\s\S]*outputs created by this run were removed/);
+  assert.match(SCRIPT, /\[System\.IO\.File\]::Replace\(\$buildDllPath, \$dllOut, \$previousDllBackupPath, \$true\)/);
+  assert.match(SCRIPT, /Close Rekordbox if this DLL is loaded, then retry/);
   assert.match(SCRIPT, /function\s+Assert-HookCompileInputEvidence/);
   assert.match(SCRIPT, /Assert-MinHookTreeAndWorktree\s+-Commit\s+\$minHookCommit/);
   assert.match(SCRIPT, /function\s+Assert-HookDllOutput/);

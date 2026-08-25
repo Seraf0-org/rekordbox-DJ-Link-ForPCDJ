@@ -64,6 +64,17 @@ test("missing pair, substring, case drift, and implicit port zero never open", (
   }
 });
 
+test("name-only MIDI selection explains that the matching port is required", () => {
+  const midi = createRekordboxMidi({
+    enabled: true,
+    device: "CustomMIDI1",
+    port: null,
+    midiModule: { Output: createOutput(["Microsoft GS Wavetable Synth", "CustomMIDI1"]) },
+  });
+  midi.start();
+  assert.equal(midi.getStatus().message, "MIDI_DEVICE requires the matching MIDI_PORT");
+});
+
 test("open refusal and post-open identity drift release the native output and fail closed", () => {
   for (const lifecycle of [
     { opens: [], closes: { count: 0 }, destroys: { count: 0 }, openResult: false },

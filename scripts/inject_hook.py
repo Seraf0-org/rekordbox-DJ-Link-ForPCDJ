@@ -1,5 +1,7 @@
 import argparse
 import ctypes
+import os
+import re
 import subprocess
 import sys
 import time
@@ -20,6 +22,7 @@ MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
 PAGE_READWRITE = 0x04
 INFINITE = 0xFFFFFFFF
+SUPPORTED_REKORDBOX_VERSIONS = {(7, 2, 13), (7, 2, 14), (7, 2, 18)}
 
 
 def _norm_path(value: str) -> str:
@@ -75,6 +78,36 @@ def find_pid(
 
 def launch_rekordbox(exe_path: str) -> None:
     subprocess.Popen([exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def find_latest_supported_rekordbox() -> str:
+    explicit_path = os.environ.get("REKORDBOX_EXE_PATH", "").strip()
+    if explicit_path:
+        candidate = Path(explicit_path).resolve()
+        return str(candidate) if candidate.is_file() else ""
+
+    install_root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "rekordbox"
+    candidates: list[tuple[tuple[int, int, int], Path]] = []
+    try:
+        entries = list(install_root.iterdir())
+    except OSError:
+        return ""
+
+    for entry in entries:
+        match = re.fullmatch(r"rekordbox\s+(\d+)\.(\d+)\.(\d+)", entry.name, re.IGNORECASE)
+        if not match or not entry.is_dir():
+            continue
+        version = tuple(int(value) for value in match.groups())
+        if version not in SUPPORTED_REKORDBOX_VERSIONS:
+            continue
+        executable = entry / "rekordbox.exe"
+        if executable.is_file():
+            candidates.append((version, executable.resolve()))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return str(candidates[0][1])
 
 
 def inject_dll(pid: int, dll_path: Path) -> int:
@@ -182,6 +215,11 @@ def main() -> int:
     )
     parser.add_argument("--process-name", default="rekordbox.exe", help="Target process name")
     parser.add_argument("--launch-path", default="", help="Optional rekordbox.exe path to launch")
+    parser.add_argument(
+        "--launch-installed",
+        action="store_true",
+        help="Launch the newest installed supported Rekordbox when no process is running",
+    )
     parser.add_argument("--wait-seconds", type=int, default=20, help="Wait for process after launch")
     parser.add_argument(
         "--handoff-seconds",
@@ -190,31 +228,37 @@ def main() -> int:
         help="Optional seconds to watch for a launcher handoff (disabled by default)",
     )
     args = parser.parse_args()
+    if args.launch_path and args.launch_installed:
+        parser.error("--launch-path and --launch-installed are mutually exclusive")
 
     dll_path = Path(args.dll_path).resolve()
     if not dll_path.exists():
         print(f"[error] DLL not found: {dll_path}")
         return 1
 
+    launch_path = args.launch_path
+    if args.launch_installed and not launch_path:
+        launch_path = find_latest_supported_rekordbox()
+
     launched_after = None
     pid = find_pid(args.process_name)
-    if pid is None and args.launch_path:
+    if pid is None and launch_path:
         launched_after = time.time()
-        print(f"[info] launching {args.launch_path}", flush=True)
-        launch_rekordbox(args.launch_path)
+        print(f"[info] launching {launch_path}", flush=True)
+        launch_rekordbox(launch_path)
         timeout_at = time.time() + max(1, args.wait_seconds)
         while time.time() < timeout_at and pid is None:
             time.sleep(0.5)
             pid = find_pid(
                 args.process_name,
-                preferred_exe=args.launch_path,
+                preferred_exe=launch_path,
                 launched_after=launched_after,
             )
 
     if pid is None:
         pid = find_pid(
             args.process_name,
-            preferred_exe=args.launch_path or None,
+            preferred_exe=launch_path or None,
             launched_after=launched_after,
         )
 
@@ -242,7 +286,7 @@ def main() -> int:
 
             replacement_pids = list_pids(
                 args.process_name,
-                preferred_exe=args.launch_path or None,
+                preferred_exe=launch_path or None,
                 launched_after=launched_after,
             )
             replacement = next((p for p in replacement_pids if p not in injected_pids), None)

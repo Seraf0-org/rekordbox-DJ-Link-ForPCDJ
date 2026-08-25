@@ -37,23 +37,26 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+echo [rb-output] restarting the source server with the current environment...
+.venv\Scripts\python scripts\restart_source_server.py
 if errorlevel 1 (
-  echo [rb-output] starting web server...
-  start "rb-output-server" /min cmd /c "cd /d %~dp0 && node server\index.js"
-  timeout /t 2 /nobreak >nul
-) else (
-  echo [rb-output] web server already running.
+  echo.
+  echo [ERROR] Source server restart failed.
+  echo         Port 8787 is only stopped automatically when it belongs to
+  echo         this checkout's node server\index.js process.
+  echo.
+  pause
+  exit /b 1
 )
 
 start "" "http://localhost:8787"
 
 echo [rb-output] injecting hook...
-.venv\Scripts\python scripts\inject_hook.py
+.venv\Scripts\python scripts\inject_hook.py --launch-installed --wait-seconds 60
 if errorlevel 1 (
   echo.
   echo [ERROR] Hook injection failed.
-  echo   - Is a supported Rekordbox version ^(7.2.13, 7.2.14, or 7.2.18^) running?
+  echo   - Is a supported Rekordbox version ^(7.2.13, 7.2.14, or 7.2.18^) installed or running?
   echo   - Try running this script as Administrator
   echo   - Antivirus may be blocking DLL injection
   echo.

@@ -199,6 +199,16 @@ $env:DJ_AGENT_ENABLED = "true"
 npm start
 ~~~
 
+MIDI出力は誤ったデバイスへ送信しないよう、`MIDI_DEVICE` と `MIDI_PORT` の
+完全一致を必須にします。たとえばSetup APIで `CustomMIDI1` がport 1と列挙された
+場合は、両方を明示します。
+
+~~~powershell
+$env:MIDI_ENABLED = "true"
+$env:MIDI_DEVICE = "CustomMIDI1"
+$env:MIDI_PORT = "1"
+~~~
+
 または `DJ_AGENT_CONFIG_PATH` に、リポジトリ外のJSON設定ファイルを指定します。Nodeは
 `.env`を自動ロードしないため、`.env.example`は値の一覧を示すテンプレートです。
 トークンは`SYNDOCAL_TOKEN`などのプロセス環境、または明示した外部設定ファイルから
@@ -359,7 +369,7 @@ Windows native prebuildをpkgのassetsに含めます。機器やnative module�
 
 * **OS**: Windows 11 (x64)
 * **Software**: Rekordbox 7.2.13、7.2.14、7.2.18（それ以外はシグネチャの再調査が必要な場合があります）
-* **Build Tools**: Node.js、Python 3、および `g++` (TDM-GCC/MSYS2) または Visual Studio C++ Build Tools
+* **Source Build Tools**: machine-installed Git for Windows、Node.js、Python 3、および `g++` (TDM-GCC/MSYS2) または Visual Studio C++ Build Tools
 
 ※ *注意*: プロセス注入型のフックエンジンのため、アンチウイルスソフト（Windows Defender等）にて検知・ブロックされる場合や、管理者権限が必要になる場合があります。環境に応じた例外設定および自己責任でのご利用をお願いいたします。
 
@@ -370,6 +380,13 @@ Windows native prebuildをpkgのassetsに含めます。機器やnative module�
 ### 1. 初回セットアップ
 
 リポジトリをクローン後、NodeパッケージとPythonライブラリをインストールします。
+
+Source checkoutでは、固定したMinHook commitの取得・検証にmachine-installed Git for
+Windowsが必要です。Git導入後に開いた通常のターミナルでは、`where.exe git`の先頭が通常
+`C:\Program Files\Git\cmd\git.exe`を指します。導入前から開いているプロセスでPATHが古い
+場合も、buildはOS／HKLMから導出した同じtrusted rootのcanonical `cmd\git.exe`だけを探索
+します。alias、shim、信頼済みroot外のportable Gitは拒否します。インストール済みreleaseの
+公演起動にはGit、Node.js、Python、C++ Build Toolsは不要です。
 
 ```powershell
 npm ci
@@ -394,13 +411,19 @@ Rekordboxを先に起動し、スタートメニューまたはデスクトッ�
 
 ### 3. Source checkoutのワンクリック起動（開発専用）
 
-先にRekordboxを起動してから、プロジェクトルートにあるバッチファイルを実行してください。「DLLの再ビルドとprovenance検証」→「Webサーバー起動」→「起動中のRekordboxへのインジェクト」→「ブラウザ起動」までを処理します。既存DLLの存在だけでは成功扱いにしません。
+プロジェクトルートにあるバッチファイルを実行してください。「DLLの再ビルドと
+provenance検証」→「このcheckoutが所有するWebサーバーを現在の環境変数で再起動」→
+「Rekordboxへのインジェクト」→「ブラウザ起動」までを処理します。対応版のRekordboxが
+起動していなければ、インストール済みの7.2.18、7.2.14、7.2.13の順で自動起動します。
+既存DLLの存在だけでは成功扱いにしません。以前にsource Hookを注入したRekordboxが
+起動中の場合はDLLを保持しているため、いったんRekordboxを終了してから実行してください。
 
 ```powershell
 start-all.bat
 ```
 
-WebサーバーはRekordboxプロセスを定期監視せず、未起動時の自動起動やフックの自動再注入も行いません。Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実行してください。
+WebサーバーはRekordboxプロセスを定期監視せず、フックの自動再注入も行いません。
+Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実行してください。
 
 ### 4. 個別の手動実行コマンド（開発専用）
 もし各処理を単独で実行したい場合は以下のコマンドを使用します。
@@ -426,7 +449,7 @@ literalと`[::1]`のようなURL形式を受け付け、bind前にraw literalへ
 含む非空の不正値は、意図せず全IPv4インターフェイスへ公開しないよう起動時に
 fail-closedで拒否します。全インターフェイス公開が不要な場合は、必ず特定NICまたは
 `127.0.0.1`（IPv6 local-onlyなら`::1`）を明示してください。
-※インジェクターから明示的にRekordboxを起動したい場合に限り、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。通常の起動コマンドやWebサーバーからは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
+※インジェクターから明示的にRekordboxを起動したい場合は、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。`--launch-installed` は対応するインストール済み最新版だけを選びます。Webサーバー単体からは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
 
 ---
 

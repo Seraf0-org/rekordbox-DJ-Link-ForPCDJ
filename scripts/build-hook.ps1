@@ -327,12 +327,14 @@ function Assert-RegularFile {
 function Invoke-TrustedNativeExecutable {
   # Runs an already trust-validated native executable while suppressing the
   # Windows PowerShell 5.1 behavior that turns redirected native stderr into
-  # a terminating error. Only a genuine nonzero exit code fails the build,
-  # and diagnostics are trimmed and size-capped before being reported.
+  # a terminating error. Callers may explicitly allow a documented probe exit
+  # code; real build/tool invocations retain the default exact-zero contract.
+  # Diagnostics are trimmed and size-capped before being reported.
   param(
     [Parameter(Mandatory)] [string]$Label,
     [Parameter(Mandatory)] [string]$ExecutablePath,
-    [string[]]$ArgumentList = @()
+    [string[]]$ArgumentList = @(),
+    [int[]]$AllowedExitCodes = @(0)
   )
 
   if ([string]::IsNullOrWhiteSpace($ExecutablePath) -or -not (Test-Path -LiteralPath $ExecutablePath)) {
@@ -358,7 +360,7 @@ function Invoke-TrustedNativeExecutable {
       $standardOutputLines += $entry.ToString()
     }
   }
-  if ($null -eq $exitCode -or $exitCode -ne 0) {
+  if ($null -eq $exitCode -or $AllowedExitCodes -notcontains [int]$exitCode) {
     $diagnostics = (@($standardOutputLines) + @($standardErrorLines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     $diagnostics = $diagnostics.Trim()
@@ -416,7 +418,11 @@ function Get-CompilerEvidence {
 
   $fileEvidence = Get-TrustedFileEvidence -Path $CompilerPath -Label "$CompilerKind compiler"
   $versionArguments = if ($CompilerKind -ceq "g++") { @("--version") } else { @("/Bv") }
-  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$CompilerKind version probe" -ExecutablePath $fileEvidence.Path -ArgumentList $versionArguments
+  # cl.exe /Bv prints complete version evidence but exits 2 when intentionally
+  # invoked without a source file. This documented probe-only result is not a
+  # compilation success and is never allowed for the real cl invocation.
+  $versionAllowedExitCodes = if ($CompilerKind -ceq "cl") { @(0, 2) } else { @(0) }
+  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$CompilerKind version probe" -ExecutablePath $fileEvidence.Path -ArgumentList $versionArguments -AllowedExitCodes $versionAllowedExitCodes
   $version = (@($versionInvocation.StdOut) + @($versionInvocation.StdErr) -join "`n").Trim()
   if ([string]::IsNullOrWhiteSpace($version)) {
     throw "$CompilerKind version probe returned no evidence"
@@ -442,7 +448,8 @@ function Assert-CompilerEvidence {
     throw "$($Evidence.CompilerKind) compiler path or bytes changed during hook build: $($Evidence.Path)"
   }
   $versionArguments = if ($Evidence.CompilerKind -ceq "g++") { @("--version") } else { @("/Bv") }
-  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$($Evidence.CompilerKind) version recheck" -ExecutablePath $Evidence.Path -ArgumentList $versionArguments
+  $versionAllowedExitCodes = if ($Evidence.CompilerKind -ceq "cl") { @(0, 2) } else { @(0) }
+  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$($Evidence.CompilerKind) version recheck" -ExecutablePath $Evidence.Path -ArgumentList $versionArguments -AllowedExitCodes $versionAllowedExitCodes
   $version = (@($versionInvocation.StdOut) + @($versionInvocation.StdErr) -join "`n").Trim()
   if ($version -cne $Evidence.Version) {
     throw "$($Evidence.CompilerKind) compiler version evidence changed during hook build: $($Evidence.Path)"
@@ -569,23 +576,37 @@ function Get-TrustedGitInstallationRoots {
 
 function Resolve-TrustedGitExecutable {
   $commands = @(Get-Command git -All -ErrorAction SilentlyContinue)
-  if ($commands.Count -eq 0) {
-    throw "Git is required to obtain the pinned MinHook source"
-  }
-
-  # PowerShell resolves the first command exactly as a caller would invoke
-  # `git`. A PATH-prepended .cmd/.bat, function, alias, or other shim must not
-  # be bypassed by searching for a later git.exe: reject it before any Git call.
-  $resolved = $commands[0]
-  if ($resolved.CommandType -ne "Application") {
-    throw "Caller Git command is not a native git.exe; refusing aliases/shims: $($resolved.Name)"
-  }
-  $candidatePath = $resolved.Source
-  if ([string]::IsNullOrWhiteSpace($candidatePath)) {
-    $candidatePath = $resolved.Path
-  }
-  if ([string]::IsNullOrWhiteSpace($candidatePath)) {
-    throw "Caller Git command has no executable path"
+  $candidatePath = $null
+  if ($commands.Count -gt 0) {
+    # PowerShell resolves the first command exactly as a caller would invoke
+    # `git`. A PATH-prepended .cmd/.bat, function, alias, or other shim must not
+    # be bypassed by searching for a later git.exe: reject it before any Git call.
+    $resolved = $commands[0]
+    if ($resolved.CommandType -ne "Application") {
+      throw "Caller Git command is not a native git.exe; refusing aliases/shims: $($resolved.Name)"
+    }
+    $candidatePath = $resolved.Source
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+      $candidatePath = $resolved.Path
+    }
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+      throw "Caller Git command has no executable path"
+    }
+  } else {
+    # A process that was already running when Git for Windows was installed can
+    # retain an old PATH. Only when the caller resolves no Git at all, probe the
+    # canonical entry point beneath the same machine-derived trusted roots.
+    # Never use this branch to bypass a caller shim or untrusted executable.
+    foreach ($root in (Get-TrustedGitInstallationRoots)) {
+      $trustedCandidate = [System.IO.Path]::GetFullPath((Join-Path $root "cmd\git.exe"))
+      if (Test-Path -LiteralPath $trustedCandidate -PathType Leaf) {
+        $candidatePath = $trustedCandidate
+        break
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+      throw "Machine-wide Git for Windows is required to validate or obtain the pinned MinHook source"
+    }
   }
   $candidatePath = [System.IO.Path]::GetFullPath($candidatePath)
   $candidateItem = Get-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
@@ -873,18 +894,64 @@ function Remove-MinHookBootstrapState {
   Remove-Item -LiteralPath $bootstrapStatePath -Force -ErrorAction Stop
 }
 
-function Remove-ExactDllOutput {
-  if (-not (Test-Path -LiteralPath $dllOut)) {
+function Remove-ExactGeneratedFile {
+  param(
+    [Parameter(Mandatory)] [string]$Path,
+    [Parameter(Mandatory)] [string]$Label
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
     return
   }
-  # The only deletable artifact is this one exact file, and its whole ancestry
-  # must be reparse-free before removal is permitted.
-  Assert-NoReparsePathChain -Path $dllOut -Label "Hook DLL output"
-  $outputItem = Get-Item -LiteralPath $dllOut -Force -ErrorAction Stop
+  # Only an exact generated file may be removed, and its whole ancestry must
+  # remain reparse-free before deletion.
+  Assert-NoReparsePathChain -Path $Path -Label $Label
+  $outputItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
   if ($outputItem.PSIsContainer) {
-    throw "Hook DLL output path is a directory; refusing to remove it: $dllOut"
+    throw "$Label path is a directory; refusing to remove it: $Path"
   }
-  Remove-Item -LiteralPath $dllOut -Force -ErrorAction Stop
+  Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Remove-ExactDllOutput {
+  Remove-ExactGeneratedFile -Path $dllOut -Label "Hook DLL output"
+}
+
+function Remove-MsvcObjectStagingDirectory {
+  param([Parameter(Mandatory)] [string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+  $full = [System.IO.Path]::GetFullPath($Path)
+  $outPrefix = [System.IO.Path]::GetFullPath($outDir).TrimEnd("\") + "\"
+  if (-not $full.StartsWith($outPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+      [System.IO.Path]::GetFileName($full) -notmatch "^obj\.staging\.[0-9a-f]{32}$") {
+    throw "MSVC object staging path is outside the exact generated namespace: $full"
+  }
+  Assert-NoReparsePathChain -Path $full -Label "MSVC object staging directory"
+  $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+  if (-not $item.PSIsContainer) {
+    throw "MSVC object staging path is not a directory: $full"
+  }
+  $allowedNames = @(
+    "hookdll.obj",
+    "minhook-buffer.obj",
+    "minhook-hook.obj",
+    "minhook-trampoline.obj",
+    "minhook-hde64.obj",
+    "rb_hook.lib",
+    "rb_hook.exp"
+  )
+  foreach ($entry in @(Get-ChildItem -LiteralPath $full -Force -ErrorAction Stop)) {
+    if ($entry.PSIsContainer -or
+        ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $entry.Name -cnotin $allowedNames) {
+      throw "Unexpected or unsafe MSVC object staging entry; refusing cleanup: $($entry.FullName)"
+    }
+    Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+  }
+  Remove-Item -LiteralPath $full -Force -ErrorAction Stop
 }
 
 function Get-MinHookHead {
@@ -1196,6 +1263,7 @@ $gitExecutable = Resolve-TrustedGitExecutable
 
 $needsMinHookNetwork = $true
 $bootstrapActive = $false
+$bootstrapVerifiedCheckout = $false
 $minHookCheckout = Get-Item -LiteralPath $finalMinHookRoot -Force -ErrorAction SilentlyContinue
 $bootstrapCheckout = Get-Item -LiteralPath $bootstrapRoot -Force -ErrorAction SilentlyContinue
 $bootstrapStateExists = Test-Path -LiteralPath $bootstrapStatePath
@@ -1219,6 +1287,27 @@ if ($bootstrapStateExists) {
     $bootstrapStateExists = $false
   } elseif ($null -eq $bootstrapCheckout) {
     throw "Owned MinHook bootstrap state has no staging directory; refusing recovery"
+  } else {
+    # A transient same-parent rename failure can leave a complete reviewed
+    # checkout in the owned staging directory. Strictly validate that exact
+    # commit and raw worktree before retrying; arbitrary or partial contents
+    # remain fail-closed and are never deleted or overwritten.
+    Assert-NoReparsePathChain -Path $bootstrapRoot -Label "MinHook bootstrap recovery directory"
+    $bootstrapRecoveryItem = Get-Item -LiteralPath $bootstrapRoot -Force -ErrorAction Stop
+    if (-not $bootstrapRecoveryItem.PSIsContainer) {
+      throw "MinHook bootstrap recovery path is not a directory: $bootstrapRoot"
+    }
+    $bootstrapEntries = @(Get-ChildItem -LiteralPath $bootstrapRoot -Force -ErrorAction Stop)
+    if (@($bootstrapEntries | Where-Object { $_.Name -cne ".git" }).Count -gt 0) {
+      $minHookRoot = $bootstrapRoot
+      Assert-MinHookCheckout
+      $stagedHead = Get-MinHookHead
+      if ($stagedHead.ObjectType -cne "commit" -or $stagedHead.Commit -cne $minHookCommit) {
+        throw "Owned MinHook bootstrap checkout is not the reviewed pin; refusing recovery"
+      }
+      Assert-MinHookTreeAndWorktree -Commit $minHookCommit
+      $bootstrapVerifiedCheckout = $true
+    }
   }
 } elseif ($null -ne $bootstrapCheckout) {
   throw "Unowned MinHook bootstrap staging directory exists; refusing to delete or reuse it: $bootstrapRoot"
@@ -1232,12 +1321,14 @@ if ($null -eq $minHookCheckout) {
     New-Item -ItemType Directory -Path $bootstrapRoot -Force | Out-Null
     Assert-MinHookBootstrapRoot
     Write-MinHookBootstrapState
-  } else {
+  } elseif (-not $bootstrapVerifiedCheckout) {
     Assert-MinHookBootstrapRoot
   }
   $bootstrapActive = $true
   $minHookRoot = $bootstrapRoot
-  Assert-MinHookBootstrapRoot
+  if (-not $bootstrapVerifiedCheckout) {
+    Assert-MinHookBootstrapRoot
+  }
 
   $stageGit = Get-Item -LiteralPath (Join-Path $minHookRoot ".git") -Force -ErrorAction SilentlyContinue
   if ($null -eq $stageGit) {
@@ -1356,9 +1447,22 @@ $sources = @(
   (Join-Path $mhSrc "hde\hde64.c")
 )
 
+$compileInputEvidence = $null
+$msvcObjectDir = $null
+$importLibrary = $null
+$buildDllPath = Join-Path $dllOutDir ("rb_hook.build." + [Guid]::NewGuid().ToString("N") + ".dll")
+$previousDllBackupPath = Join-Path $dllOutDir ("rb_hook.previous." + [Guid]::NewGuid().ToString("N") + ".dll")
+$buildDllPromoted = $false
+$destinationExistedBeforePromotion = $false
+if (Test-Path -LiteralPath $buildDllPath) {
+  throw "Hook DLL staging path already exists: $buildDllPath"
+}
+if (Test-Path -LiteralPath $previousDllBackupPath) {
+  throw "Hook DLL replacement backup path already exists: $previousDllBackupPath"
+}
+try {
 Write-Host "Building hook DLL..."
 $compilerInstallationRoots = @(Get-TrustedCompilerInstallationRoots) + $validatedAdditionalCompilerRoots
-$compileInputEvidence = $null
 $gxxExecutable = Assert-TrustedNativeCompilerExecutable -CommandName "g++" -ExecutableFileName "g++.exe" -TrustedRoots $compilerInstallationRoots
 if ($gxxExecutable) {
   Assert-NoCallerCompilerEnvironmentOverrides -Phase "g++ invocation"
@@ -1380,7 +1484,7 @@ if ($gxxExecutable) {
   ) + $sources + @(
     "-lws2_32",
     "-o",
-    $dllOut
+    $buildDllPath
   )
   $compileInputEvidence = Get-HookCompileInputEvidence -HookSourcePath $hookCpp -CompilerKind "g++" -CompilerPath $gxxExecutable
   Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
@@ -1465,66 +1569,113 @@ if ($gxxExecutable) {
   }
   Assert-MsvcEnvironmentWasInitializedByVcvars
 
-  $objectDir = Join-Path $outDir "obj"
-  if (-not (Test-Path $objectDir)) {
-    New-Item -ItemType Directory -Path $objectDir | Out-Null
+  Assert-NoReparsePathChain -Path $outDir -Label "Hook native output directory"
+  $outDirItem = Get-Item -LiteralPath $outDir -Force -ErrorAction Stop
+  if (-not $outDirItem.PSIsContainer) {
+    throw "Hook native output path is not a directory: $outDir"
   }
-  $importLibrary = Join-Path $outDir "rb_hook.lib"
-  $clArgs = @(
+  $msvcObjectDir = Join-Path $outDir ("obj.staging." + [Guid]::NewGuid().ToString("N"))
+  if (Test-Path -LiteralPath $msvcObjectDir) {
+    throw "MSVC object staging path already exists: $msvcObjectDir"
+  }
+  New-Item -ItemType Directory -Path $msvcObjectDir -ErrorAction Stop | Out-Null
+  Assert-NoReparsePathChain -Path $msvcObjectDir -Label "MSVC object staging directory"
+  $importLibrary = Join-Path $msvcObjectDir "rb_hook.lib"
+  $clCommonArgs = @(
     "/nologo",
-    "/std:c++17",
     "/utf-8",
     "/O2",
-    "/LD",
-    "/EHsc",
     "/W4",
     "/WX",
     "/DWIN32_LEAN_AND_MEAN",
     "/D_WIN32_WINNT=0x0600",
     "/I$mhInclude",
     "/I$mhSrc"
-  ) + $sources + @(
-    "/link",
-    "/OUT:$dllOut",
-    "/IMPLIB:$importLibrary",
-    "ws2_32.lib"
   )
-  Push-Location $objectDir
+  $hookObject = Join-Path $msvcObjectDir "hookdll.obj"
+  $minHookCompileUnits = @(
+    [pscustomobject]@{ Source = (Join-Path $mhSrc "buffer.c"); Object = (Join-Path $msvcObjectDir "minhook-buffer.obj") },
+    [pscustomobject]@{ Source = (Join-Path $mhSrc "hook.c"); Object = (Join-Path $msvcObjectDir "minhook-hook.obj") },
+    [pscustomobject]@{ Source = (Join-Path $mhSrc "trampoline.c"); Object = (Join-Path $msvcObjectDir "minhook-trampoline.obj") },
+    [pscustomobject]@{ Source = (Join-Path $mhSrc "hde\hde64.c"); Object = (Join-Path $msvcObjectDir "minhook-hde64.obj") }
+  )
+  Push-Location $msvcObjectDir
   try {
-    # Immediately before cl.exe runs, prove that the exact MSVC link.exe
-    # sitting beside the selected cl.exe is FIRST in linker resolution on the
-    # effective build PATH. Otherwise a foreign linker such as Git
-    # usr\bin\link.exe could be invoked instead of the pinned toolchain one.
+    # Resolve the linker only beside the selected cl.exe, bind its exact bytes,
+    # and later invoke that absolute path. Caller PATH linkers are irrelevant.
     $clDirectory = [System.IO.Path]::GetDirectoryName($clExecutable)
     $expectedLinker = Join-Path $clDirectory "link.exe"
     Assert-RegularFile -Path $expectedLinker -Label "MSVC link"
     Assert-NoReparsePathChain -Path $expectedLinker -Label "MSVC link"
-    $linkCommands = @(Get-Command link -All -ErrorAction SilentlyContinue)
-    if ($linkCommands.Count -eq 0) {
-      throw "No linker resolved on the effective build PATH; refusing to invoke cl.exe"
-    }
-    if ($linkCommands[0].CommandType -ne "Application") {
-      throw "First resolved linker is not a native link.exe; refusing aliases/shims: $($linkCommands[0].Name)"
-    }
-    $firstLinkerPath = [System.IO.Path]::GetFullPath($linkCommands[0].Source)
-    if (-not $firstLinkerPath.Equals([System.IO.Path]::GetFullPath($expectedLinker), [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw "First linker on PATH is not the pinned MSVC link.exe beside cl.exe; refusing so Git usr\bin\link.exe can never win: $firstLinkerPath"
-    }
+    $linkerEvidence = Get-TrustedFileEvidence -Path $expectedLinker -Label "MSVC linker"
 
     $compileInputEvidence = Get-HookCompileInputEvidence -HookSourcePath $hookCpp -CompilerKind "cl" -CompilerPath $clExecutable
     Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
+    # Keep first-party warnings strict. Pinned MinHook C sources are compiled
+    # separately so only their reviewed, upstream warning set is suppressed;
+    # the hook source never inherits these warning exemptions.
+    $clArgs = $clCommonArgs + @(
+      "/std:c++17",
+      "/EHsc",
+      "/c",
+      $hookCpp,
+      "/Fo$hookObject"
+    )
     $clInvocation = Invoke-TrustedNativeExecutable -Label "cl" -ExecutablePath $clExecutable -ArgumentList $clArgs
     foreach ($line in (@($clInvocation.StdOut) + @($clInvocation.StdErr))) {
       if (-not [string]::IsNullOrWhiteSpace($line)) {
         Write-Host $line
       }
     }
+    $minHookObjects = @()
+    foreach ($unit in $minHookCompileUnits) {
+      $minHookArgs = $clCommonArgs + @(
+        "/TC",
+        "/wd4201",
+        "/wd4244",
+        "/wd4310",
+        "/wd4701",
+        "/c",
+        $unit.Source,
+        "/Fo$($unit.Object)"
+      )
+      $minHookInvocation = Invoke-TrustedNativeExecutable -Label "cl MinHook" -ExecutablePath $clExecutable -ArgumentList $minHookArgs
+      foreach ($line in (@($minHookInvocation.StdOut) + @($minHookInvocation.StdErr))) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+          Write-Host $line
+        }
+      }
+      $minHookObjects += $unit.Object
+    }
+    Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
+    Assert-TrustedFileEvidence -Evidence $linkerEvidence -Label "MSVC linker" | Out-Null
+    $objectEvidence = @()
+    foreach ($objectPath in (@($hookObject) + $minHookObjects)) {
+      $objectEvidence += Get-TrustedFileEvidence -Path $objectPath -Label "MSVC compiled object"
+    }
+    $linkArgs = @(
+      "/NOLOGO",
+      "/DLL",
+      "/WX",
+      "/OUT:$buildDllPath",
+      "/IMPLIB:$importLibrary"
+    ) + @($hookObject) + $minHookObjects + @("ws2_32.lib")
+    $linkInvocation = Invoke-TrustedNativeExecutable -Label "link" -ExecutablePath $linkerEvidence.Path -ArgumentList $linkArgs
+    foreach ($line in (@($linkInvocation.StdOut) + @($linkInvocation.StdErr))) {
+      if (-not [string]::IsNullOrWhiteSpace($line)) {
+        Write-Host $line
+      }
+    }
+    foreach ($evidence in $objectEvidence) {
+      Assert-TrustedFileEvidence -Evidence $evidence -Label "MSVC compiled object" | Out-Null
+    }
+    Assert-TrustedFileEvidence -Evidence $linkerEvidence -Label "MSVC linker" | Out-Null
+    Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
   } finally {
     Pop-Location
   }
 }
 
-try {
   if ($null -eq $compileInputEvidence) {
     throw "Hook compiler invocation did not produce pre-compile provenance evidence"
   }
@@ -1532,15 +1683,74 @@ try {
   # and full pinned MinHook worktree after native compilation. A swap in the
   # compile window can therefore never leave an accepted DLL behind.
   Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
+  $stagedDllEvidence = Assert-HookDllOutput -Path $buildDllPath
+  Assert-NoReparsePathChain -Path $dllOutDir -Label "Hook DLL destination directory"
+  $dllOutDirItem = Get-Item -LiteralPath $dllOutDir -Force -ErrorAction Stop
+  if (-not $dllOutDirItem.PSIsContainer) {
+    throw "Hook DLL destination parent is not a directory: $dllOutDir"
+  }
+  try {
+    if (Test-Path -LiteralPath $dllOut) {
+      $destinationExistedBeforePromotion = $true
+      Assert-RegularFile -Path $dllOut -Label "Existing hook DLL destination"
+      Assert-NoReparsePathChain -Path $dllOut -Label "Existing hook DLL destination"
+      [System.IO.File]::Replace($buildDllPath, $dllOut, $previousDllBackupPath, $true)
+    } else {
+      Move-Item -LiteralPath $buildDllPath -Destination $dllOut -Force:$false -ErrorAction Stop
+    }
+    $buildDllPromoted = $true
+  } catch {
+    throw "Verified hook DLL could not replace the destination. Close Rekordbox if this DLL is loaded, then retry: $($_.Exception.Message)"
+  }
   $dllEvidence = Assert-HookDllOutput -Path $dllOut
+  if ($dllEvidence.Length -ne $stagedDllEvidence.Length -or $dllEvidence.Sha256 -cne $stagedDllEvidence.Sha256) {
+    throw "Hook DLL bytes changed during verified staging promotion"
+  }
+  Remove-ExactGeneratedFile -Path $previousDllBackupPath -Label "Previous hook DLL replacement backup"
 } catch {
   $postCompileError = $_.Exception.Message
   try {
-    Remove-ExactDllOutput
+    if ($buildDllPromoted) {
+      Remove-ExactDllOutput
+    }
+    if (Test-Path -LiteralPath $previousDllBackupPath) {
+      if (Test-Path -LiteralPath $dllOut) {
+        throw "Hook DLL replacement left both destination and previous-backup paths; refusing ambiguous recovery"
+      }
+      Assert-RegularFile -Path $previousDllBackupPath -Label "Previous hook DLL replacement backup"
+      Assert-NoReparsePathChain -Path $previousDllBackupPath -Label "Previous hook DLL replacement backup"
+      Move-Item -LiteralPath $previousDllBackupPath -Destination $dllOut -Force:$false -ErrorAction Stop
+    } elseif ($destinationExistedBeforePromotion -and $buildDllPromoted) {
+      throw "Hook DLL replacement backup vanished before the previous destination could be restored"
+    }
+    Remove-ExactGeneratedFile -Path $buildDllPath -Label "Hook DLL staging output"
+    if (-not [string]::IsNullOrWhiteSpace($importLibrary)) {
+      Remove-ExactGeneratedFile -Path $importLibrary -Label "Hook import library output"
+    }
   } catch {
-    throw "Hook post-compile verification failed ($postCompileError), and exact DLL cleanup failed: $($_.Exception.Message)"
+    throw "Hook build or post-compile verification failed ($postCompileError), and exact output cleanup failed: $($_.Exception.Message)"
   }
-  throw "Hook post-compile verification failed; source/compiler/MinHook/output became unverifiable and exact DLL output was removed: $postCompileError"
+  throw "Hook build or post-compile verification failed; source/compiler/MinHook/output became unverifiable and outputs created by this run were removed: $postCompileError"
+} finally {
+  if (-not [string]::IsNullOrWhiteSpace($msvcObjectDir)) {
+    try {
+      Remove-MsvcObjectStagingDirectory -Path $msvcObjectDir
+    } catch {
+      $stagingCleanupError = $_.Exception.Message
+      try {
+        if ($buildDllPromoted) {
+          Remove-ExactDllOutput
+        }
+        Remove-ExactGeneratedFile -Path $buildDllPath -Label "Hook DLL staging output"
+        if (-not [string]::IsNullOrWhiteSpace($importLibrary)) {
+          Remove-ExactGeneratedFile -Path $importLibrary -Label "Hook import library output"
+        }
+      } catch {
+        throw "MSVC staging cleanup failed ($stagingCleanupError), and exact output cleanup also failed: $($_.Exception.Message)"
+      }
+      throw "MSVC staging cleanup failed; outputs created by this run were removed: $stagingCleanupError"
+    }
+  }
 }
 
 Write-Host "Hook DLL evidence: path=$($dllEvidence.Path) machine=$($dllEvidence.Machine) sha256=$($dllEvidence.Sha256)"
