@@ -6,6 +6,40 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Initialize-WindowsDesktopPowerShellBuildEnvironment {
+  # npm may launch this file through Git Bash. MSYS preserves a pwsh 7-first
+  # PSModulePath into powershell.exe, which makes Windows PowerShell 5.1
+  # resolve incompatible Core modules (or no cmdlet at all). This build relies
+  # on the inbox Windows PowerShell modules for its compiler provenance checks,
+  # so own that environment boundary instead of accepting caller module paths.
+  if ($PSVersionTable.PSEdition -cne "Desktop") {
+    throw "build-dist.ps1 requires Windows PowerShell Desktop; got PSEdition '$($PSVersionTable.PSEdition)'"
+  }
+
+  $nativeModuleDirectory = Join-Path -Path $PSHOME -ChildPath "Modules"
+  $nativeModuleDirectoryItem = Get-Item -LiteralPath $nativeModuleDirectory -Force -ErrorAction Stop
+  if (-not $nativeModuleDirectoryItem.PSIsContainer) {
+    throw "Windows PowerShell inbox module directory is not a directory: $nativeModuleDirectory"
+  }
+  $env:PSModulePath = $nativeModuleDirectory
+
+  $requiredCommands = @(
+    [pscustomobject]@{ Name = "Get-FileHash"; Source = "Microsoft.PowerShell.Utility"; CommandType = "Function" }
+    [pscustomobject]@{ Name = "Get-AuthenticodeSignature"; Source = "Microsoft.PowerShell.Security"; CommandType = "Cmdlet" }
+    [pscustomobject]@{ Name = "Compress-Archive"; Source = "Microsoft.PowerShell.Archive"; CommandType = "Function" }
+  )
+  foreach ($requiredCommand in $requiredCommands) {
+    $commandInfos = @(Get-Command -Name $requiredCommand.Name -All -ErrorAction SilentlyContinue)
+    $commandInfo = if ($commandInfos.Count -eq 1) { $commandInfos[0] } else { $null }
+    if ($null -eq $commandInfo -or $commandInfo.Source -cne $requiredCommand.Source -or [string]$commandInfo.CommandType -cne $requiredCommand.CommandType) {
+      $actualSource = if ($commandInfos.Count -eq 0) { "missing" } else { ($commandInfos | ForEach-Object { "$($_.CommandType):$($_.Source)" }) -join "," }
+      throw "Windows PowerShell inbox command '$($requiredCommand.Name)' must resolve exactly once as '$($requiredCommand.CommandType):$($requiredCommand.Source)', got '$actualSource'"
+    }
+  }
+}
+
+Initialize-WindowsDesktopPowerShellBuildEnvironment
+
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = Join-Path $PSScriptRoot ".."
 }

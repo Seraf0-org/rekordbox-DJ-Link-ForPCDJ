@@ -66,6 +66,39 @@ function stripCommentLines(source) {
 
 test("build-dist pins the exact Inno Setup compiler provenance order and rejects spoofable discovery", () => {
   const source = fs.readFileSync(BUILD_DIST, "utf8");
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+
+  assert.equal(
+    packageJson.scripts["build:dist"],
+    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-dist.ps1",
+    "npm must launch build-dist through exact non-interactive Windows PowerShell hygiene",
+  );
+
+  const bootstrapDefinitionIndex = source.indexOf("function Initialize-WindowsDesktopPowerShellBuildEnvironment");
+  const bootstrapInvocationIndex = source.search(/^Initialize-WindowsDesktopPowerShellBuildEnvironment$/m);
+  const projectRootIndex = source.indexOf("if ([string]::IsNullOrWhiteSpace($ProjectRoot))");
+  assert.ok(bootstrapDefinitionIndex >= 0, "build-dist Windows PowerShell bootstrap is missing");
+  assert.ok(bootstrapInvocationIndex > bootstrapDefinitionIndex, "build-dist Windows PowerShell bootstrap is not invoked");
+  assert.ok(projectRootIndex > bootstrapInvocationIndex, "build-dist must normalize the PowerShell module path before project work");
+  assert.match(source, /\$PSVersionTable\.PSEdition\s+-cne\s+"Desktop"/);
+  assert.match(source, /Join-Path\s+-Path\s+\$PSHOME\s+-ChildPath\s+"Modules"/);
+  assert.match(source, /\$env:PSModulePath\s*=\s+\$nativeModuleDirectory/);
+  assert.match(
+    source,
+    /Get-Command\s+-Name\s+\$requiredCommand\.Name\s+-All\s+-ErrorAction\s+SilentlyContinue/,
+  );
+  for (const [commandName, moduleName, commandType] of [
+    ["Get-FileHash", "Microsoft.PowerShell.Utility", "Function"],
+    ["Get-AuthenticodeSignature", "Microsoft.PowerShell.Security", "Cmdlet"],
+    ["Compress-Archive", "Microsoft.PowerShell.Archive", "Function"],
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `\\[pscustomobject\\]@\\{\\s*Name\\s*=\\s*"${commandName}";\\s*Source\\s*=\\s*"${moduleName.replaceAll(".", "\\.")}";\\s*CommandType\\s*=\\s*"${commandType}"\\s*\\}`,
+      ),
+    );
+  }
 
   // Explicit parameter + environment override are supported alongside the
   // existing script API.
@@ -291,6 +324,7 @@ for (const [name, args, pattern] of [
 
 function runPinningHarness(t) {
   const buildSource = fs.readFileSync(BUILD_DIST, "utf8");
+  const bootstrapFn = extractPowerShellFunction(buildSource, "Initialize-WindowsDesktopPowerShellBuildEnvironment");
   const resolverFn = extractPowerShellFunction(buildSource, "Resolve-PinnedInnoSetupCompiler");
   const revalidateFn = extractPowerShellFunction(buildSource, "Assert-InnoCompilerRevalidated");
   const lines = [
@@ -306,6 +340,14 @@ function runPinningHarness(t) {
     "  throw ('build-dist.ps1 parse errors under PS5.1: ' + $messages)",
     "}",
     "Write-Output 'build-dist parses clean under PS5.1'",
+    "",
+    bootstrapFn,
+    "",
+    "Initialize-WindowsDesktopPowerShellBuildEnvironment",
+    "if ($env:PSModulePath -cne (Join-Path -Path $PSHOME -ChildPath 'Modules')) { throw 'build-dist did not normalize PSModulePath to the inbox module directory' }",
+    "$expectedCommands = @([pscustomobject]@{ Name = 'Get-FileHash'; Source = 'Microsoft.PowerShell.Utility'; CommandType = 'Function' }, [pscustomobject]@{ Name = 'Get-AuthenticodeSignature'; Source = 'Microsoft.PowerShell.Security'; CommandType = 'Cmdlet' }, [pscustomobject]@{ Name = 'Compress-Archive'; Source = 'Microsoft.PowerShell.Archive'; CommandType = 'Function' })",
+    "foreach ($expectedCommand in $expectedCommands) { $commandInfos = @(Get-Command -Name $expectedCommand.Name -All -ErrorAction SilentlyContinue); if ($commandInfos.Count -ne 1 -or $commandInfos[0].Source -cne $expectedCommand.Source -or [string]$commandInfos[0].CommandType -cne $expectedCommand.CommandType) { throw ('required inbox command did not resolve exactly after bootstrap: ' + $expectedCommand.Name) } }",
+    "Write-Output 'adversarial PSModulePath normalized by build-dist bootstrap'",
     "",
     resolverFn,
     "",
@@ -625,12 +667,15 @@ function runPinningHarness(t) {
   // BOM is required so Windows PowerShell 5.1 reads the driver as UTF-8.
   fs.writeFileSync(driverPath, `\ufeff${script}`, "utf8");
   t.after(() => fs.rmSync(driverDir, { recursive: true, force: true }));
-  // When the parent shell is pwsh 7, its PSModulePath breaks inbox-module
-  // autoloading inside Windows PowerShell 5.1 (Get-FileHash et al. become
-  // CommandNotFound). Dropping the variable lets powershell.exe rebuild its
-  // own defaults; on native environments this is a no-op.
+  // Model the Git-Bash/pwsh environment that previously made the production
+  // launcher miss Windows PowerShell inbox commands. The extracted production
+  // bootstrap, rather than a harness-only environment deletion, must repair it.
   const childEnv = { ...process.env };
-  delete childEnv.PSModulePath;
+  childEnv.PSModulePath = [
+    "C:\\Program Files\\PowerShell\\Modules",
+    "C:\\Program Files\\PowerShell\\7\\Modules",
+    "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\Modules",
+  ].join(";");
   return spawnSync(
     "powershell.exe",
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", driverPath],
@@ -646,6 +691,7 @@ test("PS5.1 pinning harness accepts synthetic valid compiler and rejects every t
   const result = runPinningHarness(t);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /build-dist parses clean under PS5\.1/);
+  assert.match(result.stdout, /adversarial PSModulePath normalized by build-dist bootstrap/);
   assert.match(result.stdout, /case valid-revalidation-signer-subject: ok/);
   for (const field of ["path", "origin", "sha256", "signersubject", "productversiondeclared"]) {
     assert.match(result.stdout, new RegExp(`case evidence-${field}-drift-stops-before-iscc: ok`));

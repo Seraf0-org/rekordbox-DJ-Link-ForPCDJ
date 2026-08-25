@@ -104,10 +104,20 @@ ZIPは隔離したexact temp pathへ展開し、同じ二つの検証を再度PA
 しました。
 
 このPCのuser-level npm設定は`script-shell=C:\Program Files\git\bin\bash.exe`です。
-そのため`npm run build:dist`経由だけはWindows PowerShell module resolutionが崩れ、標準
-`Get-FileHash`未解決でfail-closeしました。上記のexact Windows PowerShell直接実行では同じ
-tracked scriptが全7段階をPASSしています。release sourceはこの端末固有のshell設定を迂回
-するfallbackへ変更していません。再生成時はtagged checkoutと上記exact commandを使います。
+当初はその経路がPowerShell 7優先の`PSModulePath`をWindows PowerShell 5.1へ持ち込み、
+`Get-FileHash`未解決でfail-closeしました。post-release branchでは`build:dist`のlauncherを
+exact `powershell.exe -NoProfile -NonInteractive`へ固定し、script自身もPSEdition Desktop、
+`$PSHOME\Modules`、`Get-FileHash` / `Get-AuthenticodeSignature` / `Compress-Archive`の
+exact module sourceとcommand typeを実作業前に検証します。caller由来のmodule path、
+PowerShell Core、alias、duplicate resolutionへfallbackしません。
+
+再発防止は`inno-setup-packaging`とPS5.1 probeの11/11 pass、full `npm test`の
+328 total / 326 pass / 0 fail / 2 intentional real-package skip、変更testの`node --check`、
+package JSON parse、実際のGit Bash設定下での
+`npm run build:dist -- -ValidateAbletonLinkOnly` PASS、`git diff --check`で検証しました。
+これはbuild launcherのpost-release保守修正であり、公開済み`v1.1.3` tag/artifactのruntime
+payloadやidentityを変更しません。immutable tagは移動せず、公開assetも再生成・差し替え
+していません。
 
 配布物までは完成しています。残るDJ-Link完成条件はDJ PCへのinstall、物理LAN、Rekordbox、
 MIDI、ペダル、Syndocal ACK、切断・再接続、両PC restartのhardware acceptance 12項目です。
