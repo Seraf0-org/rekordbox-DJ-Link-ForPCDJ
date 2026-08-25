@@ -44,8 +44,9 @@ nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artist�
 - clean-break後に到達不能となった旧`control-id-conflicts-with-physical`分岐も削除し、
   legacy dead pathを残していません。
 
-したがってsoftware source gateは閉じました。commit/pushと配布生成の後にも、
-物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACKの実機受入れも未検証です。
+したがってsoftware source gateは閉じました。source commit/push、annotated release tag、
+identity-bound配布生成も完了しましたが、物理LAN、Rekordbox、MIDI、ペダル、
+Syndocal ACKの実機受入れは未検証です。
 
 旧生成物inventoryではexact path `C:\Users\kouty\Desktop\rb-output\dist`に
 32 files / `91,752,038` logical bytesが存在しました。内容は`content_lookup.exe`、
@@ -71,17 +72,41 @@ remote-tracking HEADが同じfull hashであることを確認し、source workt
 scan 0件、full `npm test` 328 total / 326 pass / 0 fail / 2 intentional skip、
 first-party warning 0です。独立Ox-alpha最終監査はP0/P1なしでPASSしました。
 
-このcheckpointはsource pushだけです。versioned ZIP/installerのidentity-bound clean
-build、DJ PCへのinstall、物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACK、切断・再接続、
-両PC restartは未実施であり、hardware acceptance 0/12のままです。
+### v1.1.3 immutable tag and distribution checkpoint
 
-push後の`npm run build:dist`は、HEADにannotated `v1.1.3` tagが存在しないためStep 0/7で
-意図どおりfail-closedし、何もbuild/deleteしませんでした。hardware acceptance 0/12の
-段階でimmutable release tagは作成していません。代わりに
-`scripts\build-dist.ps1 -ValidateAbletonLinkOnly`を実行し、現在のAbleton Link addonが
-Windows x64 PE32+ DLL（DLL characteristics `0x0160`）であることは確認しました。
-DJ PCの実機試験はこのbranch sourceを取得して行い、12項目を閉じた後にannotated tag、
-identity-bound ZIP/installer、release manifestを生成します。
+operatorの明示承認後、annotated tag `v1.1.3`をsource/docs/cleanup HEAD
+`24d38f6decbc8880149df1902ef8d2ccfe76b784`へ作成してGitHubへpushしました。remote tag
+objectは`280b615a7928c2dc882ad8d901cddc575cf88a43`、peeled commitは上記full hashです。
+tagは移動せずimmutableとして扱います。
+
+tagged checkoutで
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-dist.ps1`
+を実行し、Step 0/7のclean tree、annotated tag、version triple、package-lock、Ableton-Link
+x64 PE32+、pinned toolchainをすべて通過しました。Inno Setup 6.7.3は実行直前にも
+SHA-256、Authenticode signer、versionを再検証し、次の配布物を生成しました。
+
+- `dist/DJLinkForPCDJ-setup.exe`: `56,071,355` bytes、SHA-256
+  `db86731814d934f396c91da043f476ebc1456a76c0b53172a0255d44c84a18ce`
+- `dist/rb-output-1.1.3.zip`: `62,599,518` bytes、SHA-256
+  `089509c8f4dee18fbe3901d62d7121692676f70afe88b8d635142110ec88d272`
+- release identity hash:
+  `ab67c6f189f8f535f3b7a3b1142420ff6ac1376f6d9bff16d9884f4cc7b5a226`
+
+`node scripts/verify-install.js --install-dir dist`とpackaged
+`dist/server.exe --verify-install`はpayload 10件とembedded provenanceを検証してPASSしました。
+ZIPは隔離したexact temp pathへ展開し、同じ二つの検証を再度PASSしました。ZIPは11 entries、
+重複entry 0、absolute/traversal entry 0です。検証用temp treeはexact path/reparse確認後に削除
+しました。
+
+このPCのuser-level npm設定は`script-shell=C:\Program Files\git\bin\bash.exe`です。
+そのため`npm run build:dist`経由だけはWindows PowerShell module resolutionが崩れ、標準
+`Get-FileHash`未解決でfail-closeしました。上記のexact Windows PowerShell直接実行では同じ
+tracked scriptが全7段階をPASSしています。release sourceはこの端末固有のshell設定を迂回
+するfallbackへ変更していません。再生成時はtagged checkoutと上記exact commandを使います。
+
+配布物までは完成しています。残るDJ-Link完成条件はDJ PCへのinstall、物理LAN、Rekordbox、
+MIDI、ペダル、Syndocal ACK、切断・再接続、両PC restartのhardware acceptance 12項目です。
+現時点は0/12であり、配布生成PASSを実機完成へ読み替えません。
 
 ## v1.1.3 first-run Setup契約 (2026-08-25)
 
