@@ -161,11 +161,86 @@ body.hide-meta-time .meta-time {
   flex-direction: column;
   gap: 0.5rem;
 }
-.dropdown-content .setting {
+.sortable-item {
   display: flex;
-  flex-direction: row;
   align-items: center;
   gap: 0.5rem;
+  min-height: 36px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  cursor: grab;
+}
+
+.sortable-item:active {
+  cursor: grabbing;
+}
+
+.sortable-item.dragging {
+  opacity: 0.55;
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+}
+
+.drag-glyph {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+  pointer-events: none;
+}
+
+.sortable-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 36px;
+  flex: 1 1 auto;
+  cursor: pointer;
+}
+
+.sortable-label input[type="checkbox"]:disabled {
+  cursor: default;
+}
+
+.sortable-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.sortable-controls {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.sortable-move {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.sortable-move:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.sortable-move:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sortable-move:disabled:hover {
+  border-color: var(--card-border);
 }
 
 .realtime-bpm-value {
@@ -366,7 +441,7 @@ button:focus {
   width: 100%;
   height: 48px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--card-border);
   border-radius: 2px;
   opacity: 1.0;
 }
@@ -502,6 +577,235 @@ button:focus {
   display: none;
 }
 
+.dj-agent-setup-card {
+  display: grid;
+  gap: 14px;
+}
+
+.dj-agent-setup-heading,
+.dj-agent-setup-section h2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dj-agent-setup-lead,
+.dj-agent-muted {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dj-agent-setup-message {
+  padding: 9px 10px;
+  border: 1px solid var(--card-border);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.dj-agent-setup-message.is-ready {
+  border-color: color-mix(in srgb, var(--accent-color) 52%, var(--card-border));
+  color: var(--accent-color);
+}
+
+.dj-agent-setup-message.is-error {
+  border-color: #e47f89;
+  color: #e47f89;
+}
+
+.dj-agent-connection-section,
+.dj-agent-setup-section {
+  min-width: 0;
+}
+
+.dj-agent-setup-section h2 {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dj-agent-setup-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dj-agent-setup-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dj-agent-setup-field input,
+.dj-agent-setup-field select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.dj-agent-setup-field input:invalid,
+.dj-agent-setup-field select:invalid {
+  border-color: color-mix(in srgb, #e47f89 66%, var(--card-border));
+}
+
+.dj-agent-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.dj-agent-setup-section {
+  padding: 12px;
+  border: 1px solid var(--card-border);
+  background: color-mix(in srgb, var(--surface) 54%, transparent);
+}
+
+.dj-agent-readiness-summary,
+.dj-agent-artifact-status {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.dj-agent-readiness-summary.is-ready,
+.dj-agent-artifact-status.is-ready,
+.dj-agent-gate-state.is-ready {
+  color: var(--accent-color);
+}
+
+.dj-agent-gate-list,
+.dj-agent-port-list {
+  display: grid;
+  gap: 7px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.dj-agent-gate-list li,
+.dj-agent-port-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--card-border);
+  padding-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dj-agent-gate-name,
+.dj-agent-gate-state,
+.dj-agent-port-list li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.dj-agent-gate-state {
+  text-align: right;
+}
+
+.dj-agent-artifact {
+  display: grid;
+  gap: 8px;
+}
+
+.dj-agent-artifact-link {
+  overflow-wrap: anywhere;
+  color: var(--accent-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.dj-agent-config-preview {
+  max-height: 240px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--card-border);
+  background: var(--surface);
+  color: var(--text);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dj-agent-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dj-agent-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.dj-agent-stage-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dj-agent-stage-table caption {
+  margin-bottom: 8px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.dj-agent-stage-table th,
+.dj-agent-stage-table td {
+  border-top: 1px solid var(--card-border);
+  padding: 9px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+
+.dj-agent-stage-table thead th,
+.dj-agent-stage-table tbody th {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.dj-agent-guided-steps {
+  border-top: 1px solid var(--card-border);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dj-agent-guided-steps summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.dj-agent-guided-steps ol {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 22px;
+}
+
 .dj-agent-status,
 .dj-agent-value {
   color: var(--muted);
@@ -559,6 +863,10 @@ button:focus {
   .deck-grid {
     grid-template-columns: 1fr;
   }
+
+  .dj-agent-setup-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -585,6 +893,16 @@ button:focus {
 
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dj-agent-setup-controls,
+  .dj-agent-setup-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dj-agent-setup-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .app-footer {
