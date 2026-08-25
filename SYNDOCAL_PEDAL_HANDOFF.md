@@ -56,6 +56,11 @@ push後に、Git ignored、tracked file 0、reparse point 0、process reference 
 削除しました。`npm run build:dist`で再生成可能です。source、`node_modules`、`.venv`、
 native source、Git履歴は削除していません。
 
+同じclean/upstream checkpoint後に、ignoredかつuntrackedの
+`native\bin\obj\{buffer,hde64,hook,hookdll,trampoline}.obj`もexact pathで削除しました。
+5 files / `1,081,152` logical bytesで、`scripts\build-hook.ps1`から再生成可能です。
+配布入力の`native\bin\rb_hook.dll`とMinHook source/cacheは保持しています。
+
 ### v1.1.3 strict-v2 pushed source checkpoint
 
 上記source、version、mapping、byte-exact Ableton reference、tests、handoffを
