@@ -49,12 +49,31 @@ const { resolveBuildIdentity } = require("./buildIdentity");
 
 const HTTP_DEFAULT_HOST = "0.0.0.0";
 
-// Preserve the product's LAN-viewer default explicitly, while allowing an
-// operator to select a literal interface IP. Invalid, blank, and hostname
-// values use the known product default rather than Node's implicit behavior.
+// Preserve the product's IPv4 LAN-viewer default explicitly, while allowing
+// an operator to select a literal interface IP. Only an unset or blank value
+// selects the default: a typo must never broaden a local-only bind to every
+// IPv4 interface. Brackets are accepted only as IPv6 URL-style notation and
+// are removed before passing the address to net.Server.listen().
 function resolveHttpBindHost(rawHost = process.env.RB_OUTPUT_HOST) {
-  const candidate = typeof rawHost === "string" ? rawHost.trim() : "";
-  return candidate && net.isIP(candidate) ? candidate : HTTP_DEFAULT_HOST;
+  if (rawHost == null) {
+    return HTTP_DEFAULT_HOST;
+  }
+  if (typeof rawHost !== "string") {
+    throw new TypeError("RB_OUTPUT_HOST must be an IPv4 or IPv6 address literal");
+  }
+  const candidate = rawHost.trim();
+  if (!candidate) {
+    return HTTP_DEFAULT_HOST;
+  }
+  const bracketedIpv6 = candidate.match(/^\[([^\[\]]+)\]$/);
+  const normalized = bracketedIpv6 ? bracketedIpv6[1] : candidate;
+  const family = net.isIP(normalized);
+  if (family === 0 || (bracketedIpv6 && family !== 6)) {
+    throw new TypeError(
+      "RB_OUTPUT_HOST must be an IPv4 or IPv6 address literal; hostnames and malformed values are not allowed"
+    );
+  }
+  return normalized;
 }
 
 const HTTP_BIND_HOST = resolveHttpBindHost();

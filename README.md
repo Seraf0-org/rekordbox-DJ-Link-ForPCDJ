@@ -283,14 +283,17 @@ npm start
 # 3. 起動中のRekordboxへDLLの注入
 npm run inject:hook
 ```
-HTTP診断/UIサーバーの既定 bind は、read-only APIを従来どおりLANから利用
+HTTP診断/UIサーバーの既定 bind は、read-only APIを従来どおりIPv4 LANから利用
 できるよう `0.0.0.0` です。これはNodeの暗黙既定ではなく、製品の既知の
-既定値として明示されています。ローカル専用のDJ/Syndocal構成では、
+IPv4-only既定値として明示されています。ローカル専用のDJ/Syndocal構成では、
 `$env:RB_OUTPUT_HOST='127.0.0.1'; npm start` を推奨します。DJ用PCの特定NICだけに
 bindする場合は、`RB_OUTPUT_HOST` にIPv4/IPv6リテラルを指定してください
-（例: `$env:RB_OUTPUT_HOST='192.168.50.2'; npm start`）。ホスト名は受け付けず、空欄・
-不正値は既定の `0.0.0.0` に戻ります。全インターフェイス公開が不要な場合は、
-必ず特定NICまたは `127.0.0.1` を明示してください。
+（例: `$env:RB_OUTPUT_HOST='192.168.50.2'; npm start`）。IPv6は`::1`のようなraw
+literalと`[::1]`のようなURL形式を受け付け、bind前にraw literalへ正規化します。
+未設定または空欄だけが既定の`0.0.0.0`を選択します。ホスト名、括弧不整合、typoを
+含む非空の不正値は、意図せず全IPv4インターフェイスへ公開しないよう起動時に
+fail-closedで拒否します。全インターフェイス公開が不要な場合は、必ず特定NICまたは
+`127.0.0.1`（IPv6 local-onlyなら`::1`）を明示してください。
 ※インジェクターから明示的にRekordboxを起動したい場合に限り、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。通常の起動コマンドやWebサーバーからは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
 
 ---
