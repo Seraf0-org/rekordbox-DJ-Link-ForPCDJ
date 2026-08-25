@@ -2,27 +2,60 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-25 adapter権威reconciliation（docs-only）
+## 2026-08-25 strict show-sync v2 clean break
 
-監督laneの指示に基づく文書面の権威整理です。出荷・現行・productionの既定adapterは
-flat `generic-json`であり、HELLO → 権威snapshot(`DJ_STATE_SYNC`) →
-`DJ_TIMELINE_STATE_REQUEST`/timeline actionのsnapshot順序が必須で、違反は
-SnapshotRequiredでfail-closedです。`syndocal-envelope-v1`は旧KDMX v1 envelope
-wire向けの明示的なlegacy互換/診断用選択肢です。コード側の権威裏付けは、rb-output
-`server/dj-agent/config.js` の未設定時既定値 `generic-json` と、KDMX
-`crates/protocol/src/lib.rs` の `DjLinkFlatFrame`("The peer's final generic-json
-adapter"、旧v1 envelopeは"kept separately for compatibility")です。
+出荷・現行・productionの唯一のadapterは`syndocal-envelope-v2`です。旧flat
+`generic-json`と`syndocal-envelope-v1`は設定、Setup、build identity、runtimeから
+退役し、指定されても明示的に拒否します。fallback、legacy shim、暗黙変換はありません。
+全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定です。
 
-本日より前に本書とREADMEへ書き込まれた「production=`syndocal-envelope-v1`/
-generic-json=互換・診断」という役割逆転の表記を、wire挙動を一切変更せずに修正しました
-(API.mdの旧「generic-jsonのみ明示選択」「権威契約なし」記述も同期)。
-heartbeat checkpoint、live DJ PC checkpoint、旧dist削除checkpointなど既存の記録と、
-他ファイルのdirty/untracked状態は保持します。これはdocs-onlyの整理であり、本laneでは
-commit/push/versionを行いません。物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの
-受入れ主張は含まず、HW-4マトリクス0/12と`Required / Peer and hardware pending`
-は不変です。
+このclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
+任意の`running`によるペダル所有権移行を廃止します。ACTIVEはexact master deck、
+playSessionId、exact track identity、positionAtSendSec、effectiveBpm、単調増加
+positionRevision、1500ms以下のsampleAgeMsが揃うまで送信しません。同一sessionは
+completeになった時点で一度だけACTIVEを出し、その後はTRACK_SYNCを連続送信します。
+nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artistで同一視しません。
+物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの受入れは別途必要で、mockから完了とは
+主張しません。
 
-## v1.1.2 first-run Setup契約 (2026-08-25)
+## 2026-08-25 v1.1.3 pre-commit checkpoint
+
+現在の作業位置はbranch `beta-v1.1.2`（配布versionとは独立した履歴上のbranch名）、
+配布product version `1.1.3`です。`package.json`、root package-lock identity、
+`installer.iss`、Setup UI/API、versioned Rekordbox mapping artifactはすべて`1.1.3`へ
+同期しました。旧`1.1.2`名の配布artifactは作業ツリーに存在しません。
+
+現時点の検証証拠は次のとおりです。
+
+- strict v2 + smoke + Setup + provenance focused gate: 150/150 pass。
+- version/Setup/provenance gate: 67/67 pass。
+- package/provenance/strict v2 gate: 81 pass、0 fail、2 skip。skipは環境変数
+  `RB_OUTPUT_PKG_SMOKE=1`を必要とするreal/adversary pkg exe smokeです。
+- full `npm test`: 328 total、326 pass、0 fail、2 skip。skipは環境変数
+  `RB_OUTPUT_PKG_SMOKE=1`を必要とするreal/adversary pkg exe smokeだけです。
+  strict v2の14 testsとTRACK_SYNC 262,145-frame enduranceを含め全実行対象がpassしました。
+- 変更対象JavaScript 18 filesの`node --check`は18/18 pass、first-party warningは0です。
+- 独立Ox-alpha最終監査はP0/P1なしでPASSしました。tracked
+  `binding.gyp.patched`がmanifest pinと不一致だった既存欠陥は、生成器のbyte-exact出力
+  `b3dc833d8e80cb8e0cd36c3087f39f04dfa12e2b37f435931bbb5fec256e0cca`へ
+  復元しました。この参照だけは上流由来の末尾空白と終端改行なしを含むため、狭い
+  `.gitattributes`で`-text -whitespace`を指定し、`core.autocrlf`によるbyte改変を
+  禁止しています。他のsourceのwhitespace検査は抑制しません。
+- clean-break後に到達不能となった旧`control-id-conflicts-with-physical`分岐も削除し、
+  legacy dead pathを残していません。
+
+したがってsoftware source gateは閉じました。commit/pushと配布生成の後にも、
+物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACKの実機受入れも未検証です。
+
+旧生成物inventoryではexact path `C:\Users\kouty\Desktop\rb-output\dist`に
+32 files / `91,752,038` logical bytesが存在します。Git ignored、tracked file 0、
+reparse point 0、実行中process reference 0で、内容は`content_lookup.exe`、
+`inject_hook.exe`とPyInstaller `_build`だけです。`server.exe`、versioned ZIP、
+installer、build/install/release manifestは存在せず、配布物ではありません。
+checkpoint commit/push前なので削除せず保留し、監査が閉じた後にexact pathを再検証して
+regenerable旧生成物として削除・reclaimed bytesを別記録します。
+
+## v1.1.3 first-run Setup契約 (2026-08-25)
 
 DJ PCのSetup cardはDJ Agentがdisabled・未設定・native device未接続でも常時表示
 されます。カードが読むのは `GET /api/dj-agent/setup` だけで、同APIはlocalhost専用
@@ -33,7 +66,7 @@ localhost/loopbackをすべて満たす必要があり、Host/Origin/peerのい�
 Setupはread-onlyであり、token input、token表示、localStorage保存、サーバー設定を
 変更するPOSTを持ちません。config preview/download/copyもtoken-freeです。カードから
 提供するversioned artifact
-`CustomMIDI1-Syndocal-v1.1.2.csv` はoperatorがRekordboxのMIDI Learn/CustomMIDI1へ
+`CustomMIDI1-Syndocal-v1.1.3.csv` はoperatorがRekordboxのMIDI Learn/CustomMIDI1へ
 手動importします。virtual MIDI driver、Rekordbox、Elgato/Stream Deckなど外部操作は
 自動化せず、guided confirmationとして別途確認します。
 カード上で案内する入力はSyndocal host、local NIC、MIDI output、adapterです。
@@ -46,11 +79,8 @@ port 0を暗黙選択しません。adapterは初回必ず未選択です。devi
 あり、列挙結果のname+portへ完全一致する場合だけ反映し、それ以外は未選択にします。
 operatorがこのページで明示選択した後だけpreviewへ反映します。同じページでrefreshしても
 operatorが触った選択は維持されますが、name+portが列挙結果から消えた場合はplaceholderへ
-戻してfail-closedにします。出荷・現行productionの既定adapterは `generic-json`
-(flat frame、HELLO後の権威snapshot取得を必須とする順序制約付き)です。
-`syndocal-envelope-v1`は旧KDMX v1 envelope wire向けの明示的なlegacy互換/
-診断用選択肢です。未知名の黙ったfallbackはなく、adapter未選択時は既定の
-`generic-json`が適用されます。
+戻してfail-closedにします。adapterは`syndocal-envelope-v2`だけを表示し、
+未設定時もv2を使います。旧flat/v1名と未知名はblank/blockedになり、fallbackしません。
 
 releaseMacroはphysical acceptance完了までdisabledです。Setup previewでも
 `releaseMacro.enabled:false`を強制し、受入れ後にoperatorが別工程で明示的に有効化
@@ -102,7 +132,7 @@ Learn、virtual MIDI driver、Stream Deck/Elgatoの受入れ完了を意味し�
 
 同日の配布監査で、既存 `dist` は39 files / `220,529,137` logical bytesであり、
 `build-identity.json`、`install-manifest.json`、`release-manifest.json`、
-`rb-output-1.1.2.zip`、`DJLinkForPCDJ-setup.exe`をすべて欠く旧生成物と確定した。
+versioned ZIP、`DJLinkForPCDJ-setup.exe`をすべて欠く旧生成物と確定した。
 exact `C:\Users\kouty\Desktop\rb-output\dist` がGit ignoredかつtracked file 0、
 reparse point 0、実行中process reference 0であることを確認し、そのディレクトリだけを
 恒久削除した。削除後pathは存在せず、観測したphysical free-space gainは
@@ -121,43 +151,22 @@ branch/commitは削除していない。
 
 ## 権威ソースとwire契約(2026-08更新)
 
-KDMX/Syndocalの権威実装(`crates/protocol/src/lib.rs`の`DjLinkEnvelope`/
-`DjLinkFlatFrame`/`DjLinkAck`、`crates/io/src/remote_ws.rs`の
-`handle_dj_link_client`)を照合し、次の2つのwire契約が証明されています。
-どちらも`/dj-link`パス専用のWebSocketで、認証は (1) HTTP Host/Origin検証と
-(2) HELLO内トークンの定数時間比較の2面で行われます。Authorizationヘッダは
-無視されます。
+peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
+全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定、
+frameは64KiB以下、文字列は1..256 UTF-8 bytesかつ制御文字なし、tokenは
+32..256 bytesです。ACKは
+`{v:2,type:"ACK",eventId,sequence,outcome,code,stateGeneration}`の7フィールド
+固定です。`accepted`と`duplicate`だけを成功とし、missing/extra/nonfinite/stale/
+future/unknown値は成功へ持ち上げません。
 
-- `generic-json`(既定・現行production): フラットframe。HELLOのみ
-  `{type,eventId,sequence,protocol:"generic-json",token,capabilities}`を
-  持ち、それ以外はpayloadがルートに展開されます。ACKは8フィールド固定
-  (`type,eventId,ok,message,outcome,sequence,code,stateGeneration`)です。
-  snapshot順序は必須です: 接続後の権威snapshot取得より前に
-  `DJ_TIMELINE_STATE_REQUEST`以降を送信するとSnapshotRequiredで拒否され
-  ます。
-- `syndocal-envelope-v1`(明示選択時のみのlegacy互換/診断): レガシーv1 envelope。全frameが
-  `{v:1,type,agentId,sessionId,sequence,eventId,payload}`で、HELLO payloadは
-  `{authToken,version:1,capabilities}`、ACKは7フィールド固定
-  (`v,type,eventId,sequence,outcome,code,stateGeneration`、ok/messageは
-  付与されません)、`DJ_TIMELINE_STATE`はpayload内に
-  `{state,loopActive,timelineId,positionBars}`を持ちます。全frameでHELLOと
-  同じagentId/sessionIdが必要で、不一致は`session_mismatch`拒否、同一形状の
-  HELLO再送はDuplicate扱いで切断されるため、再接続ごとに新しいsessionIdを
-  発行します。envelope wireにはsnapshot前提の順序制約はありません
-  (LegacyV1Direct)。ただしrb-output側は両adapterで接続後の権威snapshot待ち
-  gate(fail-closed)を維持します。
-
-共通の検証境界: frameは64KiB以下、文字列は1..256バイトかつ制御文字なし、
-sequenceは1..=9_007_199_254_740_991、トークンは32..256バイト、capabilitiesは
-32個以下、loop divisionは0..=63、beat jump barsは-4/4のみ、trackBpmは
-0..=1000。不正・未知frameは`rejected` ACK(code付き)または無視+warningと
-なり、成功扱いしません。冪等性はeventId単位で、再送は`duplicate`、保持期間
-外の再送は`event_id_not_retained`、sequence巻き戻りは`sequence_rollback`、
-処理中は`busy`(`in_flight`)が返ります。busyは有限回の指数バックオフ再試行
-で回復します。
-
-adapter名は明示設定のみで、未設定・未知名は利用不可(fail-closed)であり、
-generic-jsonへの黙ってフォールバックはしません。
+未ACKのphysical eventは再接続後も同じeventIdとsemantic payloadを保持します。
+playSessionIdも不変です。connection sessionIdは新規発行し、wire sequenceは新しい
+接続試行として単調増加させます。旧socketのACK、異なるsequence、reorder、duplicate
+送信要求は適用しません。TRACK_SYNCは連続revisionで回復可能なためACK待ちをせず、
+connection generation + wire sequenceから作る定数メモリのsession-local eventIdを使います。
+durable physical eventId台帳を消費せず、再接続時にはreplayしません。新connectionでは
+新しいTRACK_SYNCを待ち、旧socket/sessionはfenceします。ACTIVE/LOOP/RELEASE等の
+physical eventはACK対象です。
 
 ## 接続と状態同期
 
@@ -167,28 +176,32 @@ Syndocalは現在の権威状態を`DJ_TIMELINE_STATE`で返してください�
 まではtimeline actionを送らず、`timeline-control`中の切断は`dj-control`へ
 自動復帰しません（安全側に停止します）。
 
-`DJ_TIMELINE_STATE`の最小形式は次です。
+`DJ_TIMELINE_STATE`の形式は次です。
 
 ```json
 {
+  "v": 2,
   "type": "DJ_TIMELINE_STATE",
-  "eventId": "timeline-state-42",
+  "agentId": "syndocal",
+  "sessionId": "syndocal-session",
   "sequence": 42,
-  "state": "running",
-  "loopActive": false,
-  "timelineId": "show-2026-08-21",
-  "positionBars": 128
+  "eventId": "timeline-state-42",
+  "payload": {
+    "state": "running",
+    "loopActive": false,
+    "timelineId": "show-2026-08-21",
+    "positionBars": 128,
+    "playSessionId": "play-session-42",
+    "pedalOwner": "dj",
+    "releaseEventId": null
+  }
 }
 ```
 
-`state`は`idle`、`running`、`stopped`、`ended`、`reset`のいずれか、
-`loopActive`はbooleanです。`syndocal-envelope-v1`では同じ内容が
-`{v:1,type:"DJ_TIMELINE_STATE",agentId,sessionId,sequence,eventId,
-payload:{state,loopActive,timelineId,positionBars}}`のpayload内に
-入ります。不正値・未知の`DJ_TIMELINE_*`は無視しwarningに
-します。`running`を受信した時だけ`dj-control`から`timeline-control`へ入り、
-`idle`/`stopped`/`ended`/`reset`で`dj-control`へ戻ります。F13での
-`DJ_RELEASE`受理だけではtimelineへ切り替わりません。
+payloadは上記7フィールド固定です。generic `running`だけではペダル所有権を
+移しません。`pedalOwner:"timeline"`、現在のplaySessionId、同sessionの相関済み
+DJ_RELEASE eventIdがすべて一致した時だけ`timeline-control`へ移ります。RELEASE後の
+late TRACK_SYNC/LOOPはsession fenceで破棄し、所有権を再取得できません。
 Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、切断中、再接続
 直後でも、Stage 1のF13/F14は既存のローカルRekordbox MIDI操作を継続します
 （F15はStage 1では従来どおりinactiveです）。この間のネットワーク側effectは
@@ -252,25 +265,21 @@ ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` bro
 ## eventId / ACK / 順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
-eventIdで冪等処理し、同じIDを二重適用しません。generic-json(flat) wireの
-ACKは次の8フィールド固定形です。
+eventIdで冪等処理し、同じIDを二重適用しません。v2 ACKは次の7フィールド固定です。
 
 ```json
 {
+  "v": 2,
   "type": "ACK",
   "eventId": "...",
-  "ok": true,
-  "message": "accepted",
-  "outcome": "accepted",
   "sequence": 42,
+  "outcome": "accepted",
   "code": null,
   "stateGeneration": 7
 }
 ```
 
-`syndocal-envelope-v1` wireでは`v:1`が先頭に付き、`ok`/`message`は付与され
-ず、7フィールド(`v,type,eventId,sequence,outcome,code,stateGeneration`)固定
-です。`outcome`は`accepted`/`duplicate`/`no_mapping`/`rejected`/`busy`で、
+`outcome`は`accepted`/`duplicate`/`no_mapping`/`rejected`/`busy`で、
 `accepted`と`duplicate`のみ成功扱いです。それ以外の形式・未知outcomeは
 拒否しwarningにします。
 

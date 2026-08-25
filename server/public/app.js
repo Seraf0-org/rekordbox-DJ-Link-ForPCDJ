@@ -117,10 +117,10 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
   },
 };
 
-const SETUP_ADAPTERS = ["generic-json", "syndocal-envelope-v1"];
+const SETUP_ADAPTERS = ["syndocal-envelope-v2"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.2.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.2.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.3.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.3.csv",
   valid: null,
 };
 const djAgentSetupDraft = {

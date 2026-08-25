@@ -8,6 +8,7 @@ const LOOP_FIELDS = [
   "startBeat",
   "endBeat",
   "lengthBeats",
+  "revision",
   "updatedAt",
   "source",
 ];
@@ -78,6 +79,9 @@ function normalizeLoopState(payload, { maxDeck = 4, source = "rekordbox-hook" } 
   let lengthBeats = finiteOrNull(
     firstValue(payload, ["lengthBeats", "length_beats", "loopLengthBeats", "loop_length_beats", "beats"]),
   );
+  const revision = finiteOrNull(
+    firstValue(payload, ["revision", "loopRevision", "loop_revision"]),
+  );
 
   // Rekordbox clears an unset loop by publishing 0 for both time boundaries.
   // Treat any complete, non-positive range as absent so the Web UI does not
@@ -128,6 +132,7 @@ function normalizeLoopState(payload, { maxDeck = 4, source = "rekordbox-hook" } 
     startBeat,
     endBeat,
     lengthBeats,
+    revision: Number.isSafeInteger(revision) && revision >= 1 ? revision : null,
     updatedAt,
     source: typeof payload.source === "string" && payload.source.trim() ? payload.source : source,
   };

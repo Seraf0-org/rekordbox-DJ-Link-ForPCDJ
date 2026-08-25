@@ -30,6 +30,9 @@ function createShowEventRouter({
   let timelineLoopActive = null;
   let timelineId = null;
   let timelinePositionBars = null;
+  let timelinePlaySessionId = null;
+  let timelinePedalOwner = "dj";
+  let timelineReleaseEventId = null;
   let timelineStateUpdatedAt = null;
   let timelineSnapshotReady = false;
   let lastSyndocalState = syndocalClient.getStatus?.().state || "unknown";
@@ -46,6 +49,16 @@ function createShowEventRouter({
   let activeReleaseAction = null;
   let lastAction = null;
   let releaseMacroGeneration = 0;
+  let activePlaySessionId = null;
+  const releasedPlaySessions = new Set();
+
+  function fenceReleasedSession(playSessionId) {
+    if (!playSessionId) return;
+    releasedPlaySessions.add(playSessionId);
+    while (releasedPlaySessions.size > 64) {
+      releasedPlaySessions.delete(releasedPlaySessions.values().next().value);
+    }
+  }
 
   function syndocalEnabled() {
     return syndocalClient.getStatus?.().enabled === true;
@@ -75,6 +88,9 @@ function createShowEventRouter({
       state: timelineState,
       loopActive: timelineLoopActive,
       positionBars: timelinePositionBars,
+      playSessionId: timelinePlaySessionId,
+      pedalOwner: timelinePedalOwner,
+      releaseEventId: timelineReleaseEventId,
     };
   }
 
@@ -223,7 +239,7 @@ function createShowEventRouter({
       const reason = deliveryFailureReason(delivery);
       // A running snapshot wins a late ACK failure race. Once Stage 2 has
       // been authoritative, do not fall back to local Rekordbox control.
-      if (mode !== "timeline-control" && timelineState !== "running") {
+      if (mode !== "timeline-control") {
         setMode("dj-control", "release-delivery-failed");
         setReleaseMacroPhase("failed", reason);
       } else if (releaseMacroPhase === "handoff-pending") {
@@ -241,7 +257,30 @@ function createShowEventRouter({
   }
 
   function onDetectorEvent(event) {
-    return routeEvent(event);
+    if (!event || typeof event.type !== "string") return null;
+    if (event.type === "DJ_MASTER_TRACK_ACTIVE") {
+      const nextSession = event.payload?.playSessionId || null;
+      if (!nextSession) return null;
+      if (nextSession !== activePlaySessionId) {
+        timelineSnapshotReady = false;
+        timelinePlaySessionId = null;
+        timelineReleaseEventId = null;
+        pendingHandoffEventId = null;
+      }
+      activePlaySessionId = nextSession;
+      if (!releasedPlaySessions.has(nextSession)) {
+        timelinePedalOwner = "dj";
+        return routeEvent(event);
+      }
+      return null;
+    }
+    if (event.type === "DJ_MASTER_TRACK_SYNC" || event.type === "DJ_LOOP_STATE") {
+      const session = event.payload?.playSessionId || null;
+      if (!session || session !== activePlaySessionId || releasedPlaySessions.has(session)) return null;
+      return routeEvent(event);
+    }
+    if (event.type === "DJ_MASTER_CHANGED") return routeEvent(event);
+    return null;
   }
 
   function emitWarning(message, source = "dj-agent") {
@@ -269,10 +308,21 @@ function createShowEventRouter({
     timelineLoopActive = state.loopActive;
     timelineId = state.timelineId ?? null;
     timelinePositionBars = state.positionBars ?? null;
+    timelinePlaySessionId = state.playSessionId ?? null;
+    timelinePedalOwner = state.pedalOwner || "dj";
+    timelineReleaseEventId = state.releaseEventId ?? null;
     timelineStateUpdatedAt = new Date(now()).toISOString();
     timelineSnapshotReady = true;
     pendingLoopDesired = null;
-    if (timelineState === "running") {
+    const correlatedTimelineOwnership =
+      timelineState === "running" &&
+      timelinePedalOwner === "timeline" &&
+      Boolean(activePlaySessionId) &&
+      timelinePlaySessionId === activePlaySessionId &&
+      releasedPlaySessions.has(activePlaySessionId) &&
+      Boolean(pendingHandoffEventId) &&
+      timelineReleaseEventId === pendingHandoffEventId;
+    if (correlatedTimelineOwnership) {
       if (wasHandoffPending) {
         setReleaseMacroPhase("complete", null);
         if (
@@ -287,10 +337,15 @@ function createShowEventRouter({
         }
       }
       setMode("timeline-control", "authoritative-timeline-running");
-    } else {
+    } else if (timelineState !== "running") {
       released = false;
       loopDivision = 0;
       setMode("dj-control", `authoritative-timeline-${timelineState}`);
+    } else {
+      setMode(
+        releasedPlaySessions.has(activePlaySessionId) ? "handoff-pending" : "dj-control",
+        "timeline-running-without-correlated-pedal-ownership",
+      );
     }
   }
 
@@ -498,17 +553,15 @@ function createShowEventRouter({
       return null;
     }
     released = stopSent === true;
+    const releaseSessionId = activePlaySessionId;
+    fenceReleasedSession(releaseSessionId);
     const routedEvent = routeEvent({
       type: "DJ_RELEASE",
       source: "action",
       payload: {
         state: "released",
-        releasedAt: new Date(now()).toISOString(),
-        source: "pedal",
-        targetDeck: target.targetDeck,
-        targetChannel: target.targetChannel,
-        filterChannel: target.filterChannel,
-        fadeChannel: target.fadeChannel,
+        timelineId,
+        playSessionId: releaseSessionId,
       },
     });
     const delivery = routedEvent.delivery;
@@ -763,15 +816,14 @@ function createShowEventRouter({
         reason: "local-midi-failed",
       });
     }
+    fenceReleasedSession(activePlaySessionId);
     const routedEvent = routeEvent({
       type: "DJ_RELEASE",
       source: "action",
       payload: {
         state: "released",
-        releasedAt: new Date(now()).toISOString(),
-        source: "pedal",
-        targetDeck: target.targetDeck,
-        targetChannel: target.targetChannel,
+        timelineId,
+        playSessionId: activePlaySessionId,
       },
     });
     const delivery = routedEvent.delivery;
@@ -824,17 +876,6 @@ function createShowEventRouter({
           : loopDivision + 1;
       const target = midiTarget("loopHalf", currentMasterDeck());
       const midiSent = midi.sendMapping("loopHalf", { targetDeck: target.targetDeck });
-      const routedEvent = routeEvent({
-        type: "DJ_LOOP_STATE",
-        source: "action",
-        payload: {
-          division: loopDivision,
-          source: "pedal",
-          targetDeck: target.targetDeck,
-          targetChannel: target.targetChannel,
-        },
-      });
-      const delivery = routedEvent.delivery;
       return emitAction({
         action: "loop-half",
         mode,
@@ -842,9 +883,9 @@ function createShowEventRouter({
         midiSent,
         targetDeck: target.targetDeck,
         targetChannel: target.targetChannel,
-        delivery,
-        ok: midiSent === true && delivery?.ok === true,
-        reason: midiSent !== true ? "local-midi-failed" : delivery?.state || null,
+        delivery: null,
+        ok: midiSent === true,
+        reason: midiSent !== true ? "local-midi-failed" : null,
       });
     }
     if (normalized === "filter-close" || normalized === "filter_close" || normalized === "filter") {
@@ -906,6 +947,7 @@ function createShowEventRouter({
       releaseMacroReason,
       lastAction,
       masterDeck: masterDeck || null,
+      activePlaySessionId,
       masterTrack: track
         ? {
             contentId: track.contentId || null,
@@ -927,6 +969,9 @@ function createShowEventRouter({
       timelineLoopActive,
       timelineId,
       timelinePositionBars,
+      timelinePlaySessionId,
+      timelinePedalOwner,
+      timelineReleaseEventId,
       timelineSnapshotReady,
       lastTimelineAction,
       lastTimelineWarning,

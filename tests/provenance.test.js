@@ -150,11 +150,10 @@ test("wire contract advisory pins the exact Syndocal adapter names", (t) => {
   // Changing this list is a deliberate DJ wire-contract change; it must be
   // updated together with server/dj-agent/config.js and syndocalClient.js.
   assert.deepEqual(WIRE_CONTRACT_ADVISORY.adapters.map((entry) => entry.adapter), [
-    "generic-json",
-    "syndocal-envelope-v1",
+    "syndocal-envelope-v2",
   ]);
   assertMalformed(
-    (i) => { i.wireContracts = { adapters: [{ adapter: "generic-json-v2", wireProtocol: "generic-json-v2" }] }; },
+    (i) => { i.wireContracts = { adapters: [{ adapter: "syndocal-envelope-v1", wireProtocol: "syndocal-envelope-v1" }] }; },
     "wireContracts",
   );
 });
@@ -902,7 +901,7 @@ test("PACKAGING CONTRACT commitment require is a string literal pkg can statical
   );
   // Adversarial: any require of the commitment reached through a variable,
   // concatenation, or indirection is invisible to @yao-pkg/pkg's static
-  // analyzer and would silently omit the module from server.exe (the v1.1.2
+  // analyzer and would silently omit the module from server.exe (an earlier
   // P0). Every require mentioning the commitment module must take a direct
   // string literal argument.
   const commitmentRequires = [...source.matchAll(/require\(\s*([^)]*[Ee]mbedded[^)]*)\)/g)].map((m) => m[1].trim());

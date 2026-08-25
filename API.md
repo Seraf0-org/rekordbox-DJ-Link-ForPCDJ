@@ -106,31 +106,36 @@ IPv6 loopback, and `::1` are accepted. A remote request receives HTTP 403 unless
 `DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` is explicitly configured. The read-only
 status route remains remotely readable.
 
-For actions that send `DJ_RELEASE` or `DJ_LOOP_STATE`, HTTP 202 with
+For actions that send `DJ_RELEASE`, HTTP 202 with
 `ok:false`/`ackState:"pending"` means the local action was sent and is waiting
 for a Syndocal ACK. ACK `ok:false`, timeout, disconnected send, and local MIDI
 failure remain failures; they are never reported as `ok:true` merely because a
-send call returned.
+send call returned. Stage 1 loop-half is local MIDI only. Network
+`DJ_LOOP_STATE` frames come exclusively from measured hook loop packets and
+carry active/startBeat/endBeat/lengthBeats plus revision and freshness.
 
-Track activity is derived from the existing Hook UDP snapshots and
-master_change packets. DJ_TRACK_LOADED is diagnostic only; it never emits
-the timeline event. The standard show trigger is
-DJ_MASTER_TRACK_ACTIVE, which requires a known track identity, an explicitly
-selected (or documented fallback) master deck, and isPlaying: true.
+Track activity is derived from Hook UDP snapshots and explicit master_change
+packets. DJ_TRACK_LOADED remains diagnostic. DJ_MASTER_TRACK_ACTIVE is delayed
+until one play session has an exact master deck, exact track identity,
+positionAtSendSec, effectiveBpm, a monotonic positionRevision, and a sample no
+older than 1500 ms. DJ_MASTER_TRACK_SYNC then carries later revisions for that
+same session; missing, null, nonfinite, stale, duplicate, and reordered samples
+fail closed. A nonempty contentId is authoritative; title+artist is used only
+when contentId is absent.
 
-The built-in Syndocal transport has an explicit adapter registry. The shipped,
-current, and production default is `generic-json`: flat frames selected
-automatically when no adapter is configured, under mandatory snapshot ordering
-(hello, then a valid authoritative state-sync snapshot, before timeline
-requests/actions). `syndocal-envelope-v1` is available only as an explicit
-legacy compatibility/diagnostic choice for the older KDMX v1 envelope wire.
-Unknown adapter names fail closed instead of silently falling back, and there
-is no silent fallback between adapters. The authoritative Syndocal/KDMX wire
-contract is recorded in
-[`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md). generic-json remains
-the transport boundary providing reconnect, heartbeat,
-event IDs, monotonically increasing sequence values, ACK tracking for
-DJ_RELEASE and DJ_LOOP_STATE, delivery states, and DJ_STATE_SYNC on reconnect.
+The sole shipped/current/production adapter is `syndocal-envelope-v2`.
+Every frame has exactly `{v:2,type,agentId,sessionId,sequence,eventId,payload}`.
+Flat and v1 frames, retired adapter names, aliases, and unknown names are
+rejected visibly; there is no compatibility adapter or fallback. The transport
+provides reconnect, heartbeat, event IDs, monotonically increasing wire
+sequence values, ACK tracking, and DJ_STATE_SYNC. An unacknowledged physical
+event is retried after reconnect with the same eventId and semantic payload
+(including playSessionId), a fresh connection sessionId, and a new monotonic
+wire sequence; duplicate ACK outcome is success.
+`DJ_MASTER_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
+connection-generation + wire-sequence eventId, never enters the durable
+physical-event registry, and is never replayed after reconnect. A fresh sync
+must arrive for the new connection/session; late frames stay socket-fenced.
 When Syndocal is disabled, local-only MIDI actions continue to work without a
 network. When handoff is enabled, the initial connection, reconnection, and
 disconnected interval are fail-closed until an authoritative timeline snapshot
@@ -161,12 +166,14 @@ When Stage 2 is active, the pedal aliases are:
 * F14 / `loop-half` → `DJ_TIMELINE_LOOP_SET` with an absolute `{ "active": true|false }`
 * F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4 }`
 
-`DJ_TIMELINE_STATE` is an inbound generic-json adapter message. It must include
-`state` and a boolean `loopActive`; `timelineId` and `positionBars` are
-optional. With the `syndocal-envelope-v1` adapter the same fields arrive nested
-inside the v1 envelope `payload` object. A connected client requests a fresh
-snapshot after hello and after each reconnect. Timeline actions require that
-snapshot and a connected socket,
+`DJ_TIMELINE_STATE` is an exact v2 envelope. Its payload has exactly
+`state`, `loopActive`, `timelineId`, `positionBars`, `playSessionId`,
+`pedalOwner`, and `releaseEventId`. A generic `running` state never transfers
+pedal ownership. `pedalOwner:"timeline"` is accepted only when playSessionId
+matches the current show session and releaseEventId matches its correlated
+DJ_RELEASE. Late sync for a released session is fenced and cannot reacquire
+control. A connected client requests a fresh snapshot after hello and after
+each reconnect. Timeline actions require that snapshot and a connected socket,
 and use the same eventId/sequence/ACK delivery states as other action events.
 The full Japanese integration contract is in
 [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md).

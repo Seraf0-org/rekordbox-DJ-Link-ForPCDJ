@@ -50,6 +50,19 @@ function normalizedTrackText(track) {
     : "";
 }
 
+function compatibleTrackText(left, right) {
+  let shared = false;
+  for (const field of ["title", "artist"]) {
+    const leftValue = typeof left?.[field] === "string" ? left[field].toLocaleLowerCase() : null;
+    const rightValue = typeof right?.[field] === "string" ? right[field].toLocaleLowerCase() : null;
+    if (leftValue && rightValue) {
+      if (leftValue !== rightValue) return false;
+      shared = true;
+    }
+  }
+  return shared;
+}
+
 function tracksRepresentSame(left, right) {
   if (!left || !right) {
     return false;
@@ -57,26 +70,17 @@ function tracksRepresentSame(left, right) {
   if (left.contentId && right.contentId) {
     return left.contentId === right.contentId;
   }
-  const leftText = normalizedTrackText(left);
-  const rightText = normalizedTrackText(right);
-  return Boolean(leftText && leftText === rightText);
+  if (left.contentId || right.contentId) {
+    const leftText = normalizedTrackText(left);
+    const rightText = normalizedTrackText(right);
+    return Boolean(leftText && leftText === rightText);
+  }
+  return compatibleTrackText(left, right);
 }
 
 function mergeTrackIdentity(previous, reported) {
   if (!reported) {
     return previous || null;
-  }
-  if (
-    previous &&
-    !previous.contentId &&
-    reported.contentId &&
-    !reported.title &&
-    !reported.artist
-  ) {
-    // Hook track_load is often emitted between title/artist metadata and the
-    // following snapshot. Treat its contentId-only packet as enrichment until
-    // the snapshot can prove a real title/artist transition.
-    return normalizeTrack({ ...previous, contentId: reported.contentId });
   }
   if (!previous || !tracksRepresentSame(previous, reported)) {
     return reported;
@@ -104,7 +108,104 @@ function normalizePlayback(entry = {}) {
     isPlaying: typeof entry.isPlaying === "boolean" ? entry.isPlaying : null,
     positionSec: finiteNumber(entry.positionSec),
     bpm: finiteNumber(entry.bpm),
+    positionObservedAt:
+      typeof entry.positionObservedAt === "string" && entry.positionObservedAt.trim()
+        ? entry.positionObservedAt
+        : null,
+    positionRevision:
+      Number.isSafeInteger(entry.positionRevision) && entry.positionRevision >= 1
+        ? entry.positionRevision
+        : null,
     updatedAt: entry.updatedAt || null,
+  };
+}
+
+function mergePlaybackSample(previous, reported) {
+  if (!reported) return previous || null;
+  if (!previous) return reported;
+  const previousRevision = previous.positionRevision;
+  const reportedRevision = reported.positionRevision;
+  if (
+    Number.isSafeInteger(previousRevision) &&
+    Number.isSafeInteger(reportedRevision) &&
+    reportedRevision < previousRevision
+  ) {
+    return previous;
+  }
+  if (
+    Number.isSafeInteger(previousRevision) &&
+    Number.isSafeInteger(reportedRevision) &&
+    reportedRevision === previousRevision
+  ) {
+    const positionConflict =
+      Number.isFinite(previous.positionSec) &&
+      Number.isFinite(reported.positionSec) &&
+      previous.positionSec !== reported.positionSec;
+    if (positionConflict) return previous;
+    return {
+      ...previous,
+      bpm: Number.isFinite(reported.bpm) ? reported.bpm : previous.bpm,
+      isPlaying:
+        typeof reported.isPlaying === "boolean" ? reported.isPlaying : previous.isPlaying,
+      updatedAt: reported.updatedAt || previous.updatedAt,
+    };
+  }
+  if (Number.isSafeInteger(previousRevision) && !Number.isSafeInteger(reportedRevision)) {
+    return {
+      ...previous,
+      bpm: Number.isFinite(reported.bpm) ? reported.bpm : previous.bpm,
+      isPlaying:
+        typeof reported.isPlaying === "boolean" ? reported.isPlaying : previous.isPlaying,
+      updatedAt: reported.updatedAt || previous.updatedAt,
+    };
+  }
+  return { ...previous, ...reported };
+}
+
+function normalizeMeasuredLoop(entry, { nowMs, maxSampleAgeMs }) {
+  if (
+    !entry ||
+    typeof entry !== "object" ||
+    entry.activeKnown !== true ||
+    entry.source !== "rekordbox-hook"
+  ) {
+    return null;
+  }
+  if (typeof entry.active !== "boolean") {
+    return null;
+  }
+  if (!Number.isSafeInteger(entry.revision) || entry.revision < 1) {
+    return null;
+  }
+  const observedMs = Date.parse(entry.updatedAt);
+  const sampleAgeMs = Number.isFinite(observedMs) ? nowMs - observedMs : NaN;
+  if (!Number.isFinite(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > maxSampleAgeMs) {
+    return null;
+  }
+  const startBeat = finiteNumber(entry.startBeat);
+  const endBeat = finiteNumber(entry.endBeat);
+  const lengthBeats = finiteNumber(entry.lengthBeats);
+  if (
+    entry.active === true &&
+    (!Number.isFinite(startBeat) ||
+      !Number.isFinite(endBeat) ||
+      !Number.isFinite(lengthBeats) ||
+      startBeat < 0 ||
+      endBeat <= startBeat ||
+      lengthBeats <= 0 ||
+      Math.abs(endBeat - startBeat - lengthBeats) > 0.001)
+  ) {
+    return null;
+  }
+  return {
+    active: entry.active,
+    startBeat: Number.isFinite(startBeat) ? startBeat : null,
+    endBeat: Number.isFinite(endBeat) ? endBeat : null,
+    lengthBeats: Number.isFinite(lengthBeats) ? lengthBeats : null,
+    revision: entry.revision,
+    sampleAgeMs,
+    observedAtMs: observedMs,
+    source: "rekordbox-hook-measured",
   };
 }
 
@@ -112,8 +213,11 @@ function createTrackActivityDetector({
   now = () => Date.now(),
   idFactory = defaultIdFactory,
   maxDeck = 4,
+  maxSampleAgeMs = 1_500,
 } = {}) {
   const emitter = new EventEmitter();
+  const boundedMaxSampleAgeMs =
+    Number.isFinite(maxSampleAgeMs) && maxSampleAgeMs >= 0 ? maxSampleAgeMs : 1_500;
   const decks = new Map();
   let explicitMasterDeck = null;
   let explicitMasterUpdatedAt = null;
@@ -137,6 +241,9 @@ function createTrackActivityDetector({
         lastTrackLoadedKey: null,
         awaitingPlayConfirmation: false,
         pendingTrackChange: false,
+        loop: null,
+        lastSyncPositionRevision: null,
+        lastLoopEventRevision: null,
       };
       decks.set(deck, state);
     }
@@ -168,7 +275,7 @@ function createTrackActivityDetector({
     return null;
   }
 
-  function trackPayload(deck, state) {
+  function diagnosticTrackPayload(deck, state) {
     const track = state.track || {};
     const playback = state.playback || {};
     return {
@@ -184,9 +291,77 @@ function createTrackActivityDetector({
     };
   }
 
+  function currentLoopPayload(loop) {
+    if (!loop) return null;
+    const sampleAgeMs = now() - loop.observedAtMs;
+    if (!Number.isFinite(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > boundedMaxSampleAgeMs) {
+      return null;
+    }
+    return {
+      active: loop.active,
+      startBeat: loop.startBeat,
+      endBeat: loop.endBeat,
+      lengthBeats: loop.lengthBeats,
+      revision: loop.revision,
+      sampleAgeMs,
+      source: loop.source,
+    };
+  }
+
+  function strictTrackPayload(deck, state) {
+    const track = state.track || {};
+    const playback = state.playback || {};
+    const observedMs = Date.parse(playback.positionObservedAt);
+    const sampleAgeMs = Number.isFinite(observedMs) ? now() - observedMs : NaN;
+    const effectiveBpm = Number.isFinite(playback.bpm) && playback.bpm > 0
+      ? playback.bpm
+      : Number.isFinite(track.trackBpm) && track.trackBpm > 0
+        ? track.trackBpm
+        : null;
+    const exactTrackIdentity = track.contentId || (track.title && track.artist);
+    if (
+      !state.playSessionId ||
+      !exactTrackIdentity ||
+      !Number.isFinite(playback.positionSec) ||
+      playback.positionSec < 0 ||
+      !Number.isFinite(effectiveBpm) ||
+      effectiveBpm <= 0 ||
+      !Number.isSafeInteger(playback.positionRevision) ||
+      playback.positionRevision < 1 ||
+      !Number.isFinite(sampleAgeMs) ||
+      sampleAgeMs < 0 ||
+      sampleAgeMs > boundedMaxSampleAgeMs
+    ) {
+      return null;
+    }
+    return {
+      deck,
+      deckId: `rekordbox-deck-${deck}`,
+      masterDeckRevision: masterActivationGeneration,
+      contentId: track.contentId || null,
+      title: track.title || null,
+      artist: track.artist || null,
+      trackBpm: Number.isFinite(track.trackBpm) ? track.trackBpm : null,
+      positionAtSendSec: playback.positionSec,
+      effectiveBpm,
+      positionRevision: playback.positionRevision,
+      sampleAgeMs,
+      isPlaying: true,
+      master: true,
+      startedAt: state.startedAt || null,
+      playSessionId: state.playSessionId || null,
+      loop: currentLoopPayload(state.loop),
+    };
+  }
+
   function maybeEmitActive(deck, state, { force = false, allowAwaiting = false } = {}) {
     const master = currentMasterDeck();
-    if (master !== deck || state.playback?.isPlaying !== true || !state.track?.identity) {
+    if (
+      master !== deck ||
+      explicitMasterDeck !== deck ||
+      state.playback?.isPlaying !== true ||
+      !state.track?.identity
+    ) {
       return null;
     }
     if (state.awaitingPlayConfirmation && !allowAwaiting) {
@@ -206,9 +381,54 @@ function createTrackActivityDetector({
     ) {
       return null;
     }
+    const payload = strictTrackPayload(deck, state);
+    if (!payload) {
+      return null;
+    }
     state.lastActiveSessionId = state.playSessionId;
     state.lastActiveMasterGeneration = masterActivationGeneration;
-    return emitEvent("DJ_MASTER_TRACK_ACTIVE", trackPayload(deck, state));
+    state.lastSyncPositionRevision = payload.positionRevision;
+    return emitEvent("DJ_MASTER_TRACK_ACTIVE", payload);
+  }
+
+  function maybeEmitSync(deck, state) {
+    if (
+      currentMasterDeck() !== deck ||
+      explicitMasterDeck !== deck ||
+      state.playback?.isPlaying !== true ||
+      state.lastActiveSessionId !== state.playSessionId ||
+      state.lastActiveMasterGeneration !== masterActivationGeneration
+    ) {
+      return null;
+    }
+    const payload = strictTrackPayload(deck, state);
+    if (!payload || payload.positionRevision <= Number(state.lastSyncPositionRevision || 0)) {
+      return null;
+    }
+    state.lastSyncPositionRevision = payload.positionRevision;
+    return emitEvent("DJ_MASTER_TRACK_SYNC", payload);
+  }
+
+  function maybeEmitMeasuredLoop(deck, state) {
+    const loop = currentLoopPayload(state.loop);
+    if (
+      !loop ||
+      currentMasterDeck() !== deck ||
+      explicitMasterDeck !== deck ||
+      !state.playSessionId ||
+      state.lastActiveSessionId !== state.playSessionId ||
+      loop.revision <= Number(state.lastLoopEventRevision || 0)
+    ) {
+      return null;
+    }
+    state.lastLoopEventRevision = loop.revision;
+    return emitEvent("DJ_LOOP_STATE", {
+      deck,
+      deckId: `rekordbox-deck-${deck}`,
+      masterDeckRevision: masterActivationGeneration,
+      playSessionId: state.playSessionId,
+      ...loop,
+    });
   }
 
   function setSnapshotMaster(deck, source) {
@@ -282,6 +502,12 @@ function createTrackActivityDetector({
 
   function onSnapshot(snapshot = {}) {
     updateMasterFromSnapshot(snapshot);
+    const measuredLoops = new Map();
+    for (const entry of Array.isArray(snapshot.loopStates) ? snapshot.loopStates : []) {
+      const deck = normalizeDeckNumber(entry?.deck);
+      const loop = normalizeMeasuredLoop(entry, { nowMs: now(), maxSampleAgeMs: boundedMaxSampleAgeMs });
+      if (deck && loop) measuredLoops.set(deck, loop);
+    }
     const tracks = new Map();
     for (const entry of Array.isArray(snapshot.deckNowPlaying) ? snapshot.deckNowPlaying : []) {
       const deck = normalizeDeckNumber(entry?.deck);
@@ -311,7 +537,8 @@ function createTrackActivityDetector({
       const previousTrack = state.track;
       const reportedTrack = tracks.get(deck);
       const nextTrack = mergeTrackIdentity(previousTrack, reportedTrack);
-      const nextPlayback = playbacks.get(deck) || state.playback;
+      const reportedPlayback = playbacks.get(deck) || null;
+      const nextPlayback = mergePlaybackSample(state.playback, reportedPlayback);
       const trackChanged =
         Boolean(nextTrack && previousTrack && !tracksRepresentSame(nextTrack, previousTrack)) ||
         state.pendingTrackChange;
@@ -320,6 +547,12 @@ function createTrackActivityDetector({
       const nextIsPlaying = nextPlayback?.isPlaying ?? null;
       state.track = nextTrack;
       state.playback = nextPlayback;
+      if (measuredLoops.has(deck)) {
+        const measured = measuredLoops.get(deck);
+        if (!state.loop || measured.revision > state.loop.revision) {
+          state.loop = measured;
+        }
+      }
 
       if ((trackChanged || firstTrack) && nextTrack && state.lastTrackLoadedKey !== nextTrack.identity) {
         state.lastTrackLoadedKey = nextTrack.identity;
@@ -340,9 +573,11 @@ function createTrackActivityDetector({
         state.awaitingPlayConfirmation = false;
         state.lastActiveSessionId = null;
         state.lastActiveMasterGeneration = null;
-        emitEvent("DJ_TRACK_PLAY_STARTED", trackPayload(deck, state));
+        state.lastSyncPositionRevision = null;
+        state.lastLoopEventRevision = null;
+        emitEvent("DJ_TRACK_PLAY_STARTED", diagnosticTrackPayload(deck, state));
       } else if (stopped) {
-        emitEvent("DJ_TRACK_PLAY_STOPPED", trackPayload(deck, state));
+        emitEvent("DJ_TRACK_PLAY_STOPPED", diagnosticTrackPayload(deck, state));
       }
       if ((trackChanged || firstTrack) && nextIsPlaying === true && !started) {
         // A deck can report the old playing state while a newly loaded track
@@ -353,16 +588,22 @@ function createTrackActivityDetector({
         state.awaitingPlayConfirmation = true;
         state.lastActiveSessionId = null;
         state.lastActiveMasterGeneration = null;
+        state.lastSyncPositionRevision = null;
+        state.lastLoopEventRevision = null;
       } else if ((trackChanged || firstTrack) && !started) {
         state.playSessionId = null;
         state.startedAt = null;
         state.awaitingPlayConfirmation = false;
         state.lastActiveSessionId = null;
         state.lastActiveMasterGeneration = null;
+        state.lastSyncPositionRevision = null;
+        state.lastLoopEventRevision = null;
       }
       state.pendingTrackChange = false;
       state.previousIsPlaying = nextIsPlaying;
-      maybeEmitActive(deck, state);
+      const active = maybeEmitActive(deck, state);
+      if (!active) maybeEmitSync(deck, state);
+      maybeEmitMeasuredLoop(deck, state);
     }
     return getState();
   }
@@ -422,6 +663,8 @@ function createTrackActivityDetector({
       state.startedAt = null;
       state.lastActiveSessionId = null;
       state.lastActiveMasterGeneration = null;
+      state.lastSyncPositionRevision = null;
+      state.lastLoopEventRevision = null;
     }
     explicitMasterUpdatedAt = rawEvent.updatedAt || new Date(now()).toISOString();
     snapshotMasterSource = "explicit-master-change";
@@ -449,9 +692,11 @@ function createTrackActivityDetector({
       state.startedAt = null;
       state.lastActiveSessionId = null;
       state.lastActiveMasterGeneration = null;
+      state.lastSyncPositionRevision = null;
+      state.lastLoopEventRevision = null;
     }
     state.pendingTrackChange = false;
-    return maybeEmitActive(deck, state, { force: true, allowAwaiting: true });
+    return maybeEmitActive(deck, state, { allowAwaiting: true });
   }
 
   function getState() {
@@ -466,6 +711,9 @@ function createTrackActivityDetector({
         lastActiveMasterGeneration: state.lastActiveMasterGeneration,
         awaitingPlayConfirmation: state.awaitingPlayConfirmation,
         pendingTrackChange: state.pendingTrackChange,
+        loop: state.loop ? { ...state.loop } : null,
+        lastSyncPositionRevision: state.lastSyncPositionRevision,
+        lastLoopEventRevision: state.lastLoopEventRevision,
       };
     }
     const masterDeck = currentMasterDeck();

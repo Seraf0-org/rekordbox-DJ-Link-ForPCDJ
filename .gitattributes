@@ -1,0 +1,2 @@
+# The reviewed Ableton Link GYP reference is a byte-exact generated artifact.
+patches/ableton-link-source/binding.gyp.patched -text -whitespace

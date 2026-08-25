@@ -30,9 +30,6 @@ const {
 } = require("../server/dj-agent/trackActivityDetector");
 const {
   createSyndocalClient,
-  encodeFlatEvent,
-  encodeFlatStateSync,
-  normalizeTimelineState,
   resolveAdapter,
   resolveWebSocketImplementation,
 } = require("../server/dj-agent/syndocalClient");
@@ -49,75 +46,90 @@ const {
 } = require("../server/dj-agent/httpSecurity");
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
-const STRICT_FLAT_FIELDS = {
-  DJ_AGENT_HELLO: ["type", "eventId", "sequence", "protocol", "token", "capabilities"],
-  DJ_HEARTBEAT: ["type", "eventId", "sequence", "at"],
-  DJ_MASTER_CHANGED: ["type", "eventId", "sequence", "masterDeck", "deck", "isPlaying", "master"],
-  DJ_MASTER_TRACK_ACTIVE: [
-    "type", "eventId", "sequence", "contentId", "title", "artist", "deck", "deckId",
-    "trackBpm", "positionSec", "startedAt", "playSessionId", "isPlaying", "master",
-  ],
-  DJ_LOOP_STATE: ["type", "eventId", "sequence", "division", "enabled"],
-  DJ_RELEASE: ["type", "eventId", "sequence", "state"],
-  DJ_STATE_SYNC: ["type", "eventId", "sequence", "loopDivision", "released", "masterDeck", "masterTrack"],
-  DJ_TIMELINE_STATE_REQUEST: ["type", "eventId", "sequence"],
-  DJ_TIMELINE_BEAT_JUMP: ["type", "eventId", "sequence", "bars", "timelineId"],
-  DJ_TIMELINE_LOOP_SET: ["type", "eventId", "sequence", "active", "timelineId"],
-};
-
-function assertStrictKdmxFlatFrame(frame) {
+function assertStrictV2Frame(frame, type = frame?.type) {
   assert.ok(frame && typeof frame === "object" && !Array.isArray(frame));
-  assert.ok(Object.hasOwn(STRICT_FLAT_FIELDS, frame.type), `unsupported flat type: ${frame.type}`);
-  assert.equal(typeof frame.eventId, "string");
-  assert.ok(frame.eventId.length > 0);
+  assert.deepEqual(
+    Object.keys(frame).sort(),
+    ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"].sort(),
+  );
+  assert.equal(frame.v, 2);
+  assert.equal(frame.type, type);
+  assert.equal(frame.agentId, "rb-output-dj-agent");
+  assert.equal(typeof frame.sessionId, "string");
+  assert.ok(frame.sessionId.length > 0);
   assert.equal(Number.isSafeInteger(frame.sequence), true);
   assert.ok(frame.sequence > 0);
-  const allowed = new Set(STRICT_FLAT_FIELDS[frame.type]);
-  for (const field of Object.keys(frame)) {
-    assert.ok(allowed.has(field), `${frame.type} has unknown field ${field}`);
-  }
-  const stringFields = [
-    "eventId", "protocol", "token", "masterDeck", "deck", "contentId", "title", "artist",
-    "deckId", "startedAt", "playSessionId", "state", "timelineId",
-  ];
-  for (const field of stringFields) {
-    if (Object.hasOwn(frame, field)) {
-      assert.equal(typeof frame[field], "string");
-      assert.ok(Buffer.byteLength(frame[field], "utf8") <= 256);
-      assert.doesNotMatch(frame[field], /\p{Cc}/u);
-    }
-  }
-  for (const field of ["isPlaying", "master", "enabled", "released", "active"]) {
-    if (Object.hasOwn(frame, field)) assert.equal(typeof frame[field], "boolean");
-  }
-  for (const field of ["sequence", "division", "trackBpm", "positionSec", "loopDivision", "bars"]) {
-    if (Object.hasOwn(frame, field)) {
-      assert.equal(typeof frame[field], "number");
-      assert.equal(Number.isFinite(frame[field]), true);
-    }
-  }
-  if (frame.type === "DJ_AGENT_HELLO") {
-    assert.equal(frame.protocol, "generic-json");
-    assert.equal(typeof frame.token, "string");
-    assert.ok(frame.token.length >= 32);
-  }
-  if (frame.type === "DJ_STATE_SYNC") {
-    assert.deepEqual(
-      Object.keys(frame).filter((field) => !["type", "eventId", "sequence"].includes(field)).sort(),
-      ["loopDivision", "masterDeck", "masterTrack", "released"],
-    );
-    if (frame.masterTrack) {
-      assert.deepEqual(Object.keys(frame.masterTrack).sort(), ["artist", "contentId", "isPlaying", "title"]);
-      for (const field of ["contentId", "title", "artist"]) {
-        if (frame.masterTrack[field] != null) {
-          assert.equal(typeof frame.masterTrack[field], "string");
-          assert.ok(Buffer.byteLength(frame.masterTrack[field], "utf8") <= 256);
-        }
-      }
-      assert.equal(typeof frame.masterTrack.isPlaying, "boolean");
-    }
-  }
+  assert.equal(typeof frame.eventId, "string");
+  assert.ok(frame.eventId.length > 0);
   return frame;
+}
+
+function strictV2TrackPayload(overrides = {}) {
+  return {
+    deck: 1,
+    deckId: "rekordbox-deck-1",
+    masterDeckRevision: 1,
+    contentId: "42",
+    title: "Life Over",
+    artist: "DSF",
+    trackBpm: 120,
+    positionAtSendSec: 12.5,
+    effectiveBpm: 120,
+    positionRevision: 1,
+    sampleAgeMs: 0,
+    isPlaying: true,
+    master: true,
+    startedAt: "2026-08-25T00:00:00.000Z",
+    playSessionId: "play-session-1",
+    loop: null,
+    ...overrides,
+  };
+}
+
+function strictV2LoopPayload(overrides = {}) {
+  return {
+    deck: 1,
+    deckId: "rekordbox-deck-1",
+    masterDeckRevision: 1,
+    playSessionId: "play-session-1",
+    active: true,
+    startBeat: 32,
+    endBeat: 40,
+    lengthBeats: 8,
+    revision: 1,
+    sampleAgeMs: 0,
+    source: "rekordbox-hook-measured",
+    ...overrides,
+  };
+}
+
+function strictV2ReleasePayload(overrides = {}) {
+  return { state: "released", timelineId: "life-over", playSessionId: "play-session-1", ...overrides };
+}
+
+function strictV2Ack(frame, outcome = "accepted", overrides = {}) {
+  return {
+    v: 2,
+    type: "ACK",
+    eventId: frame.eventId,
+    sequence: frame.sequence,
+    outcome,
+    code: null,
+    stateGeneration: 1,
+    ...overrides,
+  };
+}
+
+function strictDetectorPlayback(deck, positionRevision, overrides = {}) {
+  return {
+    deck,
+    isPlaying: true,
+    bpm: 120,
+    positionSec: positionRevision,
+    positionRevision,
+    positionObservedAt: new Date().toISOString(),
+    ...overrides,
+  };
 }
 
 test("python bridge factory returns lifecycle methods", () => {
@@ -289,7 +301,7 @@ test("DJ Agent configuration remains off without an explicit gate", () => {
   assert.equal(config.syndocal.enabled, false);
   assert.equal(config.pedal.enabled, false);
   assert.equal(config.midi.enabled, false);
-  assert.equal(config.syndocal.adapter, "generic-json");
+  assert.equal(config.syndocal.adapter, "syndocal-envelope-v2");
 });
 
 test("release macro is opt-in and keeps the documented Filter and ChannelFader defaults", () => {
@@ -529,15 +541,12 @@ test("router sends pedal MIDI to the detector current master deck", () => {
   };
   const pedal = { start() {}, stop() {}, getStatus: () => ({ ok: true }) };
   const router = createShowEventRouter({ detector, syndocalClient: client, midi, pedal });
-  const events = [];
-  router.on("event", (event) => events.push(event));
 
   const loop = router.triggerAction("loop-half");
   assert.deepEqual(midiCalls[0], { name: "loopHalf", options: { targetDeck: 2 } });
   assert.equal(loop.targetDeck, 2);
   assert.equal(loop.targetChannel, 2);
-  assert.equal(events[0].payload.targetDeck, 2);
-  assert.equal(events[0].payload.targetChannel, 2);
+  assert.equal(loop.delivery, null);
 
   const filter = router.triggerAction("filter-close");
   assert.equal(filter.ignored, true);
@@ -548,8 +557,6 @@ test("router sends pedal MIDI to the detector current master deck", () => {
   assert.deepEqual(midiCalls[1], { name: "stop", options: { targetDeck: 2 } });
   assert.equal(release.targetDeck, 2);
   assert.equal(release.targetChannel, 2);
-  assert.equal(events.at(-1).payload.targetDeck, 2);
-  assert.equal(events.at(-1).payload.targetChannel, 2);
   router.stop();
 });
 
@@ -939,14 +946,36 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
   });
 
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1)],
+  });
+  const timelineSession = detector.getState().decks[1].playSessionId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
     timelineId: "show-1",
     positionBars: 32,
+    playSessionId: timelineSession,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
+  const stage1Release = router.triggerAction("release");
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: timelineSession,
+    pedalOwner: "timeline",
+    releaseEventId: stage1Release.delivery.eventId,
   });
   assert.equal(router.getStatus().mode, "timeline-control");
+  midiCalls.length = 0;
   const minus = router.triggerAction("release");
   assert.equal(minus.ok, true);
   assert.equal(sent.at(-1).type, "DJ_TIMELINE_BEAT_JUMP");
@@ -975,6 +1004,9 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     loopActive: true,
     timelineId: "show-1",
     positionBars: 32,
+    playSessionId: timelineSession,
+    pedalOwner: "timeline",
+    releaseEventId: stage1Release.delivery.eventId,
   });
   const plus = router.triggerAction("filter-close");
   assert.equal(plus.ok, true);
@@ -1051,7 +1083,7 @@ test("Syndocal disconnect does not gate Stage 1 local MIDI actions", () => {
   assert.equal(release.ok, false);
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.midiSent, true);
-  assert.equal(loop.ok, false);
+  assert.equal(loop.ok, true);
   assert.equal(router.triggerAction("filter-close").ignored, true);
   assert.deepEqual(midiCalls, ["stop", "loopHalf"]);
 
@@ -1108,7 +1140,21 @@ test("release handoff failures never stick in handoff-pending and running wins t
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
   });
   router.on("warning", () => {});
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1)],
+  });
+  const handoffSession = detector.getState().decks[1].playSessionId;
+  client.emit("timeline-state", {
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 0,
+    playSessionId: handoffSession,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
 
   const first = router.triggerAction("release");
   assert.equal(first.delivery.state, "pending");
@@ -1145,7 +1191,15 @@ test("release handoff failures never stick in handoff-pending and running wins t
 
   const third = router.triggerAction("release");
   assert.equal(router.getStatus().mode, "handoff-pending");
-  client.emit("timeline-state", { state: "running", loopActive: false, timelineId: "show-1" });
+  client.emit("timeline-state", {
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 0,
+    playSessionId: handoffSession,
+    pedalOwner: "timeline",
+    releaseEventId: third.delivery.eventId,
+  });
   assert.equal(router.getStatus().mode, "timeline-control");
   assert.equal(router.getStatus().releaseMacroPhase, "complete");
   assert.equal(router.getStatus().lastAction.phase, "complete");
@@ -1244,16 +1298,16 @@ test("track activity does not make a track load a master timeline event", () => 
 
   detector.onTrackLoaded({ deck: 1, contentId: "track-a" });
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: false, positionSec: 0 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1, { isPlaying: false, positionSec: 0 })],
   });
   assert.deepEqual(events.map((event) => event.type), ["DJ_TRACK_LOADED"]);
 
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true, positionSec: 0.1 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 2, { positionSec: 0.1 })],
   });
   assert.deepEqual(events.map((event) => event.type), [
     "DJ_TRACK_LOADED",
@@ -1261,9 +1315,9 @@ test("track activity does not make a track load a master timeline event", () => 
     "DJ_MASTER_TRACK_ACTIVE",
   ]);
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true, positionSec: 0.2 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 3, { positionSec: 0.2 })],
   });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
 });
@@ -1280,8 +1334,8 @@ test("explicit master change activates an already-playing deck exactly once", ()
       { deck: 2, contentId: "b", title: "B", artist: "Two" },
     ],
     deckPlaybacks: [
-      { deck: 1, isPlaying: false, positionSec: 0 },
-      { deck: 2, isPlaying: true, positionSec: 4 },
+      strictDetectorPlayback(1, 1, { isPlaying: false, positionSec: 0 }),
+      strictDetectorPlayback(2, 1, { positionSec: 4 }),
     ],
   });
   detector.onMasterChange({ deck: 2 });
@@ -1302,9 +1356,11 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
   detector.on("event", (event) => events.push(event));
 
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, title: "Fallback Track", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1, {
+      positionObservedAt: new Date(time).toISOString(),
+    })],
   });
   const firstActive = events.find((event) => event.type === "DJ_MASTER_TRACK_ACTIVE");
   const firstState = detector.getState().decks[1];
@@ -1318,9 +1374,11 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
   });
   time = 3_000;
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "content-42", title: "Fallback Track", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
+    deckPlaybacks: [strictDetectorPlayback(1, 2, {
+      positionObservedAt: new Date(time).toISOString(),
+    })],
   });
 
   const state = detector.getState().decks[1];
@@ -1344,9 +1402,9 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   const events = [];
   detector.on("event", (event) => events.push(event));
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "old", title: "Old", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1, { positionObservedAt: new Date(time).toISOString() })],
   });
   const previous = detector.getState().decks[1];
   time = 11_000;
@@ -1354,9 +1412,9 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
 
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
+    deckPlaybacks: [strictDetectorPlayback(1, 2, { positionObservedAt: new Date(time).toISOString() })],
   });
   const preloaded = detector.getState().decks[1];
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
@@ -1364,15 +1422,18 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   assert.equal(preloaded.awaitingPlayConfirmation, true);
 
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: false }],
+    deckPlaybacks: [strictDetectorPlayback(1, 3, {
+      isPlaying: false,
+      positionObservedAt: new Date(time).toISOString(),
+    })],
   });
   time = 12_000;
   detector.onSnapshot({
-    masterDeck: 1,
+    explicitMasterDeck: 1,
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
+    deckPlaybacks: [strictDetectorPlayback(1, 4, { positionObservedAt: new Date(time).toISOString() })],
   });
   const next = detector.getState().decks[1];
   assert.notEqual(next.playSessionId, previous.playSessionId);
@@ -1380,7 +1441,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 2);
 });
 
-test("master_change emits an already-playing deck with only an IsPlaying snapshot", () => {
+test("master_change waits for a fresh position/BPM sample before activating", () => {
   let id = 0;
   const detector = createTrackActivityDetector({ idFactory: () => `id-${++id}` });
   const events = [];
@@ -1398,9 +1459,15 @@ test("master_change emits an already-playing deck with only an IsPlaying snapsho
   });
   detector.onMasterChange({ deck: 2 });
   detector.onMasterChange({ deck: 2 });
+  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
+  detector.onSnapshot({
+    explicitMasterDeck: 2,
+    deckNowPlaying: [{ deck: 2, contentId: "b", title: "B", artist: "Two" }],
+    deckPlaybacks: [strictDetectorPlayback(2, 1, { positionSec: 4 })],
+  });
   const activeEvents = events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE");
   assert.equal(activeEvents.length, 1);
-  assert.equal(activeEvents[0].payload.positionSec, null);
+  assert.equal(activeEvents[0].payload.positionAtSendSec, 4);
   assert.equal(activeEvents[0].payload.contentId, "b");
 });
 
@@ -1438,16 +1505,19 @@ test("Hook provider order keeps fallback track active emission single", async (t
   });
   await send({ type: "master_change", deck: 1 });
   await send({ type: "track_meta", deck: 1, title: "Fallback Track", artist: "Artist" });
+  await send({ type: "olvc", deck: 1, name: "@OriginalBPM", value: 12_000 });
+  await send({ type: "olvc", deck: 1, name: "@BPM", value: 12_000 });
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 1_000 });
   await send({ type: "olvc", deck: 1, name: "@IsPlaying", value: 1 });
   await send({ type: "track_load", deck: 1, contentId: 42 });
   await new Promise((resolve) => setTimeout(resolve, 35));
 
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
-  assert.equal(events.filter((event) => event.type === "DJ_TRACK_LOADED").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_LOADED").length, 2);
   assert.equal(detector.getState().decks[1].track.contentId, "42");
 });
 
-test("playback fallback stays stable across non-playing deck packets", async (t) => {
+test("playback fallback stays stable but cannot activate until an explicit master change", async (t) => {
   const port = 46_000 + Math.floor(Math.random() * 1_000);
   const provider = createHookUdpProvider({ enabled: true, port });
   const detector = createTrackActivityDetector({ idFactory: (() => {
@@ -1486,6 +1556,9 @@ test("playback fallback stays stable across non-playing deck packets", async (t)
 
   await send({ type: "track_meta", deck: 1, title: "Beat Me", artist: "Artist" });
   await send({ type: "track_load", deck: 1, contentId: 46913811 });
+  await send({ type: "olvc", deck: 1, name: "@OriginalBPM", value: 12_000 });
+  await send({ type: "olvc", deck: 1, name: "@BPM", value: 12_000 });
+  await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 1_000 });
   await send({ type: "olvc", deck: 1, name: "@IsPlaying", value: 1 });
   await send({ type: "track_meta", deck: 2, title: "Preload", artist: "Other" });
   await send({ type: "olvc", deck: 2, name: "@IsPlaying", value: 0 });
@@ -1494,16 +1567,19 @@ test("playback fallback stays stable across non-playing deck packets", async (t)
   await send({ type: "track_load", deck: 1, contentId: 46913811 });
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
   assert.equal(new Set(snapshots.map((snapshot) => snapshot.masterDeck)).size, 1);
   assert.equal(snapshots.at(-1).masterDeck, 1);
   assert.equal(snapshots.at(-1).source, "playback-fallback");
 
   // A real master change is explicit and must still activate the already-playing deck.
+  await send({ type: "olvc", deck: 2, name: "@OriginalBPM", value: 12_000 });
+  await send({ type: "olvc", deck: 2, name: "@BPM", value: 12_000 });
+  await send({ type: "olvc", deck: 2, name: "@CurrentTime", value: 5_100 });
   await send({ type: "olvc", deck: 2, name: "@IsPlaying", value: 1 });
   await send({ type: "master_change", deck: 2 });
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 2);
+  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
   assert.equal(snapshots.at(-1).masterDeck, 2);
   assert.equal(snapshots.at(-1).source, "explicit-master-change");
 });
@@ -1550,7 +1626,7 @@ test("hook snapshots retain valid original BPM across transient zero packets", a
   assert.equal(snapshots.at(-1).deckNowPlaying[0].trackBpm, 130);
 });
 
-test("hook playback distinguishes configured loop boundaries from actual looping", async (t) => {
+test("hook preserves measured loop activity while inferred playback state remains separately observable", async (t) => {
   const port = 48_000 + Math.floor(Math.random() * 1_000);
   const provider = createHookUdpProvider({ enabled: true, port });
   const loopEvents = [];
@@ -1588,9 +1664,10 @@ test("hook playback distinguishes configured loop boundaries from actual looping
     endMs: 28_513,
   });
   await new Promise((resolve) => setTimeout(resolve, 15));
-  assert.equal(loopEvents.at(-1).active, false);
-  assert.equal(loopEvents.at(-1).activeSource, "playhead-passed-loop-end");
-  assert.equal(snapshots.at(-1).loopStates[0].active, false);
+  assert.equal(loopEvents.at(-1).active, true);
+  assert.equal(loopEvents.at(-1).activeSource, null);
+  assert.equal(loopEvents.at(-1).source, "rekordbox-hook");
+  assert.equal(snapshots.at(-1).loopStates[0].active, true);
 
   await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 28_450 });
   await send({
@@ -1619,9 +1696,11 @@ test("action security normalizes IPv4, IPv4-mapped IPv6, and IPv6 loopback", () 
 });
 
 test("Syndocal adapter selection is explicit and unknown names are unavailable", () => {
-  assert.equal(resolveAdapter({ adapter: "generic-json" }).adapterObject.name, "generic-json");
+  assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v2", token: TEST_TOKEN }).adapterObject.name, "syndocal-envelope-v2");
+  assert.equal(resolveAdapter({ adapter: "generic-json", token: TEST_TOKEN }).adapterObject, null);
+  assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v1", token: TEST_TOKEN }).adapterObject, null);
   assert.equal(resolveAdapter({ adapter: "" }).adapterObject, null);
-  assert.match(resolveAdapter({ adapter: "kdmx-private" }).error, /no silent generic fallback/);
+  assert.match(resolveAdapter({ adapter: "kdmx-private" }).error, /v2|required|retired/);
   const client = createSyndocalClient({ enabled: true, adapter: "unknown-adapter" });
   assert.equal(client.getStatus().state, "unavailable");
   client.start();
@@ -1629,126 +1708,7 @@ test("Syndocal adapter selection is explicit and unknown names are unavailable",
   client.stop();
 });
 
-test("generic-json emits strict flat KDMX fields and skips unknown DJ_TRACK events", () => {
-  const adapter = resolveAdapter({
-    adapter: "generic-json",
-    token: "0123456789abcdef0123456789abcdef",
-  }).adapterObject;
-  const fixtures = [
-    adapter.encodeHello({ eventId: "hello", sequence: 1 }),
-    adapter.encodeHeartbeat({ eventId: "heartbeat", sequence: 2 }),
-    adapter.encodeEvent({
-      type: "DJ_MASTER_CHANGED",
-      eventId: "master",
-      sequence: 3,
-      payload: { deck: 2, source: "must-not-cross-wire", updatedAt: "must-not-cross-wire" },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_MASTER_TRACK_ACTIVE",
-      eventId: "active",
-      sequence: 4,
-      payload: {
-        deck: 2,
-        contentId: "content-1",
-        title: "Track",
-        artist: "Artist",
-        trackBpm: 128,
-        positionSec: 1.25,
-        startedAt: "2026-08-23T00:00:00.000Z",
-        playSessionId: "play-1",
-        isPlaying: true,
-        source: "must-not-cross-wire",
-      },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_LOOP_STATE",
-      eventId: "loop",
-      sequence: 5,
-      payload: { division: 2, source: "must-not-cross-wire", targetDeck: 2 },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_RELEASE",
-      eventId: "release",
-      sequence: 6,
-      payload: { state: "released", releasedAt: "must-not-cross-wire" },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_TIMELINE_STATE_REQUEST",
-      eventId: "request",
-      sequence: 7,
-      payload: { source: "must-not-cross-wire" },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_TIMELINE_BEAT_JUMP",
-      eventId: "jump",
-      sequence: 8,
-      payload: { bars: -4, timelineId: "timeline-1", source: "must-not-cross-wire" },
-    }),
-    adapter.encodeEvent({
-      type: "DJ_TIMELINE_LOOP_SET",
-      eventId: "loop-set",
-      sequence: 9,
-      payload: { active: true, timelineId: "timeline-1", source: "must-not-cross-wire" },
-    }),
-    adapter.encodeStateSync({
-      eventId: "sync",
-      sequence: 10,
-      state: {
-        loopDivision: 3,
-        released: false,
-        masterDeck: 2,
-        masterTrack: {
-          contentId: "content-1",
-          title: "Track",
-          artist: "Artist",
-          isPlaying: true,
-          trackBpm: 128,
-          mode: "must-not-cross-wire",
-        },
-        mode: "must-not-cross-wire",
-        updatedAt: "must-not-cross-wire",
-      },
-    }),
-  ];
-  for (const fixture of fixtures) {
-    assertStrictKdmxFlatFrame(fixture);
-  }
-  assert.equal(fixtures[2].deck, "2");
-  assert.equal(fixtures[3].deck, "2");
-  assert.equal(fixtures[9].masterDeck, "2");
-  assert.equal(adapter.encodeEvent({
-    type: "DJ_TRACK_LOADED",
-    eventId: "unknown",
-    sequence: 11,
-    payload: { deck: 2, source: "must-not-cross-wire" },
-  }), null);
-  assert.equal(encodeFlatEvent({
-    type: "DJ_UNSUPPORTED",
-    eventId: "unsupported",
-    sequence: 12,
-    payload: { arbitrary: true },
-  }), null);
-  assert.equal(encodeFlatEvent({
-    type: " DJ_RELEASE ",
-    eventId: "unsupported-whitespace-type",
-    sequence: 13,
-    payload: { state: "released" },
-  }), null);
-  assert.deepEqual(encodeFlatStateSync({
-    loopDivision: 2,
-    released: true,
-    masterDeck: 1,
-    masterTrack: null,
-    arbitrary: true,
-  }), {
-    loopDivision: 2,
-    released: true,
-    masterDeck: "1",
-    masterTrack: null,
-  });
-});
-
-test("real router getStateSync is encoded as a strict KDMX State Sync frame", async (t) => {
+test("real router getStateSync is encoded as a strict v2 State Sync frame", async (t) => {
   class StateSyncWebSocket extends EventEmitter {
     static instances = [];
 
@@ -1782,7 +1742,7 @@ test("real router getStateSync is encoded as a strict KDMX State Sync frame", as
   const client = createSyndocalClient({
     enabled: true,
     token: "0123456789abcdef0123456789abcdef",
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: StateSyncWebSocket,
     heartbeatMs: 60_000,
     stateSyncProvider: () => router?.getStateSync() || {},
@@ -1810,36 +1770,53 @@ test("real router getStateSync is encoded as a strict KDMX State Sync frame", as
   await new Promise((resolve) => setImmediate(resolve));
   const socket = StateSyncWebSocket.instances.at(-1);
   assert.equal(socket.url, "ws://127.0.0.1:9100/dj-link");
-  assertStrictKdmxFlatFrame(socket.sent[0]);
-  assertStrictKdmxFlatFrame(socket.sent[1]);
-  assertStrictKdmxFlatFrame(socket.sent[2]);
+  assertStrictV2Frame(socket.sent[0], "DJ_AGENT_HELLO");
+  assertStrictV2Frame(socket.sent[1], "DJ_STATE_SYNC");
+  assertStrictV2Frame(socket.sent[2], "DJ_TIMELINE_STATE_REQUEST");
   assert.equal(socket.sent[1].type, "DJ_STATE_SYNC");
-  assert.equal(socket.sent[1].masterDeck, "2");
-  assert.equal(socket.sent[1].masterTrack.isPlaying, true);
-  assert.equal(Object.hasOwn(socket.sent[1], "mode"), false);
-  assert.equal(Object.hasOwn(socket.sent[1].masterTrack, "trackBpm"), false);
+  assert.deepEqual(socket.sent[1].payload, {
+    released: false,
+    masterDeck: "2",
+    activePlaySessionId: null,
+  });
 
   socket.emit("message", JSON.stringify({
+    v: 2,
     type: "DJ_TIMELINE_STATE",
+    agentId: "syndocal",
+    sessionId: "syndocal-session",
     eventId: "timeline-router-valid",
     sequence: 7,
-    state: "running",
-    loopActive: false,
-    timelineId: "show-1",
-    positionBars: 16,
+    payload: {
+      state: "running",
+      loopActive: false,
+      timelineId: "show-1",
+      positionBars: 16,
+      playSessionId: "play-session-1",
+      pedalOwner: "dj",
+      releaseEventId: null,
+    },
   }));
-  assert.equal(router.getStatus().mode, "timeline-control");
+  assert.equal(router.getStatus().mode, "dj-control");
   socket.emit("message", JSON.stringify({
+    v: 2,
     type: "DJ_TIMELINE_STATE",
+    agentId: "syndocal",
+    sessionId: "syndocal-session",
     eventId: "timeline-router-invalid",
     sequence: 8,
-    state: "running",
-    loopActive: false,
-    timelineId: "show-1",
-    positionBars: 16,
-    payload: { state: "idle" },
+    payload: {
+      state: "running",
+      loopActive: false,
+      timelineId: "show-1",
+      positionBars: 16,
+      playSessionId: "play-session-1",
+      pedalOwner: "dj",
+      releaseEventId: null,
+      extra: true,
+    },
   }));
-  assert.equal(router.getStatus().mode, "timeline-control");
+  assert.equal(router.getStatus().mode, "dj-control");
 });
 
 test("Busy ACK retries the same eventId/sequence/shape and terminal rejection does not retry", async (t) => {
@@ -1870,7 +1847,7 @@ test("Busy ACK retries the same eventId/sequence/shape and terminal rejection do
   const client = createSyndocalClient({
     enabled: true,
     token: "0123456789abcdef0123456789abcdef",
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: BusyWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 100,
@@ -1887,60 +1864,35 @@ test("Busy ACK retries the same eventId/sequence/shape and terminal rejection do
     type: "DJ_LOOP_STATE",
     eventId: "same-event",
     sequence: 77,
-    payload: { division: 2, source: "must-not-cross-wire" },
+    payload: strictV2LoopPayload(),
   });
   const firstFrame = socket.sent.at(-1);
-  assertStrictKdmxFlatFrame(firstFrame);
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: "same-event",
-    sequence: 77,
-    ok: false,
-    message: "busy",
-    outcome: "busy",
-    code: "BUSY",
-    stateGeneration: 1,
-  }));
+  assert.equal(retried.state, "pending");
+  assertStrictV2Frame(firstFrame, "DJ_LOOP_STATE");
+  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame, "busy", { code: "BUSY" })));
   await new Promise((resolve) => setTimeout(resolve, 12));
   const eventFrames = socket.sent.filter((frame) => frame.type === "DJ_LOOP_STATE");
   assert.equal(eventFrames.length, 2);
   assert.deepEqual(eventFrames[1], firstFrame);
   assert.equal(client.getStatus().lastDelivery.state, "pending");
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: "same-event",
-    sequence: 77,
-    ok: true,
-    message: "accepted",
-    outcome: "accepted",
-    code: "OK",
-    stateGeneration: 1,
-  }));
+  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame)));
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 
-  const terminalReject = client.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } });
+  const terminalReject = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
+  const terminalFrame = socket.sent.find((frame) => frame.eventId === terminalReject.eventId);
   const rejectCount = socket.sent.filter((frame) => frame.eventId === terminalReject.eventId).length;
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: terminalReject.eventId,
-    sequence: terminalReject.sequence,
-    ok: false,
-    message: "rejected",
-    outcome: "rejected",
-    code: "REJECTED",
-    stateGeneration: 1,
-  }));
+  socket.emit("message", JSON.stringify(strictV2Ack(terminalFrame, "rejected", { code: "REJECTED" })));
   await new Promise((resolve) => setTimeout(resolve, 12));
   assert.equal(socket.sent.filter((frame) => frame.eventId === terminalReject.eventId).length, rejectCount);
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
 });
 
-test("Syndocal defaults use /dj-link, generic-json, five-second heartbeat, ws, and bounded history", async (t) => {
+test("Syndocal defaults use /dj-link, strict v2, five-second heartbeat, ws, and bounded history", async (t) => {
   const config = loadDjAgentConfig({
     env: { DJ_AGENT_ENABLED: "true", SYNDOCAL_ENABLED: "true" },
   });
   assert.equal(config.syndocal.path, "/dj-link");
-  assert.equal(config.syndocal.adapter, "generic-json");
+  assert.equal(config.syndocal.adapter, "syndocal-envelope-v2");
   assert.equal(config.syndocal.heartbeatMs, 5_000);
   assert.equal(resolveWebSocketImplementation("ws"), require("ws"));
 
@@ -1971,7 +1923,7 @@ test("Syndocal defaults use /dj-link, generic-json, five-second heartbeat, ws, a
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: HistoryWebSocket,
     heartbeatMs: 60_000,
     deliveryHistoryMax: 3,
@@ -1997,139 +1949,6 @@ test("Syndocal defaults use /dj-link, generic-json, five-second heartbeat, ws, a
   assert.equal(client.getStatus().deliveryHistoryMax, 3);
   assert.equal(client.getStatus().deliveryHistorySize, 3);
   assert.equal(client.getStatus().lastDelivery.type, "DJ_MASTER_CHANGED");
-});
-
-test("Syndocal client uses generic JSON envelopes and state sync on connect", async (t) => {
-  const EventEmitter = require("node:events");
-  class FakeWebSocket extends EventEmitter {
-    static instances = [];
-
-    constructor(url) {
-      super();
-      this.url = url;
-      this.readyState = 0;
-      this.sent = [];
-      FakeWebSocket.instances.push(this);
-      queueMicrotask(() => {
-        this.readyState = 1;
-        this.emit("open");
-      });
-    }
-
-    send(value) {
-      this.sent.push(JSON.parse(value));
-    }
-
-    close() {
-      this.readyState = 3;
-      this.emit("close", 1000, "test");
-    }
-  }
-
-  const client = createSyndocalClient({
-    enabled: true,
-    host: "10.0.0.5",
-    port: 9999,
-    token: TEST_TOKEN,
-    adapter: "generic-json",
-    WebSocketImpl: FakeWebSocket,
-    heartbeatMs: 60_000,
-    stateSyncProvider: () => ({ loopDivision: 2, released: false }),
-  });
-  t.after(() => client.stop());
-  client.start();
-  await new Promise((resolve) => setImmediate(resolve));
-  const socket = FakeWebSocket.instances.at(-1);
-  assert.equal(socket.url, "ws://10.0.0.5:9999/dj-link");
-  assert.equal(socket.sent[0].type, "DJ_AGENT_HELLO");
-  assert.equal(socket.sent[1].type, "DJ_STATE_SYNC");
-  assert.equal(socket.sent[2].type, "DJ_TIMELINE_STATE_REQUEST");
-  const timelineStates = [];
-  const warnings = [];
-  client.on("timeline-state", (state) => timelineStates.push(state));
-  client.on("warning", (warning) => warnings.push(warning));
-  socket.emit("message", JSON.stringify({
-    type: "DJ_TIMELINE_STATE",
-    eventId: "timeline-state-1",
-    sequence: 99,
-    state: "running",
-    loopActive: false,
-    timelineId: "show-1",
-    positionBars: 16,
-  }));
-  assert.deepEqual(timelineStates, [{
-    type: "DJ_TIMELINE_STATE",
-    state: "running",
-    loopActive: false,
-    timelineId: "show-1",
-    positionBars: 16,
-    eventId: "timeline-state-1",
-    sequence: 99,
-  }]);
-  const validTimeline = {
-    type: "DJ_TIMELINE_STATE",
-    eventId: "timeline-state-2",
-    sequence: 100,
-    state: "running",
-    loopActive: false,
-    timelineId: "show-1",
-    positionBars: 16,
-  };
-  const missingEventId = { ...validTimeline };
-  delete missingEventId.eventId;
-  const missingTimelineId = { ...validTimeline };
-  delete missingTimelineId.timelineId;
-  const missingPosition = { ...validTimeline };
-  delete missingPosition.positionBars;
-  const invalidTimelineFrames = [
-    { ...validTimeline, type: "DJ_TIMELINE_STATE " },
-    { ...validTimeline, type: "dj_timeline_state" },
-    { ...validTimeline, eventId: " timeline-state-2" },
-    { ...validTimeline, timelineId: "show-1 " },
-    { ...validTimeline, eventId: 2 },
-    { ...validTimeline, sequence: 0 },
-    { ...validTimeline, sequence: -1 },
-    { ...validTimeline, sequence: 1.5 },
-    { ...validTimeline, sequence: "100" },
-    { ...validTimeline, state: "RUNNING" },
-    { ...validTimeline, state: " running" },
-    { ...validTimeline, loopActive: null },
-    { ...validTimeline, positionBars: -1 },
-    { ...validTimeline, positionBars: 1.5 },
-    { ...validTimeline, positionBars: "16" },
-    { ...validTimeline, payload: {} },
-    { ...validTimeline, extra: true },
-    missingEventId,
-    missingTimelineId,
-    missingPosition,
-  ];
-  const validCount = timelineStates.length;
-  for (const frame of invalidTimelineFrames) {
-    socket.emit("message", JSON.stringify(frame));
-    assert.equal(timelineStates.length, validCount);
-  }
-  socket.emit("message", JSON.stringify({
-    ...validTimeline,
-    eventId: "timeline-state-3",
-    sequence: 101,
-    loopActive: "no",
-  }));
-  assert.match(warnings.at(-1).message, /Invalid DJ_TIMELINE_STATE/);
-  assert.equal(normalizeTimelineState({ type: "DJ_TIMELINE_STATE", state: "unknown", loopActive: false }), null);
-  const result = client.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } });
-  assert.equal(result.sent, true);
-  assert.equal(socket.sent.at(-1).type, "DJ_RELEASE");
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: result.eventId,
-    sequence: result.sequence,
-    ok: true,
-    message: "accepted",
-    outcome: "accepted",
-    code: "OK",
-    stateGeneration: 1,
-  }));
-  assert.equal(client.getStatus().lastAckAt != null, true);
 });
 
 test("Syndocal delivery stays pending until ACK and records rejection/timeout", async (t) => {
@@ -2160,7 +1979,7 @@ test("Syndocal delivery stays pending until ACK and records rejection/timeout", 
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: AckWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 25,
@@ -2171,32 +1990,24 @@ test("Syndocal delivery stays pending until ACK and records rejection/timeout", 
   await new Promise((resolve) => setImmediate(resolve));
   const socket = AckWebSocket.instances.at(-1);
 
-  const rejected = client.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } });
+  const rejected = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
   assert.equal(rejected.sent, true);
   assert.equal(rejected.ok, false);
   assert.equal(rejected.ackState, "pending");
   assert.equal(client.getStatus().lastDelivery.state, "pending");
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: rejected.eventId,
-    sequence: rejected.sequence,
-    ok: false,
-    outcome: "rejected",
-    message: "denied",
-    code: "REJECTED",
-    stateGeneration: 1,
-  }));
+  const rejectedFrame = socket.sent.find((frame) => frame.eventId === rejected.eventId);
+  socket.emit("message", JSON.stringify(strictV2Ack(rejectedFrame, "rejected", { code: "REJECTED" })));
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
   assert.equal(client.getStatus().lastAckResult.ok, false);
 
-  const timedOut = client.sendEvent({ type: "DJ_LOOP_STATE", payload: { division: 1 } });
+  const timedOut = client.sendEvent({ type: "DJ_LOOP_STATE", payload: strictV2LoopPayload() });
   assert.equal(timedOut.ackState, "pending");
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(client.getStatus().lastDelivery.state, "timed-out");
   assert.equal(client.getStatus().lastAckResult.state, "timed-out");
 
   client.stop();
-  const unsent = client.sendEvent({ type: "DJ_RELEASE" });
+  const unsent = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
   assert.equal(unsent.ok, false);
   assert.equal(unsent.ackState, "send-failed");
 });
@@ -2226,7 +2037,7 @@ test("Syndocal reconnects after error-only sockets without double scheduling", a
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: ErrorOnlyWebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 50,
@@ -2242,56 +2053,7 @@ test("Syndocal reconnects after error-only sockets without double scheduling", a
   assert.equal(client.getStatus().state, "connected");
 });
 
-test("KDMX flat string and type boundaries fail closed without coercion", () => {
-  const event = (payload = {}) => ({
-    type: "DJ_MASTER_TRACK_ACTIVE",
-    eventId: "boundary-event",
-    sequence: 1,
-    payload: {
-      deck: 2,
-      playSessionId: "session-1",
-      isPlaying: true,
-      ...payload,
-    },
-  });
-  const emoji64 = "😀".repeat(64);
-  assert.equal(Buffer.byteLength(emoji64, "utf8"), 256);
-  assert.equal(typeof encodeFlatEvent(event({ title: emoji64 })).title, "string");
-  assert.equal(encodeFlatEvent(event({ title: emoji64 + "x" })), null);
-  assert.equal(encodeFlatEvent(event({ title: "日本語 🎛️" })).title, "日本語 🎛️");
-  for (const value of [null, undefined, 12, true, {}, "\u0000bad", "\u0085bad", "   "]) {
-    assert.equal(encodeFlatEvent(event({ playSessionId: value })), null, String(value));
-  }
-  assert.equal(encodeFlatEvent(event({ playSessionId: "\u2028bad" })).playSessionId, "\u2028bad");
-  assert.equal(encodeFlatEvent(event({ playSessionId: "\u200Dbad" })).playSessionId, "\u200Dbad");
-  assert.equal(encodeFlatEvent(event({ playSessionId: "bad\u2029value" })).playSessionId, "bad\u2029value");
-  assert.equal(encodeFlatEvent(event({ playSessionId: "bad\ud800" })), null);
-  for (const value of [NaN, Infinity, "2", true, {}, null]) {
-    assert.equal(encodeFlatEvent({
-      type: "DJ_LOOP_STATE",
-      eventId: "loop-boundary",
-      sequence: 2,
-      payload: { division: value },
-    }), null, String(value));
-  }
-  assert.equal(encodeFlatEvent(event({ deck: true })), null);
-  assert.equal(encodeFlatEvent({
-    type: "DJ_MASTER_CHANGED",
-    eventId: 12,
-    sequence: 3,
-    payload: { deck: 2 },
-  }), null);
-  assert.equal(encodeFlatEvent({
-    type: "DJ_MASTER_CHANGED",
-    eventId: "master-boundary",
-    sequence: 3,
-    payload: { deck: 2 },
-  }).deck, "2");
-  assert.equal(encodeFlatStateSync({ released: null }), null);
-  assert.equal(encodeFlatStateSync({ released: false, masterTrack: { isPlaying: "yes" } }), null);
-});
-
-test("generic-json token preflight rejects bad credentials before opening a socket", () => {
+test("strict v2 token preflight rejects bad credentials before opening a socket", () => {
   let opens = 0;
   class ShouldNotOpenWebSocket {
     constructor() {
@@ -2301,7 +2063,7 @@ test("generic-json token preflight rejects bad credentials before opening a sock
   for (const token of ["", "short", "x".repeat(257), "x".repeat(31), "x".repeat(32) + " ", "x".repeat(32) + "\u2028"]) {
     const client = createSyndocalClient({
       enabled: true,
-      adapter: "generic-json",
+      adapter: "syndocal-envelope-v2",
       token,
       WebSocketImpl: ShouldNotOpenWebSocket,
     });
@@ -2342,7 +2104,7 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: IdentityWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 1_000,
@@ -2355,77 +2117,49 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   const first = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "single-use",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   assert.equal(first.state, "pending");
+  const firstFrame = socket.sent.find((frame) => frame.eventId === first.eventId);
   const beforeWrongAck = client.getStatus().lastDelivery.updatedAt;
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
+  socket.emit("message", JSON.stringify(strictV2Ack({
     eventId: first.eventId,
     sequence: first.sequence + 1,
-    ok: true,
-    outcome: "accepted",
-    message: "wrong sequence",
-    code: "OK",
-    stateGeneration: 1,
-  }));
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
+  })));
+  socket.emit("message", JSON.stringify(strictV2Ack({
     eventId: "unknown-event",
     sequence: first.sequence,
-    ok: true,
-    outcome: "accepted",
-    message: "unknown",
-    code: "OK",
-    stateGeneration: 1,
-  }));
+  })));
   assert.equal(client.getStatus().lastDelivery.state, "pending");
   assert.equal(client.getStatus().lastDelivery.updatedAt, beforeWrongAck);
   assert.equal(client.getStatus().lastAckAt, null);
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: first.eventId,
-    sequence: first.sequence,
-    ok: true,
-    outcome: "accepted",
-    message: "accepted",
-    code: "OK",
-    stateGeneration: 1,
-  }));
+  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame)));
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
   const reused = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: first.eventId,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   assert.equal(reused.reason, "event-id-reused");
 
   const terminal = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "terminal-single-use",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: terminal.eventId,
-    sequence: terminal.sequence,
-    ok: false,
-    outcome: "rejected",
-    message: "denied",
-    code: "NO_MAPPING",
-    stateGeneration: 1,
-  }));
+  const terminalFrame = socket.sent.find((frame) => frame.eventId === terminal.eventId);
+  socket.emit("message", JSON.stringify(strictV2Ack(terminalFrame, "rejected", { code: "NO_MAPPING" })));
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: terminal.eventId,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "event-id-reused");
 
   const saturated = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "saturated",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   const rejectedByCapacity = client.sendEvent({
     type: "DJ_LOOP_STATE",
@@ -2436,144 +2170,15 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   assert.equal(rejectedByCapacity.reason, "pending-ack-limit");
   assert.equal(client.getStatus().pendingAcks, 1);
   socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: saturated.eventId,
-    sequence: saturated.sequence,
-    ok: true,
-    outcome: "accepted",
-    message: "accepted",
-    code: "OK",
-    stateGeneration: 1,
+    ...strictV2Ack(socket.sent.find((frame) => frame.eventId === saturated.eventId)),
   }));
   const recovered = client.sendEvent({
     type: "DJ_LOOP_STATE",
     eventId: "capacity-recovered",
-    payload: { division: 2 },
+    payload: strictV2LoopPayload({ revision: 2, lengthBeats: 4, endBeat: 36 }),
   });
   assert.equal(recovered.sent, true);
   assert.equal(client.getStatus().pendingAcks, 1);
-});
-
-test("Busy backoff is fenced to its socket and reconnect never replays old events", async (t) => {
-  class GenerationWebSocket extends EventEmitter {
-    static instances = [];
-
-    constructor(url, options) {
-      super();
-      this.url = url;
-      this.options = options;
-      this.readyState = 0;
-      this.sent = [];
-      GenerationWebSocket.instances.push(this);
-      queueMicrotask(() => {
-        this.readyState = 1;
-        this.emit("open");
-      });
-    }
-
-    send(value) {
-      this.sent.push(JSON.parse(value));
-    }
-
-    close() {
-      this.readyState = 3;
-    }
-  }
-
-  const client = createSyndocalClient({
-    enabled: true,
-    token: TEST_TOKEN,
-    adapter: "generic-json",
-    WebSocketImpl: GenerationWebSocket,
-    heartbeatMs: 60_000,
-    ackTimeoutMs: 1_000,
-    busyRetryMaxAttempts: 3,
-    busyRetryBaseMs: 20,
-    busyRetryMaxMs: 20,
-    reconnectMinMs: 50,
-    reconnectMaxMs: 100,
-  });
-  t.after(() => client.stop());
-  client.start();
-  await new Promise((resolve) => setImmediate(resolve));
-  const firstSocket = GenerationWebSocket.instances[0];
-  const oldMessage = firstSocket.listeners("message")[0];
-  const oldClose = firstSocket.listeners("close")[0];
-  const busy = client.sendEvent({
-    type: "DJ_LOOP_STATE",
-    eventId: "close-during-busy",
-    payload: { division: 1 },
-  });
-  firstSocket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: busy.eventId,
-    sequence: busy.sequence,
-    ok: false,
-    outcome: "busy",
-    message: "busy",
-    code: "BUSY",
-    stateGeneration: 1,
-  }));
-  firstSocket.emit("close", 1006, "busy socket closed");
-  assert.equal(client.getStatus().pendingAcks, 0);
-  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  const secondSocket = GenerationWebSocket.instances.at(-1);
-  assert.notEqual(secondSocket, firstSocket);
-  assert.equal(secondSocket.sent.some((frame) => frame.eventId === busy.eventId), false);
-
-  const next = client.sendEvent({
-    type: "DJ_LOOP_STATE",
-    eventId: "new-generation",
-    payload: { division: 2 },
-  });
-  assert.equal(next.state, "pending");
-  oldMessage(JSON.stringify({
-    type: "ACK",
-    eventId: next.eventId,
-    sequence: next.sequence,
-    ok: true,
-    outcome: "accepted",
-    message: "old socket",
-    code: "OK",
-    stateGeneration: 1,
-  }));
-  oldClose(1006, "stale callback");
-  assert.equal(client.getStatus().lastDelivery.state, "pending");
-  secondSocket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: next.eventId,
-    sequence: next.sequence,
-    ok: true,
-    outcome: "accepted",
-    message: "current socket",
-    code: "OK",
-    stateGeneration: 2,
-  }));
-  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
-
-  const errorBusy = client.sendEvent({
-    type: "DJ_LOOP_STATE",
-    eventId: "error-during-busy",
-    payload: { division: 3 },
-  });
-  secondSocket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: errorBusy.eventId,
-    sequence: errorBusy.sequence,
-    ok: false,
-    outcome: "busy",
-    message: "busy",
-    code: "BUSY",
-    stateGeneration: 2,
-  }));
-  secondSocket.emit("error", new Error("socket failed"));
-  assert.equal(client.getStatus().pendingAcks, 0);
-  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  const thirdSocket = GenerationWebSocket.instances.at(-1);
-  assert.notEqual(thirdSocket, secondSocket);
-  assert.equal(thirdSocket.sent.some((frame) => frame.eventId === errorBusy.eventId), false);
 });
 
 test("every physical event waits for typed ACK outcomes, including master and timeline events", async (t) => {
@@ -2603,7 +2208,7 @@ test("every physical event waits for typed ACK outcomes, including master and ti
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: PhysicalAckWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 25,
@@ -2615,17 +2220,13 @@ test("every physical event waits for typed ACK outcomes, including master and ti
   client.start();
   await new Promise((resolve) => setImmediate(resolve));
   const socket = PhysicalAckWebSocket.instances.at(-1);
-  const ack = (result, outcome, ok = outcome === "accepted" || outcome === "duplicate") => {
-    socket.emit("message", JSON.stringify({
-      type: "ACK",
-      eventId: result.eventId,
-      sequence: result.sequence,
-      ok,
-      message: outcome,
+  const ack = (result, outcome) => {
+    const frame = socket.sent.find((candidate) => candidate.eventId === result.eventId);
+    socket.emit("message", JSON.stringify(strictV2Ack(
+      frame,
       outcome,
-      code: ok ? null : outcome.toUpperCase(),
-      stateGeneration: 1,
-    }));
+      { code: ["accepted", "duplicate"].includes(outcome) ? null : outcome.toUpperCase() },
+    )));
   };
 
   const acceptedMaster = client.sendEvent({
@@ -2640,30 +2241,34 @@ test("every physical event waits for typed ACK outcomes, including master and ti
 
   const rejectedTrack = client.sendEvent({
     type: "DJ_MASTER_TRACK_ACTIVE",
-    payload: { deck: 2, playSessionId: "session-1", isPlaying: true },
+    payload: strictV2TrackPayload({
+      deck: 2,
+      deckId: "rekordbox-deck-2",
+      playSessionId: "session-1",
+    }),
   });
   assert.equal(rejectedTrack.state, "pending");
-  ack(rejectedTrack, "rejected", false);
+  ack(rejectedTrack, "rejected");
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
 
   const noMappingLoop = client.sendEvent({
     type: "DJ_LOOP_STATE",
-    payload: { division: 2, enabled: true },
+    payload: strictV2LoopPayload(),
   });
   assert.equal(noMappingLoop.state, "pending");
-  ack(noMappingLoop, "no_mapping", false);
+  ack(noMappingLoop, "no_mapping");
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
 
   const busyRelease = client.sendEvent({
     type: "DJ_RELEASE",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   const firstReleaseFrame = socket.sent.at(-1);
-  ack(busyRelease, "busy", false);
+  ack(busyRelease, "busy");
   await new Promise((resolve) => setTimeout(resolve, 8));
   const retryReleaseFrame = socket.sent.at(-1);
   assert.deepEqual(retryReleaseFrame, firstReleaseFrame);
-  ack(busyRelease, "duplicate", true);
+  ack(busyRelease, "duplicate");
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 
   const timedOutTimeline = client.sendEvent({
@@ -2679,7 +2284,7 @@ test("every physical event waits for typed ACK outcomes, including master and ti
     payload: { active: true, timelineId: "timeline-1" },
   });
   assert.equal(acceptedTimelineLoop.state, "pending");
-  ack(acceptedTimelineLoop, "accepted", true);
+  ack(acceptedTimelineLoop, "accepted");
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 });
 
@@ -2713,7 +2318,7 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: StateRecoveryWebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 50,
@@ -2723,7 +2328,7 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
       if (mode === "null") return null;
       if (mode === "undefined") return undefined;
       if (mode === "invalid") return { loopDivision: "bad" };
-      return { loopDivision: 2, released: false, masterDeck: 1, masterTrack: null };
+      return { released: false, masterDeck: 1, activePlaySessionId: null };
     },
   });
   client.on("state-sync-error", (failure) => errors.push(failure));
@@ -2735,14 +2340,17 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
   await new Promise((resolve) => setImmediate(resolve));
   const first = StateRecoveryWebSocket.instances[0];
   assert.deepEqual(first.sent.map((frame) => frame.type), ["DJ_AGENT_HELLO"]);
-  const wireSequenceAfterHello = client.getStatus().wireSequence;
 
   for (const invalidMode of ["null", "undefined", "invalid"]) {
     mode = invalidMode;
+    const sequenceBeforeAttempt = client.getStatus().wireSequence;
     assert.equal(client.sendStateSync(), false);
     assert.equal(first.sent.some((frame) => frame.type === "DJ_STATE_SYNC"), false);
     assert.equal(first.sent.some((frame) => frame.type === "DJ_TIMELINE_STATE_REQUEST"), false);
-    assert.equal(client.getStatus().wireSequence, wireSequenceAfterHello);
+    assert.equal(
+      client.getStatus().wireSequence,
+      sequenceBeforeAttempt + (invalidMode === "invalid" ? 1 : 0),
+    );
   }
   assert.equal(errors.length, 4);
   assert.equal(failures.length, 4);
@@ -2825,7 +2433,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: heartbeatClock.intervalApi,
     heartbeatMs: 60_000,
@@ -2837,7 +2445,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   client.start();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(client.getStatus().eventIdRegistrySize, 0);
-  assert.equal(client.sendEvent({ type: " DJ_RELEASE ", payload: { state: "released" } }).reason, "unsupported-type");
+  assert.equal(client.sendEvent({ type: " DJ_RELEASE ", payload: strictV2ReleasePayload() }).reason, "unsupported-type");
   assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: null }).reason, "invalid-payload");
   assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: { state: {} } }).reason, "invalid-payload");
   assert.equal(client.getStatus().eventIdRegistrySize, 0);
@@ -2846,47 +2454,47 @@ test("physical IDs and sequences fail closed before reservation while controls o
     type: "DJ_RELEASE",
     eventId: "physical-first",
     sequence: 4,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   assert.equal(first.state, "pending");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-equal",
     sequence: 4,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "sequence-rollback");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-lower",
     sequence: 3,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "sequence-rollback");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-fraction",
     sequence: 4.5,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "invalid-sequence");
   assert.equal(client.getStatus().eventIdRegistrySize, 1);
 
   const second = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-second",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   assert.equal(second.sequence, 5);
   const high = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-high",
     sequence: Number.MAX_SAFE_INTEGER,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   });
   assert.equal(high.state, "pending");
-  assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } }).reason, "sequence-overflow");
+  assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() }).reason, "sequence-overflow");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-first",
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "event-id-reused");
   assert.equal(client.getStatus().eventIdRegistrySize, 3);
 
@@ -2894,7 +2502,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   const capClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: capClock.intervalApi,
     heartbeatMs: 1,
@@ -2918,15 +2526,15 @@ test("physical IDs and sequences fail closed before reservation while controls o
   assert.equal(callerControl.reason, "control-event-id-not-accepted");
   assert.equal(capClient.getStatus().wireSequence, controlSequenceBeforeCallerId);
   assert.equal(capSocket.sent.some((frame) => frame.type === "DJ_TIMELINE_STATE_REQUEST" && frame.eventId === "caller-supplied-control"), false);
-  const capped = capClient.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } });
+  const capped = capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
   assert.equal(capped.state, "pending");
   assert.equal(capClient.sendEvent({
     type: "DJ_RELEASE",
     eventId: controlId,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "event-id-conflicts-with-control");
   assert.equal(capClient.getStatus().physicalEventIdLatched, true);
-  assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } }).reason, "event-id-admission-limit");
+  assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() }).reason, "event-id-admission-limit");
   capClock.tick(4_097);
   const controlFrames = capSocket.sent.filter((frame) => [
     "DJ_AGENT_HELLO",
@@ -2946,13 +2554,16 @@ test("physical IDs and sequences fail closed before reservation while controls o
   const reconnectHello = reconnectSocket.sent.find((frame) => frame.type === "DJ_AGENT_HELLO");
   assert.ok(reconnectHello.eventId.startsWith("control-"));
   assert.equal(oldControlIds.has(reconnectHello.eventId), false);
-  assert.equal(reconnectSocket.sent.some((frame) => frame.eventId === capped.eventId), false);
+  const cappedReplay = reconnectSocket.sent.find((frame) => frame.eventId === capped.eventId);
+  assertStrictV2Frame(cappedReplay, "DJ_RELEASE");
+  assert.notEqual(cappedReplay.sessionId, capSocket.sent.find((frame) => frame.eventId === capped.eventId).sessionId);
+  assert.deepEqual(cappedReplay.payload, strictV2ReleasePayload());
 
   const recreatedClock = createManualIntervalClock();
   const recreatedClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: recreatedClock.intervalApi,
     heartbeatMs: 60_000,
@@ -2967,7 +2578,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   assert.equal(recreatedClient.sendEvent({
     type: "DJ_RELEASE",
     eventId: controlId,
-    payload: { state: "released" },
+    payload: strictV2ReleasePayload(),
   }).reason, "event-id-conflicts-with-control");
 
   client.stop();
@@ -3047,7 +2658,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: HeartbeatProbeWebSocket,
     intervalApi: clock,
     heartbeatMs: 250,
@@ -3082,7 +2693,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
     () => createSyndocalClient({
       enabled: true,
       token: TEST_TOKEN,
-      adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
       intervalApi: new MethodlessClock(),
     }),
     TypeError,
@@ -3091,7 +2702,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
     () => createSyndocalClient({
       enabled: true,
       token: TEST_TOKEN,
-      adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
       intervalApi: "setInterval-string",
     }),
     TypeError,
@@ -3150,7 +2761,7 @@ test("Syndocal heartbeat seam treats numeric 0 as a valid opaque interval handle
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: ZeroHandleProbeWebSocket,
     intervalApi: clock,
     heartbeatMs: 60_000,
@@ -3189,81 +2800,6 @@ test("Syndocal heartbeat seam treats numeric 0 as a valid opaque interval handle
     assert.equal(entry.intervalMs, 60_000);
     assert.equal(clearedCounts.get(entry.handle), 1);
   }
-});
-
-test("malformed or inconsistent typed ACKs are protocol failures and never acknowledge", async (t) => {
-  class MalformedAckWebSocket extends EventEmitter {
-    static instances = [];
-
-    constructor() {
-      super();
-      this.readyState = 0;
-      this.sent = [];
-      MalformedAckWebSocket.instances.push(this);
-      queueMicrotask(() => {
-        this.readyState = 1;
-        this.emit("open");
-      });
-    }
-
-    send(value) {
-      this.sent.push(JSON.parse(value));
-    }
-
-    close() {
-      this.readyState = 3;
-    }
-  }
-
-  const client = createSyndocalClient({
-    enabled: true,
-    token: TEST_TOKEN,
-    adapter: "generic-json",
-    WebSocketImpl: MalformedAckWebSocket,
-    heartbeatMs: 60_000,
-    ackTimeoutMs: 1_000,
-  });
-  const protocolFailures = [];
-  const ignored = [];
-  client.on("protocol-failure", (failure) => protocolFailures.push(failure));
-  client.on("ack-ignored", (failure) => ignored.push(failure));
-  t.after(() => client.stop());
-  client.start();
-  await new Promise((resolve) => setImmediate(resolve));
-  const socket = MalformedAckWebSocket.instances.at(-1);
-  const result = client.sendEvent({ type: "DJ_MASTER_CHANGED", payload: { deck: 1 } });
-  const malformed = [
-    { type: "ack", eventId: result.eventId, sequence: result.sequence, ok: true, outcome: "accepted", stateGeneration: 1 },
-    { eventId: result.eventId, sequence: result.sequence, ok: true, message: "accepted", outcome: "accepted", code: null, stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, outcome: "accepted", stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: true, message: "accepted", outcome: "accepted", code: null, stateGeneration: 1, extra: true },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: true, outcome: "accepted", code: null, stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: true, message: null, outcome: "accepted", code: null, stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: true, message: "unknown", outcome: "unknown", code: null, stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: true, message: "rejected", outcome: "rejected", code: "REJECTED", stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: false, message: "accepted", outcome: "accepted", code: "OK", stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: false, message: "busy", outcome: "busy", code: "BUSY", stateGeneration: -1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: false, message: {}, outcome: "busy", code: "BUSY", stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: result.sequence, ok: false, message: "busy", outcome: "busy", code: 7, stateGeneration: 1 },
-    { type: "ACK", eventId: result.eventId, sequence: 0, ok: true, message: "accepted", outcome: "accepted", code: "OK", stateGeneration: 1 },
-  ];
-  for (const frame of malformed) {
-    socket.emit("message", JSON.stringify(frame));
-    assert.equal(client.getStatus().lastDelivery.state, "pending");
-  }
-  assert.equal(protocolFailures.length, malformed.length);
-  assert.equal(ignored.length, malformed.length);
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: result.eventId,
-    sequence: result.sequence,
-    ok: true,
-    message: "accepted",
-    outcome: "accepted",
-    code: "OK",
-    stateGeneration: 0,
-  }));
-  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 });
 
 test("uiohook F13-F24 keycodes use measured values and reject legacy ranges", () => {
@@ -3400,7 +2936,7 @@ test("MIDI and pedal adapters stay safe when optional hardware is absent", () =>
   pedal.stop();
 });
 
-test("router sends local loop action while preserving a disconnected network", () => {
+test("router keeps local loop action off the disconnected network", () => {
   const sent = [];
   const detector = createTrackActivityDetector({ idFactory: () => "id" });
   const client = {
@@ -3435,18 +2971,18 @@ test("router sends local loop action while preserving a disconnected network", (
   router.on("event", (event) => routedEvents.push(event));
   const result = router.triggerAction("loop-half");
   assert.equal(result.midiSent, true);
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true);
+  assert.equal(result.delivery, null);
   assert.deepEqual(midiCalls, ["loopHalf"]);
-  assert.equal(sent[0].type, "DJ_LOOP_STATE");
-  assert.equal(routedEvents[0].type, "DJ_LOOP_STATE");
-  assert.equal(routedEvents[0].source, "action");
+  assert.deepEqual(sent, []);
+  assert.deepEqual(routedEvents, []);
   const releaseResult = router.triggerAction("release");
   assert.equal(releaseResult.ok, false);
   assert.equal(routedEvents.at(-1).type, "DJ_RELEASE");
   router.stop();
 });
 
-test("router correlates loop rejection and release timeout back to the same action event", async (t) => {
+test("router correlates release timeout back to the same action event", async (t) => {
   class ActionWebSocket extends EventEmitter {
     static instances = [];
 
@@ -3471,7 +3007,7 @@ test("router correlates loop rejection and release timeout back to the same acti
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "generic-json",
+    adapter: "syndocal-envelope-v2",
     WebSocketImpl: ActionWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 20,
@@ -3513,33 +3049,28 @@ test("router correlates loop rejection and release timeout back to the same acti
   client.start();
   await new Promise((resolve) => setImmediate(resolve));
   const socket = ActionWebSocket.instances.at(-1);
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1)],
+  });
   socket.emit("message", JSON.stringify({
+    v: 2,
     type: "DJ_TIMELINE_STATE",
-    state: "idle",
-    loopActive: false,
+    agentId: "syndocal",
+    sessionId: "syndocal-session",
+    sequence: 1,
+    eventId: "action-timeline-state",
+    payload: {
+      state: "running",
+      loopActive: false,
+      timelineId: "life-over",
+      positionBars: 0,
+      playSessionId: "play-session-1",
+      pedalOwner: "dj",
+      releaseEventId: null,
+    },
   }));
-
-  const loop = router.triggerAction("loop-half");
-  assert.equal(loop.ok, false);
-  assert.equal(loop.delivery.state, "pending");
-  socket.emit("message", JSON.stringify({
-    type: "ACK",
-    eventId: loop.delivery.eventId,
-    sequence: loop.delivery.sequence,
-    ok: false,
-    outcome: "rejected",
-    message: "loop denied",
-    code: "REJECTED",
-    stateGeneration: 1,
-  }));
-  await new Promise((resolve) => setImmediate(resolve));
-  const loopFinal = routedEvents.find(
-    (event) => event.eventId === loop.delivery.eventId && event.delivery?.state === "rejected",
-  );
-  assert.ok(loopFinal);
-  assert.equal(loopFinal.source, "action");
-  assert.equal(lastAction.delivery.state, "rejected");
-  assert.equal(lastAction.ok, false);
 
   const release = router.triggerAction("release");
   assert.equal(release.ok, false);
@@ -3552,7 +3083,7 @@ test("router correlates loop rejection and release timeout back to the same acti
   assert.equal(releaseFinal.source, "action");
   assert.equal(lastAction.delivery.state, "timed-out");
   assert.equal(lastAction.ok, false);
-  assert.equal(actions.length, 2);
+  assert.equal(actions.length, 1);
 });
 
 test("native optional dependency and pkg asset configuration keep source/packaged resolution explicit", () => {

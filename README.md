@@ -4,9 +4,18 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
-## v1.1.2 リリースノート
+## v1.1.3 リリースノート
 
-配布物の真正性検証（provenance）を大幅に強化しました。
+Syndocal公演同期を`syndocal-envelope-v2`へclean breakし、配布物の真正性検証
+（provenance）も大幅に強化しました。
+
+* **strict show-sync v2**: 旧flat/v1 adapterを退役し、exact master deck、
+  playSessionId、track identity、position、BPM、revision、freshnessが揃った時だけ
+  ACTIVEを送信します。継続TRACK_SYNC、実測loop 8/4/2、相関済みRELEASE、
+  reconnect時の同一eventId/playSession再送をstrict v2 envelopeで固定しました。
+  欠落、null、非有限、古いsample、reorder、旧wireは明示的にfail-closedします。
+  TRACK_SYNCは非ACKの連続telemetryとして定数メモリのsession-local IDを使い、
+  durable physical ID台帳を消費せず、reconnect後にはreplayしません。
 
 * **exe本体へのprovenanceバインディング**: パッケージング前に正準リリースidentityと
   コミットメントを生成し、そのコミットメントをserver.exe自体にコンパイル同梱します。
@@ -29,7 +38,7 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
   `dist/release-manifest.json` に束ねます。生成物はすべて `dist/` 配下に出力され、
   再実行してもワークツリーが汚れません。
 
-### v1.1.2 first-run Setup / live checkpoint (2026-08-25)
+### v1.1.3 first-run Setup / live checkpoint (2026-08-25)
 
 初回セットアップカードはDJ Agentがdisabled、未設定、またはnative device未接続でも
 常時表示されます。カードが使用する `GET /api/dj-agent/setup` はDJ PC上の
@@ -40,7 +49,7 @@ localhost/loopback、Originが空またはlocalhost/loopbackであることを�
 
 カードはtoken入力・token表示・localStorage保存・サーバーへの設定POST/変更を持たず、
 preview/download/copyするJSONもtoken-freeです。versioned artifact
-`CustomMIDI1-Syndocal-v1.1.2.csv` はカードからダウンロードし、RekordboxのMIDI
+`CustomMIDI1-Syndocal-v1.1.3.csv` はカードからダウンロードし、RekordboxのMIDI
 Learn/CustomMIDI1へoperatorが手動でimportします。driver、virtual MIDI、Rekordbox、
 Elgato/Stream Deckの外部操作は自動実行せず、画面上のguided confirmationの対象です。
 カード上で案内する入力はSyndocal host、local NIC、MIDI output、adapterです。
@@ -53,11 +62,9 @@ port 0を暗黙選択しません。adapterは初回必ず未選択です。devi
 あり、列挙結果のname+portへ完全一致する場合だけ反映し、それ以外は未選択にします。
 operatorがこのページで明示選択した後だけpreviewへ反映します。同一ページのrefreshでは
 触った選択を維持しますが、name+portが列挙結果から消えた場合はplaceholderへ戻して
-fail-closedにします。出荷・現行productionの既定adapterは `generic-json`
-(flat frame、HELLO後の権威snapshot取得を必須とする順序制約付き)です。
-`syndocal-envelope-v1` は旧KDMX v1 envelope wire向けの明示的なlegacy互換/
-診断用選択肢です。未知名の黙ったfallbackはなく、adapter未選択時は既定の
-`generic-json`が適用されます。
+fail-closedにします。出荷・現行productionの唯一のadapterは
+`syndocal-envelope-v2`です。未設定時もv2になり、旧flat `generic-json`と
+`syndocal-envelope-v1`は互換選択肢として残さず明示的に拒否します。
 
 2026-08-25のDJ PC live preflightは受入れ完了を意味しません。
 
@@ -80,7 +87,7 @@ Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化
 * Time欄へ波形付きシークバーを追加し、ループ区間の設定と実際のループ動作を区別。
 * Warningsの折りたたみ、全体幅レイアウト、カスタムスクロールバー、リポジトリ・クレジット付きフッターを追加。
 * WebサーバーによるRekordboxの定期監視、自動起動、自動再注入を廃止。Rekordbox再起動後の注入は明示操作のみ。
-* Syndocalの`generic-json`と`syndocal-envelope-v1`を明示選択可能にし、build identityをread-only APIへ追加。
+* 当時の旧Syndocal wireとbuild identityを追加（現在はstrict v2へclean break済み）。
 * npmとPython依存関係の既知脆弱性監査は0件。Nodeテスト69件、Hook DLLビルド、Rekordbox 7.2.18実機接続を確認済み。
 
 ## v1.1.0 リリースノート
@@ -146,16 +153,14 @@ npm start
 空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
 しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
 Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
-unpaired surrogateは拒否します。出荷・現行productionの既定adapterはKDMX互換の
-flat `generic-json`、接続先pathは`/dj-link`、heartbeatは5000msです。接続後は
+unpaired surrogateは拒否します。出荷・現行productionの唯一のadapterは
+`syndocal-envelope-v2`、接続先pathは`/dj-link`、heartbeatは5000msです。接続後は
 `DJ_AGENT_HELLO` → 権威snapshot(`DJ_STATE_SYNC`) →
 `DJ_TIMELINE_STATE_REQUEST`/timeline actionの順序が必須で、snapshot確定前の
 timeline操作はfail-closedです(SnapshotRequired)。adapterは
-`SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示選択します。選択できるのは
-`generic-json`(既定。flat frame、ACK 8フィールド固定)と
-`syndocal-envelope-v1`(明示選択時のみ。KDMXレガシーv1 envelope wire、
-ACK 7フィールド固定、legacy互換/診断用途)で、未設定時はこの既定が適用され、
-未知名はfail-closedとなり黙ってフォールバックしません。
+`SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示できます。選択可能値は
+`syndocal-envelope-v2`だけです。旧flat/v1名、未知名、曖昧な別名はfail-closedで、
+変換・fallback・legacy adapterはありません。
 
 ~~~json
 {
@@ -165,7 +170,7 @@ ACK 7フィールド固定、legacy互換/診断用途)で、未設定時はこ�
     "port": 9100,
     "path": "/dj-link",
     "nic": "192.168.10.10",
-    "adapter": "generic-json",
+    "adapter": "syndocal-envelope-v2",
     "heartbeatMs": 5000
   },
   "pedal": {
@@ -280,7 +285,7 @@ the CustomMIDI1 example uses Filter CC16 (`B010`) and release-fade CC17
 
 配布時は `@julusian/midi` と `uiohook-napi` をoptionalDependenciesとして解決し、
 Windows native prebuildをpkgのassetsに含めます。機器やnative moduleがない環境でも
-本体は起動継続します。flat frameの形状はKDMX strict contractに合わせていますが、
+本体は起動継続します。strict v2 envelopeの形状はpeer contractに固定していますが、
 実際のSyndocal接続・認証・MIDI機器の受入れは対象環境で別途確認が必要です。
 環境変数の導線と既定値は [`.env.example`](.env.example) にまとめています。
 

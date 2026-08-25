@@ -71,10 +71,9 @@ function validateEmbeddedReleaseCommitment(value) {
 // advisory and the focused tests together.
 const WIRE_CONTRACT_ADVISORY = Object.freeze({
   adapters: Object.freeze([
-    Object.freeze({ adapter: "generic-json", wireProtocol: "generic-json" }),
     Object.freeze({
-      adapter: "syndocal-envelope-v1",
-      wireProtocol: "syndocal-envelope-v1",
+      adapter: "syndocal-envelope-v2",
+      wireProtocol: "syndocal-envelope-v2",
     }),
   ]),
 });

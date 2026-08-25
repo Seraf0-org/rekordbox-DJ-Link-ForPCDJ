@@ -14,8 +14,7 @@ const SETUP_GATE_NAMES = Object.freeze([
 ]);
 
 const SYNDOCAL_ADAPTERS = Object.freeze([
-  "generic-json",
-  "syndocal-envelope-v1",
+  "syndocal-envelope-v2",
 ]);
 
 const RELEASE_MACRO_SEQUENCES = Object.freeze([

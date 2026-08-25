@@ -11,7 +11,7 @@
       "dependencies": ["<!(node -p \"require('node-addon-api').gyp\")"],
       "cflags!": [ "-fno-exceptions" ],
       "cflags_cc!": [ "-fno-exceptions" ],
-      "defines": [
+      "defines": [ 
         "NAPI_DISABLE_CPP_EXCEPTIONS",
         "ASIO_STANDALONE=1"
       ],
@@ -35,7 +35,7 @@
               "ExceptionHandling": 1
             }
           },
-          "defines": [
+          "defines": [ 
             "LINK_PLATFORM_WINDOWS=1",
             "_WIN32_WINNT=0x0601"
           ]

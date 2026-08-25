@@ -117,6 +117,8 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       mixName: null,
       lyricist: null,
       loopState: null,
+      loopRevision: 0,
+      positionRevision: 0,
       lastSeenAt: null,
       metadata: {},
     };
@@ -355,6 +357,10 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       positionObservedAt: data.currentTimeUpdatedAt
         ? new Date(data.currentTimeUpdatedAt).toISOString()
         : new Date(now).toISOString(),
+      positionRevision:
+        Number.isSafeInteger(data.positionRevision) && data.positionRevision >= 1
+          ? data.positionRevision
+          : null,
       remainingSec: Number.isFinite(remainingSec) ? remainingSec : null,
       totalSec: Number.isFinite(totalSec) ? totalSec : null,
       isEstimated: false,
@@ -813,12 +819,13 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       const sourceDeckIndex = loop.deck - 1;
       const deck = ((sourceDeckIndex % logicalDeckCount) + logicalDeckCount) % logicalDeckCount;
       const logicalLoop = { ...loop, deck: deck + 1 };
-      let reconciledLoop = null;
+      let measuredLoop = null;
       updateDeckState(deck, (data) => {
-        data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], logicalLoop)[0] || logicalLoop;
-        reconciledLoop = reconcileLoopActivityFromPlayback(data);
+        data.loopRevision += 1;
+        measuredLoop = { ...logicalLoop, revision: data.loopRevision };
+        data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], measuredLoop)[0] || measuredLoop;
       });
-      emitter.emit("loop-state", reconciledLoop || logicalLoop);
+      emitter.emit("loop-state", measuredLoop);
       if (!connected) {
         connected = true;
         emitStatus(true, "Hook events detected");
@@ -872,8 +879,11 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         }
       } else if (name === "@CurrentTime") {
         const previousCurrentTime = data.currentTime;
-        data.currentTime = value;
-        data.currentTimeUpdatedAt = Date.now();
+        if (Number.isFinite(value) && value >= 0) {
+          data.currentTime = value;
+          data.currentTimeUpdatedAt = Date.now();
+          data.positionRevision += 1;
+        }
         const reconciledLoop = reconcileLoopActivityFromPlayback(data, previousCurrentTime);
         if (reconciledLoop) {
           queueMicrotask(() => emitter.emit("loop-state", reconciledLoop));

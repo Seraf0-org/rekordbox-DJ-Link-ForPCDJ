@@ -231,7 +231,7 @@ function releaseWriterFixture(t) {
   const installManifest = {
     schemaVersion: 1,
     kind: "rb-output-install-manifest/v1",
-    productVersion: "1.1.2",
+    productVersion: "1.1.3",
     identityHash: "a".repeat(64),
     payloads: [],
   };

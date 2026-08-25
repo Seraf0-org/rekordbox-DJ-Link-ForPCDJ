@@ -98,7 +98,7 @@ test("DJ Agent setup snapshot is localhost-only, token-free, and macro-safe", as
   assert.equal(Object.hasOwn(local.body.configTemplate.syndocal, "token"), false);
   assert.equal(local.body.configTemplate.midi.releaseMacro.enabled, false);
   assert.equal(local.body.mappingArtifact.valid, true);
-  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.2.csv");
+  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.3.csv");
   assert.match(local.body.mappingArtifact.semanticFingerprint, /^[0-9a-f]{64}$/);
   assert.equal(local.body.mappingArtifact.operatorVerified, false);
   assert.equal(local.body.readiness.actions.releaseMacro, false);
@@ -160,7 +160,7 @@ test("invalid injected mapping artifact blocks readiness while the bundled CSV s
     "server",
     "public",
     "setup",
-    "CustomMIDI1-Syndocal-v1.1.2.csv"
+    "CustomMIDI1-Syndocal-v1.1.3.csv"
   );
   const bundledBefore = fs.readFileSync(bundledCsvPath);
   // The corrupt fixture lives in the OS temp dir and is injected via
@@ -188,7 +188,7 @@ test("invalid injected mapping artifact blocks readiness while the bundled CSV s
   assert.equal(local.body.mappingArtifact.code, "invalid-header");
   assert.equal(local.body.mappingArtifact.semanticFingerprint, null);
   assert.equal(local.body.mappingArtifact.summary, null);
-  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.2.csv");
+  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.3.csv");
   assert.equal(local.body.readiness.gates.mapping.state, "blocked");
   assert.equal(local.body.readiness.gates.mapping.reason, "mapping-invalid");
   assert.equal(local.body.readiness.gates.mapping.allowed, false);
@@ -200,18 +200,18 @@ test("invalid injected mapping artifact blocks readiness while the bundled CSV s
   assert.ok(fs.readFileSync(bundledCsvPath).equals(bundledBefore));
 });
 
-test("unset Syndocal adapter resolves to the shipped generic-json default in the setup template", async (t) => {
+test("unset Syndocal adapter resolves to the shipped strict v2 default in the setup template", async (t) => {
   const { port } = await startServer(t);
   const local = await requestJson("127.0.0.1", port, "/api/dj-agent/setup");
   assert.equal(local.statusCode, 200);
   // No SYNDOCAL_WS_ADAPTER / syndocal.adapter anywhere in the environment:
-  // config.js resolves unset to generic-json and the template must echo it.
-  assert.equal(local.body.configTemplate.syndocal.adapter, "generic-json");
+  // config.js resolves unset to the only supported protocol and the template echoes it.
+  assert.equal(local.body.configTemplate.syndocal.adapter, "syndocal-envelope-v2");
 });
 
-test("recognized adapters round-trip exactly while legacy envelope stays explicitly opt-in", async (t) => {
+test("strict v2 round-trips while retired flat/v1 adapters fail closed", async (t) => {
   const envelope = await startServer(t, {
-    extraEnv: { SYNDOCAL_WS_ADAPTER: "syndocal-envelope-v1" },
+    extraEnv: { SYNDOCAL_WS_ADAPTER: "syndocal-envelope-v2" },
   });
   const envelopeResponse = await requestJson(
     "127.0.0.1",
@@ -219,18 +219,20 @@ test("recognized adapters round-trip exactly while legacy envelope stays explici
     "/api/dj-agent/setup"
   );
   assert.equal(envelopeResponse.statusCode, 200);
-  assert.equal(envelopeResponse.body.configTemplate.syndocal.adapter, "syndocal-envelope-v1");
+  assert.equal(envelopeResponse.body.configTemplate.syndocal.adapter, "syndocal-envelope-v2");
 
-  const generic = await startServer(t, {
-    extraEnv: { SYNDOCAL_WS_ADAPTER: "generic-json" },
-  });
-  const genericResponse = await requestJson(
-    "127.0.0.1",
-    generic.port,
-    "/api/dj-agent/setup"
-  );
-  assert.equal(genericResponse.statusCode, 200);
-  assert.equal(genericResponse.body.configTemplate.syndocal.adapter, "generic-json");
+  for (const retired of ["generic-json", "syndocal-envelope-v1"]) {
+    const server = await startServer(t, {
+      agentEnabled: true,
+      midiEnabled: false,
+      pedalEnabled: false,
+      extraEnv: { SYNDOCAL_WS_ADAPTER: retired },
+    });
+    const response = await requestJson("127.0.0.1", server.port, "/api/dj-agent/setup");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.configTemplate.syndocal.adapter, "");
+    assert.equal(response.body.readiness.gates.syndocal.reason, "syndocal-adapter-invalid");
+  }
 });
 
 test("unknown or hostile adapters fail closed to blank without echoing input or any valid adapter name", async (t) => {

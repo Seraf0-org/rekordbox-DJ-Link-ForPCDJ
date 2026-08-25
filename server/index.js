@@ -61,7 +61,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.2.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.3.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -1775,7 +1775,7 @@ function buildDjAgentSetupSnapshot() {
         // Fail-closed template adapter: only an exact recognized adapter may
         // be echoed. An unknown/invalid configured adapter renders as the
         // blank/unselected value instead of being silently rewritten to
-        // syndocal-envelope-v1 or any other valid adapter; the syndocal
+        // syndocal-envelope-v2; any other adapter is retired and the Syndocal
         // readiness gate reports `syndocal-adapter-invalid` and the caller's
         // input is never reflected back here.
         adapter: SYNDOCAL_ADAPTERS.includes(DJ_AGENT_CONFIG.syndocal.adapter)
