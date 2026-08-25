@@ -1,4 +1,5 @@
 const http = require("node:http");
+const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const isPackaged = typeof process.pkg !== "undefined";
@@ -46,6 +47,17 @@ const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
 const { resolveBuildIdentity } = require("./buildIdentity");
 
+const HTTP_DEFAULT_HOST = "0.0.0.0";
+
+// Preserve the product's LAN-viewer default explicitly, while allowing an
+// operator to select a literal interface IP. Invalid, blank, and hostname
+// values use the known product default rather than Node's implicit behavior.
+function resolveHttpBindHost(rawHost = process.env.RB_OUTPUT_HOST) {
+  const candidate = typeof rawHost === "string" ? rawHost.trim() : "";
+  return candidate && net.isIP(candidate) ? candidate : HTTP_DEFAULT_HOST;
+}
+
+const HTTP_BIND_HOST = resolveHttpBindHost();
 const PORT = Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
 // DB補完を無効化し、Hook由来のみでメタデータを扱う
@@ -1591,6 +1603,9 @@ if (DJ_AGENT_CONFIG.enabled) {
   updateDjAgentStatus();
 }
 
-server.listen(PORT, () => {
-  console.log(`rb-output server listening on http://0.0.0.0:${PORT}`);
+server.listen(PORT, HTTP_BIND_HOST, () => {
+  const address = server.address();
+  const boundPort = address && typeof address === "object" ? address.port : PORT;
+  const printableHost = HTTP_BIND_HOST.includes(":") ? `[${HTTP_BIND_HOST}]` : HTTP_BIND_HOST;
+  console.log(`rb-output server listening on http://${printableHost}:${boundPort}`);
 });

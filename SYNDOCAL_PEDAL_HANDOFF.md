@@ -72,11 +72,10 @@ payload:{state,loopActive,timelineId,positionBars}}`のpayload内に
 `idle`/`stopped`/`ended`/`reset`で`dj-control`へ戻ります。F13での
 `DJ_RELEASE`受理だけではtimelineへ切り替わりません。
 Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、切断中、再接続
-直後は、`timelineSnapshotReady`がfalseのためStage 1のF13/F14/F15も
-fail-closedです。この間はrekordbox MIDIを送信せず、snapshotを受信して
-`idle`/`stopped`/`ended`/`reset`が確定してからStage 1を許可します。
-Syndocalを無効にしたローカル専用構成ではこのgateはなく、既存MIDI操作を
-継続します。
+直後でも、Stage 1のF13/F14は既存のローカルRekordbox MIDI操作を継続します
+（F15はStage 1では従来どおりinactiveです）。この間のネットワーク側effectは
+pendingまたはfailedとして記録し、snapshot待ちを理由にローカル操作を止めません。
+Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時までfail-closedです。
 
 ## Stage 1: Rekordbox操作とhandoff
 

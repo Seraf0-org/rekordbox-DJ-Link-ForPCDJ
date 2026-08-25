@@ -277,12 +277,20 @@ WebサーバーはRekordboxプロセスを定期監視せず、未起動時の�
 # 1. 注入用DLLのビルド
 npm run build:hook
 
-# 2. サーバーの起動 (localhost:8787)
+# 2. サーバーの起動 (既定: LAN bind / 8787)
 npm start
 
 # 3. 起動中のRekordboxへDLLの注入
 npm run inject:hook
 ```
+HTTP診断/UIサーバーの既定 bind は、read-only APIを従来どおりLANから利用
+できるよう `0.0.0.0` です。これはNodeの暗黙既定ではなく、製品の既知の
+既定値として明示されています。ローカル専用のDJ/Syndocal構成では、
+`$env:RB_OUTPUT_HOST='127.0.0.1'; npm start` を推奨します。DJ用PCの特定NICだけに
+bindする場合は、`RB_OUTPUT_HOST` にIPv4/IPv6リテラルを指定してください
+（例: `$env:RB_OUTPUT_HOST='192.168.50.2'; npm start`）。ホスト名は受け付けず、空欄・
+不正値は既定の `0.0.0.0` に戻ります。全インターフェイス公開が不要な場合は、
+必ず特定NICまたは `127.0.0.1` を明示してください。
 ※インジェクターから明示的にRekordboxを起動したい場合に限り、`python scripts\inject_hook.py --launch-path "D:\path\to\rekordbox.exe"` を使用できます。通常の起動コマンドやWebサーバーからは自動実行されません。ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ `--handoff-seconds 90` を追加してください。
 
 ---
