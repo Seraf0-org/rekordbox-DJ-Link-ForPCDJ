@@ -45,8 +45,8 @@ def list_pids(
                 continue
 
             exe_path = proc.info.get("exe") or ""
-            if preferred_exe_norm and exe_path:
-                if _norm_path(exe_path) != preferred_exe_norm:
+            if preferred_exe_norm:
+                if not exe_path or _norm_path(exe_path) != preferred_exe_norm:
                     continue
 
             created = float(proc.info.get("create_time") or 0.0)
@@ -80,18 +80,13 @@ def launch_rekordbox(exe_path: str) -> None:
     subprocess.Popen([exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def find_latest_supported_rekordbox() -> str:
-    explicit_path = os.environ.get("REKORDBOX_EXE_PATH", "").strip()
-    if explicit_path:
-        candidate = Path(explicit_path).resolve()
-        return str(candidate) if candidate.is_file() else ""
-
+def installed_supported_rekordbox() -> list[tuple[tuple[int, int, int], Path]]:
     install_root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "rekordbox"
     candidates: list[tuple[tuple[int, int, int], Path]] = []
     try:
         entries = list(install_root.iterdir())
     except OSError:
-        return ""
+        return []
 
     for entry in entries:
         match = re.fullmatch(r"rekordbox\s+(\d+)\.(\d+)\.(\d+)", entry.name, re.IGNORECASE)
@@ -105,9 +100,34 @@ def find_latest_supported_rekordbox() -> str:
             candidates.append((version, executable.resolve()))
 
     if not candidates:
-        return ""
+        return []
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return str(candidates[0][1])
+    return candidates
+
+
+def find_latest_supported_rekordbox() -> str:
+    candidates = installed_supported_rekordbox()
+    return str(candidates[0][1]) if candidates else ""
+
+
+def supported_explicit_launch_path(value: str) -> str:
+    candidate = Path(value).resolve()
+    if not candidate.is_file():
+        return ""
+    candidate_norm = _norm_path(str(candidate))
+    for _, installed in installed_supported_rekordbox():
+        if _norm_path(str(installed)) == candidate_norm:
+            return str(installed)
+    return ""
+
+
+def find_running_supported_rekordbox(process_name: str) -> tuple[int | None, str]:
+    for _, executable in installed_supported_rekordbox():
+        executable_text = str(executable)
+        pid = find_pid(process_name, preferred_exe=executable_text)
+        if pid is not None:
+            return pid, executable_text
+    return None, ""
 
 
 def inject_dll(pid: int, dll_path: Path) -> int:
@@ -230,18 +250,53 @@ def main() -> int:
     args = parser.parse_args()
     if args.launch_path and args.launch_installed:
         parser.error("--launch-path and --launch-installed are mutually exclusive")
+    if os.environ.get("REKORDBOX_EXE_PATH", "").strip():
+        print(
+            "[error] REKORDBOX_EXE_PATH is retired; remove it and use a validated --launch-path",
+            flush=True,
+        )
+        return 1
 
     dll_path = Path(args.dll_path).resolve()
     if not dll_path.exists():
         print(f"[error] DLL not found: {dll_path}")
         return 1
 
-    launch_path = args.launch_path
-    if args.launch_installed and not launch_path:
-        launch_path = find_latest_supported_rekordbox()
-
     launched_after = None
-    pid = find_pid(args.process_name)
+    pid = None
+    launch_path = ""
+    if args.launch_installed:
+        pid, launch_path = find_running_supported_rekordbox(args.process_name)
+        if pid is None:
+            if find_pid(args.process_name) is not None:
+                print(
+                    "[error] an unsupported or differently installed Rekordbox process is running; "
+                    "refusing automatic injection",
+                    flush=True,
+                )
+                return 1
+            launch_path = find_latest_supported_rekordbox()
+            if not launch_path:
+                print("[error] no supported Rekordbox installation was found", flush=True)
+                return 1
+    elif args.launch_path:
+        launch_path = supported_explicit_launch_path(args.launch_path)
+        if not launch_path:
+            print(
+                "[error] --launch-path must exactly match a discovered supported Rekordbox installation",
+                flush=True,
+            )
+            return 1
+        pid = find_pid(args.process_name, preferred_exe=launch_path)
+    else:
+        pid, launch_path = find_running_supported_rekordbox(args.process_name)
+        if pid is None:
+            print(
+                "[error] no running supported Rekordbox process was found; use a validated --launch-path",
+                flush=True,
+            )
+            return 1
+
     if pid is None and launch_path:
         launched_after = time.time()
         print(f"[info] launching {launch_path}", flush=True)

@@ -46,4 +46,12 @@ test("source injection auto-launch remains restricted to supported Rekordbox bui
   assert.match(source, /re\.fullmatch\(r"rekordbox\\s\+\(\\d\+\)\\\.\(\\d\+\)\\\.\(\\d\+\)"/);
   assert.match(source, /version not in SUPPORTED_REKORDBOX_VERSIONS/);
   assert.match(source, /--launch-path and --launch-installed are mutually exclusive/);
+  assert.match(source, /if not exe_path or _norm_path\(exe_path\) != preferred_exe_norm:/);
+  assert.match(source, /pid, launch_path = find_running_supported_rekordbox\(args\.process_name\)/);
+  assert.match(source, /unsupported or differently installed Rekordbox process is running/);
+  assert.match(source, /no supported Rekordbox installation was found/);
+  assert.match(source, /supported_explicit_launch_path\(args\.launch_path\)/);
+  assert.match(source, /REKORDBOX_EXE_PATH is retired; remove it and use a validated --launch-path/);
+  assert.match(source, /for _, installed in installed_supported_rekordbox\(\):/);
+  assert.match(source, /_norm_path\(str\(installed\)\) == candidate_norm/);
 });
