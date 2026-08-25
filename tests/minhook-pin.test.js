@@ -385,7 +385,7 @@ test("build-hook refuses dirty or reparse-point MinHook caches", () => {
 test("bootstrap recovery has no broad deletion path", () => {
   assert.doesNotMatch(SCRIPT, /Remove-Item\s+-Recurse/i);
   assert.match(SCRIPT, /Remove-Item\s+-LiteralPath\s+\$bootstrapStatePath/);
-  assert.match(SCRIPT, /Remove-Item\s+-LiteralPath\s+\$dllOut/);
+  assert.match(SCRIPT, /Remove-ExactGeneratedFile\s+-Path\s+\$dllOut\s+-Label\s+"Hook DLL output"/);
   assert.match(SCRIPT, /Move-Item\s+-LiteralPath\s+\$bootstrapRoot/);
   assert.match(SCRIPT, /Unexpected MinHook bootstrap entry/);
 });
@@ -1161,10 +1161,11 @@ test("corrupt HEAD fails closed with a stable sanitized diagnosis and no cleanup
 
 test("every temporary and staging cleanup target is exact, ancestry-validated, and narrow", () => {
   assert.match(SCRIPT, /function Remove-ExactDllOutput/);
-  assert.match(SCRIPT, /Assert-NoReparsePathChain -Path \$dllOut -Label "Hook DLL output"/);
+  assert.match(SCRIPT, /Remove-ExactGeneratedFile -Path \$dllOut -Label "Hook DLL output"/);
+  assert.match(SCRIPT, /Assert-NoReparsePathChain -Path \$Path -Label \$Label/);
   assert.match(SCRIPT, /Assert-NoReparsePathChain -Path \$bootstrapStatePath -Label "MinHook bootstrap state"/);
   assert.match(SCRIPT, /Remove-Item -LiteralPath \$bootstrapStatePath -Force -ErrorAction Stop/);
-  assert.match(SCRIPT, /Remove-Item -LiteralPath \$dllOut -Force -ErrorAction Stop/);
+  assert.match(SCRIPT, /Remove-Item -LiteralPath \$Path -Force -ErrorAction Stop/);
   assert.doesNotMatch(SCRIPT, /Remove-Item\s+[^\r\n]*-Recurse/i);
   assert.doesNotMatch(SCRIPT, /Remove-Item\s+-Path\b/);
   assert.doesNotMatch(SCRIPT, /Remove-Item\s+[^\r\n]*\*/);
