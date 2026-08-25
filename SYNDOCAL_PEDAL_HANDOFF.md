@@ -92,6 +92,11 @@ SHA-256、Authenticode signer、versionを再検証し、次の配布物を生�
 - release identity hash:
   `ab67c6f189f8f535f3b7a3b1142420ff6ac1376f6d9bff16d9884f4cc7b5a226`
 
+GitHub Release `v1.1.3`も公開済みです:
+`https://github.com/Seraf0-org/rekordbox-DJ-Link-ForPCDJ/releases/tag/v1.1.3`。
+installer、ZIP、`release-manifest.json`の3 assetsはすべてupload済みで、GitHubが記録した
+size/digestは上記ローカル実測値と完全一致します。draft/prereleaseではありません。
+
 `node scripts/verify-install.js --install-dir dist`とpackaged
 `dist/server.exe --verify-install`はpayload 10件とembedded provenanceを検証してPASSしました。
 ZIPは隔離したexact temp pathへ展開し、同じ二つの検証を再度PASSしました。ZIPは11 entries、
