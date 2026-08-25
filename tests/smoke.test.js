@@ -948,6 +948,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
@@ -1142,6 +1143,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
   router.on("warning", () => {});
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
@@ -1299,6 +1301,7 @@ test("track activity does not make a track load a master timeline event", () => 
   detector.onTrackLoaded({ deck: 1, contentId: "track-a" });
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 1, { isPlaying: false, positionSec: 0 })],
   });
@@ -1306,6 +1309,7 @@ test("track activity does not make a track load a master timeline event", () => 
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 2, { positionSec: 0.1 })],
   });
@@ -1316,6 +1320,7 @@ test("track activity does not make a track load a master timeline event", () => 
   ]);
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 3, { positionSec: 0.2 })],
   });
@@ -1338,8 +1343,9 @@ test("explicit master change activates an already-playing deck exactly once", ()
       strictDetectorPlayback(2, 1, { positionSec: 4 }),
     ],
   });
-  detector.onMasterChange({ deck: 2 });
-  detector.onMasterChange({ deck: 2 });
+  const authorityAt = new Date().toISOString();
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_CHANGED").length, 0);
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
   assert.equal(events.find((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").payload.contentId, "b");
@@ -1357,6 +1363,7 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, title: "Fallback Track", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 1, {
       positionObservedAt: new Date(time).toISOString(),
@@ -1375,6 +1382,7 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
   time = 3_000;
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "content-42", title: "Fallback Track", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 2, {
       positionObservedAt: new Date(time).toISOString(),
@@ -1403,6 +1411,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   detector.on("event", (event) => events.push(event));
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "old", title: "Old", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 1, { positionObservedAt: new Date(time).toISOString() })],
   });
@@ -1413,6 +1422,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 2, { positionObservedAt: new Date(time).toISOString() })],
   });
@@ -1423,6 +1433,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 3, {
       isPlaying: false,
@@ -1432,6 +1443,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   time = 12_000;
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(time).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "New", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 4, { positionObservedAt: new Date(time).toISOString() })],
   });
@@ -1457,11 +1469,13 @@ test("master_change waits for a fresh position/BPM sample before activating", ()
       { deck: 2, isPlaying: true },
     ],
   });
-  detector.onMasterChange({ deck: 2 });
-  detector.onMasterChange({ deck: 2 });
+  const authorityAt = new Date().toISOString();
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
   detector.onSnapshot({
     explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: authorityAt,
     deckNowPlaying: [{ deck: 2, contentId: "b", title: "B", artist: "Two" }],
     deckPlaybacks: [strictDetectorPlayback(2, 1, { positionSec: 4 })],
   });
@@ -3062,6 +3076,7 @@ test("router correlates release timeout back to the same action event", async (t
   const socket = ActionWebSocket.instances.at(-1);
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });

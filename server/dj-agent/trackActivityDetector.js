@@ -447,54 +447,99 @@ function createTrackActivityDetector({
     snapshotMasterSource = source;
   }
 
-  function explicitMasterTimestampMs(value) {
-    if (typeof value !== "string" || !value.trim()) {
-      return null;
-    }
+  function explicitMasterTimestamp(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
     const timestampMs = Date.parse(value);
     return Number.isFinite(timestampMs) ? timestampMs : null;
   }
 
-  function acceptExplicitMaster(deck, { updatedAt = null, requireNewerOnDeckChange = false } = {}) {
-    const reportedAtMs = explicitMasterTimestampMs(updatedAt);
-    const deckChanged = Number.isInteger(explicitMasterDeck) && explicitMasterDeck !== deck;
-    if (
-      deckChanged &&
-      requireNewerOnDeckChange &&
-      (!Number.isFinite(reportedAtMs) ||
-        !Number.isFinite(explicitMasterAuthorityUpdatedAtMs) ||
-        reportedAtMs <= explicitMasterAuthorityUpdatedAtMs)
-    ) {
-      return false;
-    }
+  function authorityReceiveNowMs() {
+    const receivedAtMs = now();
+    return Number.isFinite(receivedAtMs) ? receivedAtMs : null;
+  }
 
+  function isFutureExplicitAuthorityTimestamp(timestampMs, receivedAtMs) {
+    // The hook creates authority timestamps in this process immediately before
+    // emitting its event, so any timestamp after receipt is unverifiable. Do
+    // not let it advance the high-water mark and poison later recovery.
+    return !Number.isFinite(receivedAtMs) || timestampMs > receivedAtMs;
+  }
+
+  function establishExplicitMaster(deck, timestampMs) {
     if (!Number.isInteger(explicitMasterDeck) || explicitMasterDeck !== deck) {
       explicitMasterAuthorityRevision += 1;
     }
     explicitMasterDeck = deck;
-
-    const acceptedAtMs = Number.isFinite(reportedAtMs)
-      ? Math.max(reportedAtMs, explicitMasterAuthorityUpdatedAtMs || reportedAtMs)
-      : Number.isFinite(explicitMasterAuthorityUpdatedAtMs)
-        ? explicitMasterAuthorityUpdatedAtMs
-        : now();
-    explicitMasterAuthorityUpdatedAtMs = acceptedAtMs;
-    explicitMasterUpdatedAt = new Date(acceptedAtMs).toISOString();
+    explicitMasterAuthorityUpdatedAtMs = timestampMs;
+    explicitMasterUpdatedAt = new Date(timestampMs).toISOString();
 
     if (knownMasterDeck !== deck) {
       knownMasterDeck = deck;
       masterActivationGeneration += 1;
     }
+  }
+
+  function advanceExplicitMasterHighWater(timestampMs) {
+    explicitMasterAuthorityUpdatedAtMs = timestampMs;
+    explicitMasterUpdatedAt = new Date(timestampMs).toISOString();
+  }
+
+  function acceptSnapshotExplicitMaster(deck, updatedAt) {
+    const timestampMs = explicitMasterTimestamp(updatedAt);
+    const receivedAtMs = authorityReceiveNowMs();
+    const hasAuthority = Number.isInteger(explicitMasterDeck);
+    const sameDeck = hasAuthority && explicitMasterDeck === deck;
+
+    if (!Number.isFinite(timestampMs) || isFutureExplicitAuthorityTimestamp(timestampMs, receivedAtMs)) {
+      return false;
+    }
+    if (!hasAuthority) {
+      establishExplicitMaster(deck, timestampMs);
+      return true;
+    }
+
+    const highWaterMs = explicitMasterAuthorityUpdatedAtMs;
+    if (!Number.isFinite(highWaterMs) || timestampMs < highWaterMs) {
+      return false;
+    }
+    if (timestampMs === highWaterMs) {
+      // The provider emits this equal snapshot immediately after a valid
+      // master_change. It confirms the same authority only.
+      return sameDeck;
+    }
+    if (sameDeck) {
+      advanceExplicitMasterHighWater(timestampMs);
+      return true;
+    }
+
+    establishExplicitMaster(deck, timestampMs);
+    return true;
+  }
+
+  function acceptMasterChange(deck, updatedAt) {
+    const timestampMs = explicitMasterTimestamp(updatedAt);
+    const receivedAtMs = authorityReceiveNowMs();
+    const hasAuthority = Number.isInteger(explicitMasterDeck);
+
+    if (!Number.isFinite(timestampMs) || isFutureExplicitAuthorityTimestamp(timestampMs, receivedAtMs)) {
+      return false;
+    }
+    if (
+      hasAuthority &&
+      (!Number.isFinite(explicitMasterAuthorityUpdatedAtMs) ||
+        timestampMs <= explicitMasterAuthorityUpdatedAtMs)
+    ) {
+      return false;
+    }
+
+    establishExplicitMaster(deck, timestampMs);
     return true;
   }
 
   function updateMasterFromSnapshot(snapshot = {}) {
     const explicit = normalizeDeckNumber(snapshot.explicitMasterDeck);
     if (explicit) {
-      if (!acceptExplicitMaster(explicit, {
-        updatedAt: snapshot.explicitMasterUpdatedAt,
-        requireNewerOnDeckChange: true,
-      })) {
+      if (!acceptSnapshotExplicitMaster(explicit, snapshot.explicitMasterUpdatedAt)) {
         return false;
       }
       snapshotMasterSource = "explicit-state";
@@ -697,9 +742,9 @@ function createTrackActivityDetector({
     if (!deck) {
       return null;
     }
-    acceptExplicitMaster(deck, {
-      updatedAt: rawEvent.explicitMasterUpdatedAt || rawEvent.updatedAt,
-    });
+    if (!acceptMasterChange(deck, rawEvent.explicitMasterUpdatedAt)) {
+      return null;
+    }
     const state = getDeckState(deck);
     const hadPendingTrackChange = state.pendingTrackChange;
     state.pendingTrackChange = false;

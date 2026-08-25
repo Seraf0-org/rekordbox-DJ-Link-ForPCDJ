@@ -186,6 +186,7 @@ test("detector delays active until complete, emits one active per session, and f
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [{ deck: 1, isPlaying: true, bpm: 120 }],
   });
@@ -195,6 +196,7 @@ test("detector delays active until complete, emits one active per session, and f
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [{
       deck: 1,
@@ -211,6 +213,7 @@ test("detector delays active until complete, emits one active per session, and f
 
   const sample = (positionRevision, positionSec, observedAt = now) => detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [{
       deck: 1,
@@ -252,6 +255,7 @@ test("master switch emits one fresh strict ACTIVE then one strictly newer SYNC w
   });
   const snapshot = (playback) => detector.onSnapshot({
     explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{
       deck: 2,
       contentId: "deck-2-content",
@@ -280,8 +284,9 @@ test("master switch emits one fresh strict ACTIVE then one strictly newer SYNC w
     [],
   );
 
-  detector.onMasterChange({ deck: 2 });
-  detector.onMasterChange({ deck: 2 });
+  const authorityAt = new Date(now).toISOString();
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   const activationEvents = () => events.filter(
     (event) => event.type === "DJ_MASTER_TRACK_ACTIVE" || event.type === "DJ_MASTER_TRACK_SYNC",
   );
@@ -361,6 +366,7 @@ test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the exp
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "outgoing", title: "Outgoing", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [{
       deck: 1,
@@ -392,7 +398,8 @@ test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the exp
   assert.deepEqual(transitions(), [activeOne]);
 
   // The later actual explicit handover activates deck 2 exactly once.
-  detector.onMasterChange({ logicalDeck: 2 });
+  now += 1;
+  detector.onMasterChange({ logicalDeck: 2, explicitMasterUpdatedAt: new Date(now).toISOString() });
   assert.deepEqual(transitions().map((event) => event.type), [
     "DJ_MASTER_TRACK_ACTIVE",
     "DJ_MASTER_TRACK_ACTIVE",
@@ -406,12 +413,17 @@ test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the exp
 
   // Same revision stays silent; only a strictly newer fresh sample SYNCs once.
   const beforeSameRevision = events.length;
-  detector.onSnapshot({ explicitMasterDeck: 2, ...deck2SnapshotFields });
+  detector.onSnapshot({
+    explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
+    ...deck2SnapshotFields,
+  });
   assert.equal(events.length, beforeSameRevision);
 
   now += 1;
   detector.onSnapshot({
     explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: new Date(now).toISOString(),
     deckNowPlaying: [{ deck: 2, contentId: "incoming", title: "Incoming", artist: "DSF", trackBpm: 128 }],
     deckPlaybacks: [deck2Playback(11, 33)],
   });
@@ -555,6 +567,254 @@ test("stale explicit snapshot cannot roll back an explicit master-change authori
   assert.equal(detector.getState().explicitMasterAuthorityRevision, 3);
 });
 
+test("master-change rejects stale, equal, invalid, and future authority timestamps, then reset clears the fence", () => {
+  let now = NOW + 100;
+  const detector = createTrackActivityDetector({ now: () => now });
+  const authorityAtOne = new Date(NOW).toISOString();
+
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+  });
+  for (const explicitMasterUpdatedAt of [
+    new Date(NOW - 1).toISOString(),
+    authorityAtOne,
+    "not-a-timestamp",
+    new Date(now + 1).toISOString(),
+  ]) {
+    assert.equal(detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt }), null);
+    assert.equal(detector.getState().currentMasterDeck, 1);
+    assert.equal(detector.getState().masterDeckRevision, 1);
+    assert.equal(detector.getState().explicitMasterAuthorityRevision, 1);
+  }
+  detector.onSnapshot({
+    explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: new Date(now + 1).toISOString(),
+  });
+  assert.equal(detector.getState().currentMasterDeck, 1);
+  assert.equal(detector.getState().masterDeckRevision, 1);
+  assert.equal(detector.getState().explicitMasterAuthorityRevision, 1);
+
+  now += 2;
+  const recoveredAt = new Date(now).toISOString();
+  assert.equal(detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: recoveredAt }), null);
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+  assert.equal(detector.getState().explicitMasterAuthorityRevision, 2);
+
+  detector.reset();
+  assert.deepEqual(detector.getState(), {
+    currentMasterDeck: null,
+    masterDeckRevision: 0,
+    masterDeckSource: "unknown",
+    explicitMasterDeck: null,
+    explicitMasterUpdatedAt: null,
+    explicitMasterAuthorityRevision: 0,
+    decks: {},
+  });
+  // Reset deliberately clears the prior high-water mark; this old-but-valid
+  // source timestamp is therefore a new initial authority record.
+  assert.equal(detector.onMasterChange({ deck: 1, explicitMasterUpdatedAt: authorityAtOne }), null);
+  assert.equal(detector.getState().currentMasterDeck, 1);
+  assert.equal(detector.getState().masterDeckRevision, 1);
+});
+
+test("missing explicit authority timestamps reject atomically and cannot roll back a newer master", () => {
+  let now = NOW;
+  const detector = createTrackActivityDetector({ now: () => now });
+  const authorityAtOne = new Date(NOW).toISOString();
+  const authorityAtTwo = new Date(NOW + 1).toISOString();
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    deckNowPlaying: [{ deck: 1, contentId: "one", title: "One", artist: "DSF" }],
+    deckPlaybacks: [{
+      deck: 1,
+      isPlaying: true,
+      bpm: 120,
+      positionSec: 1,
+      positionRevision: 1,
+      positionObservedAt: authorityAtOne,
+    }],
+  });
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    deckNowPlaying: [{ deck: 2, contentId: "two", title: "Two", artist: "DSF" }],
+    deckPlaybacks: [{
+      deck: 2,
+      isPlaying: true,
+      bpm: 128,
+      positionSec: 2,
+      positionRevision: 1,
+      positionObservedAt: authorityAtOne,
+    }],
+  });
+
+  now = NOW + 1;
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAtTwo });
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+  const beforeRejected = events.length;
+
+  // `updatedAt` is deliberately ignored. An empty explicit timestamp is not
+  // a valid authority event and must not select deck 1.
+  assert.equal(detector.onMasterChange({
+    deck: 1,
+    explicitMasterUpdatedAt: "",
+    updatedAt: new Date(NOW + 2).toISOString(),
+  }), null);
+  assert.equal(detector.onMasterChange({ deck: 1 }), null);
+  for (const explicitMasterUpdatedAt of [undefined, null, "   "]) {
+    detector.onSnapshot({
+      explicitMasterDeck: 1,
+      explicitMasterUpdatedAt,
+    deckNowPlaying: [{ deck: 1, contentId: "poison", title: "Poison", artist: "DSF" }],
+    deckPlaybacks: [{
+      deck: 1,
+      isPlaying: true,
+      bpm: 120,
+      positionSec: 99,
+      positionRevision: 99,
+      positionObservedAt: new Date(now).toISOString(),
+    }],
+      loopStates: [{
+        deck: 1,
+        activeKnown: true,
+        active: true,
+        startBeat: 16,
+        endBeat: 24,
+        lengthBeats: 8,
+        revision: 99,
+        source: "rekordbox-hook",
+        updatedAt: new Date(now).toISOString(),
+      }],
+    });
+  }
+  assert.deepEqual(events.slice(beforeRejected), []);
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+  assert.equal(detector.getState().decks[1].track.contentId, "one");
+  assert.equal(detector.getState().decks[1].playback.positionRevision, 1);
+  assert.equal(detector.getState().decks[1].loop, null);
+});
+
+test("same-deck stale explicit snapshot atomically drops track, position, and loop mutation", () => {
+  let now = NOW;
+  const detector = createTrackActivityDetector({ now: () => now });
+  const authorityAtOne = new Date(NOW).toISOString();
+  const authorityAtTwo = new Date(NOW + 10).toISOString();
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    deckNowPlaying: [{ deck: 1, contentId: "safe", title: "Safe", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [{
+      deck: 1,
+      isPlaying: true,
+      bpm: 120,
+      positionSec: 1,
+      positionRevision: 1,
+      positionObservedAt: authorityAtOne,
+    }],
+  });
+  now = NOW + 10;
+  detector.onMasterChange({ deck: 1, explicitMasterUpdatedAt: authorityAtTwo });
+  const beforeStale = events.length;
+
+  const rejectedSnapshot = {
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    deckNowPlaying: [{ deck: 1, contentId: "stale", title: "Stale", artist: "DSF", trackBpm: 150 }],
+    deckPlaybacks: [{
+      deck: 1,
+      isPlaying: true,
+      bpm: 150,
+      positionSec: 99,
+      positionRevision: 99,
+      positionObservedAt: new Date(now).toISOString(),
+    }],
+    loopStates: [{
+      deck: 1,
+      activeKnown: true,
+      active: true,
+      startBeat: 16,
+      endBeat: 24,
+      lengthBeats: 8,
+      revision: 99,
+      source: "rekordbox-hook",
+      updatedAt: new Date(now).toISOString(),
+    }],
+  };
+  detector.onSnapshot(rejectedSnapshot);
+  const state = detector.getState();
+  assert.deepEqual(events.slice(beforeStale), []);
+  assert.equal(state.currentMasterDeck, 1);
+  assert.equal(state.decks[1].track.contentId, "safe");
+  assert.equal(state.decks[1].playback.positionRevision, 1);
+  assert.equal(state.decks[1].loop, null);
+
+  const beforeInvalid = events.length;
+  detector.onSnapshot({ ...rejectedSnapshot, explicitMasterUpdatedAt: "not-a-timestamp" });
+  assert.deepEqual(events.slice(beforeInvalid), []);
+  assert.equal(detector.getState().decks[1].track.contentId, "safe");
+  assert.equal(detector.getState().decks[1].playback.positionRevision, 1);
+  assert.equal(detector.getState().decks[1].loop, null);
+});
+
+test("provider master-change and its equal immediate explicit snapshot preserve one authority transition", () => {
+  let now = NOW;
+  let nextId = 0;
+  const detector = createTrackActivityDetector({
+    now: () => now,
+    idFactory: () => `provider-authority-${++nextId}`,
+  });
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+  const authorityAt = new Date(now).toISOString();
+  const deckTwo = {
+    deckNowPlaying: [{ deck: 2, contentId: "two", title: "Two", artist: "DSF", trackBpm: 128 }],
+    deckPlaybacks: [{
+      deck: 2,
+      isPlaying: true,
+      bpm: 128,
+      positionSec: 32,
+      positionRevision: 1,
+      positionObservedAt: authorityAt,
+    }],
+  };
+
+  detector.onSnapshot({ masterDeck: 1, ...deckTwo });
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
+  detector.onSnapshot({
+    explicitMasterDeck: 2,
+    explicitMasterUpdatedAt: authorityAt,
+    deckNowPlaying: deckTwo.deckNowPlaying,
+    deckPlaybacks: [{
+      ...deckTwo.deckPlaybacks[0],
+      positionSec: 33,
+      positionRevision: 2,
+    }],
+  });
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE" || event.type === "DJ_MASTER_TRACK_SYNC")
+      .map((event) => [event.type, event.payload.deck, event.payload.positionRevision]),
+    [
+      ["DJ_MASTER_TRACK_ACTIVE", 2, 1],
+      ["DJ_MASTER_TRACK_SYNC", 2, 2],
+    ],
+  );
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+  assert.equal(detector.getState().decks[2].playback.positionRevision, 2);
+});
+
 test("delayed exact track identity and later authoritative contentId keep one play session and one ACTIVE", () => {
   let nextId = 0;
   const detector = createTrackActivityDetector({ now: () => NOW, idFactory: () => `id-${++nextId}` });
@@ -571,6 +831,7 @@ test("delayed exact track identity and later authoritative contentId keep one pl
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(NOW).toISOString(),
     deckNowPlaying: [{ deck: 1, title: "Life Over" }],
     deckPlaybacks: [playback(1)],
   });
@@ -580,6 +841,7 @@ test("delayed exact track identity and later authoritative contentId keep one pl
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(NOW).toISOString(),
     deckNowPlaying: [{ deck: 1, title: "Life Over", artist: "DSF" }],
     deckPlaybacks: [playback(2)],
   });
@@ -588,6 +850,7 @@ test("delayed exact track identity and later authoritative contentId keep one pl
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(NOW).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF" }],
     deckPlaybacks: [playback(3)],
   });
@@ -618,17 +881,24 @@ test("contentId is authoritative and fallback master never creates a show activa
     deckPlaybacks: [playback(1)],
   });
   assert.equal(events.some((event) => event.type === "DJ_MASTER_TRACK_ACTIVE"), false);
-  detector.onMasterChange({ deck: 1 });
+  const authorityAt = new Date(NOW).toISOString();
+  detector.onMasterChange({ deck: 1, explicitMasterUpdatedAt: authorityAt });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAt,
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "Same", artist: "Artist", trackBpm: 120 }],
     deckPlaybacks: [playback(2)],
   });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
-  detector.onSnapshot({ explicitMasterDeck: 1, deckPlaybacks: [playback(3, false)] });
   detector.onSnapshot({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAt,
+    deckPlaybacks: [playback(3, false)],
+  });
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAt,
     deckNowPlaying: [{ deck: 1, contentId: "new", title: "Same", artist: "Artist", trackBpm: 120 }],
     deckPlaybacks: [playback(4, true)],
   });
@@ -645,6 +915,7 @@ test("measured hook loop revisions 8/4/2 route without pedal-intent synthesis", 
   detector.on("event", (event) => events.push(event));
   const snapshot = (positionRevision, loop) => ({
     explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date(NOW).toISOString(),
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [{
       deck: 1,
