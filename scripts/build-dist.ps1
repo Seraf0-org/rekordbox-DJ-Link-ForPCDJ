@@ -72,13 +72,73 @@ $pyinstallerExpected = $pyinstallerMatch.Matches[0].Groups[1].Value
 if ($pyinstallerExpected -cne $pyinstallerRequiredVersion) {
   throw "python\\requirements.txt pyinstaller pin must be exactly $pyinstallerRequiredVersion, got '$pyinstallerExpected'"
 }
-$packageManifest = Get-Content -Raw package.json | ConvertFrom-Json
-$packageLock = Get-Content -Raw package-lock.json | ConvertFrom-Json
-$declaredPkg = $packageManifest.devDependencies.'@yao-pkg/pkg'
-$lockedPkgRootEntry = $packageLock.packages.PSObject.Properties[''].Value
-$lockedPkgNodeEntry = $packageLock.packages.PSObject.Properties['node_modules/@yao-pkg/pkg'].Value
-$lockedPkgRoot = $lockedPkgRootEntry.devDependencies.'@yao-pkg/pkg'
-$lockedPkgNode = $lockedPkgNodeEntry.version
+$packagingProbe = @'
+const fs = require("node:fs");
+function read(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
+const manifest = read("package.json");
+const lock = read("package-lock.json");
+const root = lock.packages && lock.packages[""];
+const installed = lock.packages && lock.packages["node_modules/@yao-pkg/pkg"];
+const values = [
+  manifest.version,
+  manifest.devDependencies && manifest.devDependencies["@yao-pkg/pkg"],
+  root && root.devDependencies && root.devDependencies["@yao-pkg/pkg"],
+  installed && installed.version,
+];
+if (values.some((value) => typeof value !== "string" || /[|\r\n]/.test(value))) {
+  throw new Error("packaging metadata values must be single-line strings");
+}
+process.stdout.write(values.join("|"));
+'@
+# PowerShell 5.1's native-command pipeline can merge stderr into stdout. Keep
+# the streams separate so a successful probe warning cannot corrupt a field.
+$probeStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$probeStartInfo.FileName = "node"
+$probeStartInfo.Arguments = "-"
+$probeStartInfo.WorkingDirectory = $ProjectRoot
+$probeStartInfo.UseShellExecute = $false
+$probeStartInfo.CreateNoWindow = $true
+$probeStartInfo.RedirectStandardInput = $true
+$probeStartInfo.RedirectStandardOutput = $true
+$probeStartInfo.RedirectStandardError = $true
+$probeProcess = New-Object System.Diagnostics.Process
+$probeProcess.StartInfo = $probeStartInfo
+try {
+  if (-not $probeProcess.Start()) {
+    throw "Process.Start returned false"
+  }
+  $probeStdoutTask = $probeProcess.StandardOutput.ReadToEndAsync()
+  $probeStderrTask = $probeProcess.StandardError.ReadToEndAsync()
+  $probeProcess.StandardInput.Write($packagingProbe)
+  $probeProcess.StandardInput.Close()
+  $probeProcess.WaitForExit()
+  $probeExitCode = $probeProcess.ExitCode
+  $packagingProbeOutput = $probeStdoutTask.Result
+  $packagingProbeError = $probeStderrTask.Result
+} catch {
+  throw "Node packaging metadata probe failed to run: $($_.Exception.Message)"
+} finally {
+  $probeProcess.Dispose()
+}
+if ($probeExitCode -ne 0) {
+  throw "Node packaging metadata probe failed (exit $probeExitCode): $packagingProbeError$packagingProbeOutput"
+}
+if (-not [string]::IsNullOrEmpty($packagingProbeError)) {
+  throw "Node packaging metadata probe emitted stderr on success: $packagingProbeError"
+}
+$packagingProbeValues = $packagingProbeOutput -split '\|'
+if ($packagingProbeValues.Count -ne 4) {
+  throw "Node packaging metadata probe returned an invalid field count"
+}
+foreach ($packagingProbeValue in $packagingProbeValues) {
+  if ([string]::IsNullOrEmpty($packagingProbeValue) -or $packagingProbeValue -match '[|\r\n]') {
+    throw "Node packaging metadata probe returned an invalid field"
+  }
+}
+$productVersion = $packagingProbeValues[0]
+$declaredPkg = $packagingProbeValues[1]
+$lockedPkgRoot = $packagingProbeValues[2]
+$lockedPkgNode = $packagingProbeValues[3]
 if ($declaredPkg -cne $pkgVersion -or $lockedPkgRoot -cne $pkgVersion -or $lockedPkgNode -cne $pkgVersion) {
   throw "@yao-pkg/pkg must be exactly $pkgVersion in package.json and package-lock.json; run npm ci after restoring the tracked lockfile"
 }
@@ -133,8 +193,6 @@ if ($LASTEXITCODE -ne 0) { throw "inject_hook build failed" }
   --collect-all pyrekordbox `
   python\content_lookup.py
 if ($LASTEXITCODE -ne 0) { throw "content_lookup build failed" }
-
-$productVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
 
 Write-Host "Step 2/7: generating canonical core identity + embedded commitment module..."
 node scripts\generate-build-identity.js --project-root "$ProjectRoot" --out "dist\build-identity.json" `
