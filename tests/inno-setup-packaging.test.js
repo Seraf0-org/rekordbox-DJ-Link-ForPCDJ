@@ -10,6 +10,11 @@
 // files with injected Authenticode/VersionInfo reader seams. The real
 // cmdlet-backed defaults are probed once to prove they reject an unsigned
 // fixture (fail-closed), never that they accept one.
+//
+// The pinned compiler is MANDATORY: total absence at the discovered location
+// must throw an actionable failure inside the resolver, before any dist
+// cleanup or artifact work, and every later installer/revalidation/artifact
+// expectation is unconditional.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -21,6 +26,8 @@ const { spawnSync } = require("node:child_process");
 
 const REPO_ROOT = path.join(__dirname, "..");
 const BUILD_DIST = path.join(REPO_ROOT, "scripts", "build-dist.ps1");
+const WINDOWS_DESKTOP_BOOTSTRAP = path.join(REPO_ROOT, "scripts", "initialize-windows-desktop-powershell.ps1");
+const INSTALLER_SOURCE = path.join(REPO_ROOT, "installer.iss");
 const RELEASE_WORKFLOW = path.join(REPO_ROOT, ".github", "workflows", "release.yml");
 const RELEASE_WRITER = path.join(REPO_ROOT, "scripts", "write-release-manifest.js");
 
@@ -40,7 +47,7 @@ function extractPowerShellFunction(source, functionName) {
   const marker = `function ${functionName}`;
   const start = source.indexOf(marker);
   if (start < 0) {
-    throw new Error(`function ${functionName} not found in build-dist.ps1`);
+    throw new Error(`function ${functionName} not found in PowerShell source`);
   }
   const openBrace = source.indexOf("{", start);
   if (openBrace < 0) throw new Error(`${functionName} has no opening brace`);
@@ -66,7 +73,15 @@ function stripCommentLines(source) {
 
 test("build-dist pins the exact Inno Setup compiler provenance order and rejects spoofable discovery", () => {
   const source = fs.readFileSync(BUILD_DIST, "utf8");
+  const bootstrapSource = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP, "utf8");
   const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  const packageLock = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package-lock.json"), "utf8"));
+  const installerSource = fs.readFileSync(INSTALLER_SOURCE, "utf8");
+
+  assert.equal(packageJson.version, "1.1.4", "product package version must be the corrective release version");
+  assert.equal(packageLock.version, packageJson.version, "root package-lock version must match package.json");
+  assert.equal(packageLock.packages[""].version, packageJson.version, "root package-lock identity must match package.json");
+  assert.match(installerSource, /^AppVersion=1\.1\.4$/m, "installer AppVersion must match the corrective product version");
 
   assert.equal(
     packageJson.scripts["build:dist"],
@@ -74,17 +89,24 @@ test("build-dist pins the exact Inno Setup compiler provenance order and rejects
     "npm must launch build-dist through exact non-interactive Windows PowerShell hygiene",
   );
 
-  const bootstrapDefinitionIndex = source.indexOf("function Initialize-WindowsDesktopPowerShellBuildEnvironment");
+  const bootstrapDefinitionIndex = bootstrapSource.indexOf("function Initialize-WindowsDesktopPowerShellBuildEnvironment");
+  const bootstrapPathIndex = source.indexOf("[System.IO.Path]::Combine($PSScriptRoot, \"initialize-windows-desktop-powershell.ps1\")");
+  const bootstrapDotSourceIndex = source.indexOf(". $windowsDesktopBootstrapPath");
   const bootstrapInvocationIndex = source.search(/^Initialize-WindowsDesktopPowerShellBuildEnvironment$/m);
   const projectRootIndex = source.indexOf("if ([string]::IsNullOrWhiteSpace($ProjectRoot))");
-  assert.ok(bootstrapDefinitionIndex >= 0, "build-dist Windows PowerShell bootstrap is missing");
-  assert.ok(bootstrapInvocationIndex > bootstrapDefinitionIndex, "build-dist Windows PowerShell bootstrap is not invoked");
+  assert.ok(bootstrapDefinitionIndex >= 0, "shared Windows PowerShell bootstrap is missing");
+  assert.ok(bootstrapPathIndex >= 0, "build-dist does not resolve the shared Windows PowerShell bootstrap through .NET");
+  assert.ok(bootstrapDotSourceIndex > bootstrapPathIndex, "build-dist does not load the shared Windows PowerShell bootstrap");
+  assert.ok(bootstrapInvocationIndex > bootstrapDotSourceIndex, "build-dist Windows PowerShell bootstrap is not invoked");
   assert.ok(projectRootIndex > bootstrapInvocationIndex, "build-dist must normalize the PowerShell module path before project work");
-  assert.match(source, /\$PSVersionTable\.PSEdition\s+-cne\s+"Desktop"/);
-  assert.match(source, /Join-Path\s+-Path\s+\$PSHOME\s+-ChildPath\s+"Modules"/);
-  assert.match(source, /\$env:PSModulePath\s*=\s+\$nativeModuleDirectory/);
+  assert.doesNotMatch(source, /function\s+Initialize-WindowsDesktopPowerShellBuildEnvironment/);
+  assert.match(source, /\[System\.IO\.FileInfo\]::new\(\$windowsDesktopBootstrapPath\)/);
+  assert.match(source, /windowsDesktopBootstrapItem\.Attributes\s+-band\s+\[System\.IO\.FileAttributes\]::ReparsePoint/);
+  assert.match(bootstrapSource, /\$PSVersionTable\.PSEdition\s+-cne\s+"Desktop"/);
+  assert.match(bootstrapSource, /\$nativeModuleDirectory\s*=\s+"\$PSHOME\\Modules"/);
+  assert.match(bootstrapSource, /\$env:PSModulePath\s*=\s+\$nativeModuleDirectory/);
   assert.match(
-    source,
+    bootstrapSource,
     /Get-Command\s+-Name\s+\$requiredCommand\.Name\s+-All\s+-ErrorAction\s+SilentlyContinue/,
   );
   for (const [commandName, moduleName, commandType] of [
@@ -93,7 +115,7 @@ test("build-dist pins the exact Inno Setup compiler provenance order and rejects
     ["Compress-Archive", "Microsoft.PowerShell.Archive", "Function"],
   ]) {
     assert.match(
-      source,
+      bootstrapSource,
       new RegExp(
         `\\[pscustomobject\\]@\\{\\s*Name\\s*=\\s*"${commandName}";\\s*Source\\s*=\\s*"${moduleName.replaceAll(".", "\\.")}";\\s*CommandType\\s*=\\s*"${commandType}"\\s*\\}`,
       ),
@@ -128,19 +150,65 @@ test("build-dist pins the exact Inno Setup compiler provenance order and rejects
   const step2Index = source.indexOf('Write-Host "Step 2/7');
   assert.ok(step2Index > 0 && resolveCallIndex < step2Index, "compiler resolution moved after identity generation");
 
-  // Installer runs only a fully resolved compiler object; there is no silent
-  // Test-Path fallback, and the documented skip applies only when nothing
-  // was found at all.
+  // Installer build is unconditional: the resolver aborts on any missing,
+  // tampered, or failing-pin compiler, so no conditional non-null guard,
+  // silent Test-Path fallback, skip path, fallback flag, or degraded success
+  // may exist anywhere in the production script.
   assert.match(source, /\$iscc = \$innoCompiler\.Path/);
   assert.match(source, /& \$iscc installer\.iss/);
   assert.doesNotMatch(source, /Test-Path \$iscc\b/);
-  assert.match(source, /if \(\$null -ne \$innoCompiler\) \{/);
-  assert.match(source, /Pinned Inno Setup compiler absent - skipping installer/);
+  assert.doesNotMatch(source, /\$null -ne \$innoCompiler/);
+
+  // A missing pinned compiler blocks before any cleanup or artifact work:
+  // the actionable absence failure lives inside the resolver itself, whose
+  // call site precedes the dist cleanup boundary.
+  assert.match(
+    source,
+    /Pinned Inno Setup \$RequiredVersion compiler not found at '\$fullPath'/,
+  );
+  assert.match(
+    source,
+    /install Inno Setup \$RequiredVersion from https:\/\/jrsoftware\.org\/isdl\.php or pass -IsccPath\/RB_OUTPUT_ISCC_PATH pointing at the exact pinned ISCC\.exe/,
+  );
+  const distCleanupIndex = source.indexOf('Get-ChildItem -LiteralPath "dist"');
+  assert.ok(distCleanupIndex > 0, "dist cleanup boundary missing");
+  assert.ok(resolveCallIndex < distCleanupIndex, "missing-compiler failure must fire before dist cleanup");
+
+  // A full release always produces AND manifests both artifacts.
+  assert.match(source, /DJLinkForPCDJ-setup\.exe/);
+  assert.match(source, /rb-output-\$productVersion\.zip/);
+  assert.match(source, /\$releaseArtifacts \+= \$setupExe/);
+  assert.match(source, /\$releaseArtifacts \+= \$zipPath/);
+
+  // The retired divergent success path must never return.
+  assert.doesNotMatch(source, /skipping installer/i);
+  assert.doesNotMatch(source, /ZIP still ships/i);
+  assert.doesNotMatch(source, /AllowZipOnly/i);
+  assert.doesNotMatch(source, /[Zz]ip-[Oo]nly/);
 
   // Evidence reaches both the identity generator and the release manifest.
   const shaEvidenceCount = source.split("inno-setup-iscc-sha256=").length - 1;
   assert.ok(shaEvidenceCount >= 2, "compiler SHA evidence must reach identity AND release manifest");
-  assert.match(source, /"inno-setup=\$innoSetupToolVersion"/);
+  assert.match(source, /"inno-setup=\$innoSetupRequiredVersion"/);
+});
+
+test("shared Windows PowerShell bootstrap rejects PowerShell Core", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows PowerShell host boundary is Windows-only");
+    return;
+  }
+  const bootstrapLiteral = WINDOWS_DESKTOP_BOOTSTRAP.replaceAll("'", "''");
+  const result = spawnSync(
+    "pwsh.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `. '${bootstrapLiteral}'; Initialize-WindowsDesktopPowerShellBuildEnvironment`],
+    { cwd: REPO_ROOT, encoding: "utf8", windowsHide: true, timeout: 60000 },
+  );
+  if (result.error && result.error.code === "ENOENT") {
+    t.skip("pwsh is not installed; static Desktop-host contract applied");
+    return;
+  }
+  assert.notEqual(result.status, 0, "PowerShell Core was accepted by the Windows-only bootstrap");
+  assert.match(`${result.stdout}\n${result.stderr}`, /require Windows PowerShell Desktop/);
 });
 
 test("build-dist re-resolves the exact same pinned compiler immediately before invoking ISCC", () => {
@@ -170,14 +238,19 @@ test("build-dist re-resolves the exact same pinned compiler immediately before i
   const step2Index = stripped.indexOf('Write-Host "Step 2/7');
   assert.ok(step2Index > 0 && firstSite < step2Index, "first resolution moved after identity generation");
 
-  // The second resolution happens after install-manifest staging and inside
-  // the final non-null compiler guard, immediately before ISCC.
+  // The second resolution happens after install-manifest staging and runs
+  // unconditionally immediately before ISCC: the initial resolution already
+  // turned absence into a hard failure, so no conditional non-null compiler
+  // guard may exist anywhere in the production flow.
   const stagingIndex = stripped.indexOf("node scripts\\write-install-manifest.js");
   assert.ok(stagingIndex > 0 && secondSite > stagingIndex, "second resolution must follow install-manifest staging");
   const invokeIndex = stripped.indexOf("& $iscc installer.iss");
   assert.ok(invokeIndex > secondSite, "ISCC invocation must follow the second resolution");
-  const guardBeforeInvoke = stripped.lastIndexOf("if ($null -ne $innoCompiler)", invokeIndex);
-  assert.ok(guardBeforeInvoke > stagingIndex && secondSite > guardBeforeInvoke, "second resolution escaped the final non-null guard");
+  assert.equal(
+    stripped.includes("if ($null -ne $innoCompiler)"),
+    false,
+    "conditional non-null compiler guard returned",
+  );
 
   // Between the second validation and ISCC only fixed guard/assignment/logging
   // operations may appear: no cleanup, copy, write, archive, process launch,
@@ -233,10 +306,11 @@ test("release workflow installs the exact official 6.7.3 installer without weake
   assert.ok(hashIndex > 0 && execIndex > hashIndex, "installer must be hash-verified before execution");
 
   // Per-user install so OS-derived LocalApplicationData discovery applies;
-  // first-party action pins unchanged.
+  // first-party actions must remain present AND immutably pinned to a full
+  // 40-hex commit SHA (never a mutable tag).
   assert.match(workflow, /\/CURRENTUSER/);
-  assert.match(workflow, /actions\/checkout@v4/);
-  assert.match(workflow, /actions\/setup-node@v4/);
+  assert.match(workflow, /uses:\s*actions\/checkout@[0-9a-f]{40}\b/);
+  assert.match(workflow, /uses:\s*actions\/setup-node@[0-9a-f]{40}\b/);
 });
 
 test("release writer records validated tool evidence", () => {
@@ -264,7 +338,7 @@ function releaseWriterFixture(t) {
   const installManifest = {
     schemaVersion: 1,
     kind: "rb-output-install-manifest/v1",
-    productVersion: "1.1.3",
+    productVersion: "1.1.4",
     identityHash: "a".repeat(64),
     payloads: [],
   };
@@ -324,7 +398,8 @@ for (const [name, args, pattern] of [
 
 function runPinningHarness(t) {
   const buildSource = fs.readFileSync(BUILD_DIST, "utf8");
-  const bootstrapFn = extractPowerShellFunction(buildSource, "Initialize-WindowsDesktopPowerShellBuildEnvironment");
+  const bootstrapSource = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP, "utf8");
+  const bootstrapFn = extractPowerShellFunction(bootstrapSource, "Initialize-WindowsDesktopPowerShellBuildEnvironment");
   const resolverFn = extractPowerShellFunction(buildSource, "Resolve-PinnedInnoSetupCompiler");
   const revalidateFn = extractPowerShellFunction(buildSource, "Assert-InnoCompilerRevalidated");
   const lines = [
@@ -334,6 +409,11 @@ function runPinningHarness(t) {
     "# Parse-level PS5.1 compatibility gate for the edited build script.",
     "$tokens = $null",
     "$parseErrors = $null",
+    `[void][System.Management.Automation.Language.Parser]::ParseFile('${WINDOWS_DESKTOP_BOOTSTRAP.replaceAll("'", "''")}', [ref]$tokens, [ref]$parseErrors)`,
+    "if ($parseErrors.Count -gt 0) {",
+    "  $messages = ($parseErrors | ForEach-Object { $_.Message }) -join '; '",
+    "  throw ('initialize-windows-desktop-powershell.ps1 parse errors under PS5.1: ' + $messages)",
+    "}",
     `[void][System.Management.Automation.Language.Parser]::ParseFile('${BUILD_DIST.replaceAll("'", "''")}', [ref]$tokens, [ref]$parseErrors)`,
     "if ($parseErrors.Count -gt 0) {",
     "  $messages = ($parseErrors | ForEach-Object { $_.Message }) -join '; '",
@@ -348,6 +428,13 @@ function runPinningHarness(t) {
     "$expectedCommands = @([pscustomobject]@{ Name = 'Get-FileHash'; Source = 'Microsoft.PowerShell.Utility'; CommandType = 'Function' }, [pscustomobject]@{ Name = 'Get-AuthenticodeSignature'; Source = 'Microsoft.PowerShell.Security'; CommandType = 'Cmdlet' }, [pscustomobject]@{ Name = 'Compress-Archive'; Source = 'Microsoft.PowerShell.Archive'; CommandType = 'Function' })",
     "foreach ($expectedCommand in $expectedCommands) { $commandInfos = @(Get-Command -Name $expectedCommand.Name -All -ErrorAction SilentlyContinue); if ($commandInfos.Count -ne 1 -or $commandInfos[0].Source -cne $expectedCommand.Source -or [string]$commandInfos[0].CommandType -cne $expectedCommand.CommandType) { throw ('required inbox command did not resolve exactly after bootstrap: ' + $expectedCommand.Name) } }",
     "Write-Output 'adversarial PSModulePath normalized by build-dist bootstrap'",
+    "",
+    "Set-Alias -Name Get-FileHash -Value Get-Date",
+    "$duplicateRejection = $null",
+    "try { Initialize-WindowsDesktopPowerShellBuildEnvironment } catch { $duplicateRejection = $_.Exception.Message } finally { Remove-Item -LiteralPath Alias:Get-FileHash -Force -ErrorAction SilentlyContinue }",
+    "if ($duplicateRejection -notmatch 'must resolve exactly once') { throw 'shared bootstrap accepted an alias or duplicate command resolution' }",
+    "Initialize-WindowsDesktopPowerShellBuildEnvironment",
+    "Write-Output 'duplicate command resolution rejected by build-dist bootstrap'",
     "",
     resolverFn,
     "",
@@ -455,9 +542,11 @@ function runPinningHarness(t) {
     "  $resolvedExplicit = Invoke-Resolver -Base (Join-Path $work 'empty-discovery') -Explicit $explicitFx.Path -RequiredSha $explicitFx.Sha256",
     "  if ($null -eq $resolvedExplicit -or $resolvedExplicit.Origin -cne 'explicit') { throw 'explicit origin not honored' }",
     "",
-    "  # 3. discovered absence is the ONLY skip path (returns null, no throw)",
-    "  $absent = Invoke-Resolver -Base (Join-Path $work 'nothing-here') -Explicit '' -RequiredSha $fixture.Sha256",
-    "  if ($null -ne $absent) { throw 'absent discovery must yield null' }",
+    "  # 3. discovered absence aborts with actionable guidance (never skips)",
+    "  Assert-ThrowsLike 'absent discovered compiler' 'Pinned Inno Setup 6\\.7\\.3 compiler not found' {",
+    "    Invoke-Resolver -Base (Join-Path $work 'nothing-here') -Explicit '' -RequiredSha $fixture.Sha256",
+    "  }",
+    "  Write-Output 'case absent-discovery-aborts-with-guidance: ok'",
     "",
     "  # 4. explicit candidate that does not exist fails closed",
     "  Assert-ThrowsLike 'missing explicit candidate' 'explicit Inno Setup compiler does not exist' {",
@@ -623,7 +712,8 @@ function runPinningHarness(t) {
     "  Write-Output 'case disappearance-null-evidence-stops-before-iscc: ok'",
     "",
     "  # 20. The synthetic compiler vanishing between first and second validation",
-    "  # makes the resolver return null for a discovered origin and the guard aborts.",
+    "  # trips the second resolver pass itself (absence now aborts with the",
+    "  # actionable not-found failure) and the ISCC marker is never reached.",
     "  $vanishRoot = Join-Path $work 'vanish'",
     "  $vanishFx = New-FixtureIscc (Join-Path $vanishRoot 'Programs\\Inno Setup 6')",
     "  $vanishFirst = Invoke-Resolver -Base $vanishRoot -Explicit '' -RequiredSha $vanishFx.Sha256",
@@ -692,6 +782,8 @@ test("PS5.1 pinning harness accepts synthetic valid compiler and rejects every t
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /build-dist parses clean under PS5\.1/);
   assert.match(result.stdout, /adversarial PSModulePath normalized by build-dist bootstrap/);
+  assert.match(result.stdout, /duplicate command resolution rejected by build-dist bootstrap/);
+  assert.match(result.stdout, /case absent-discovery-aborts-with-guidance: ok/);
   assert.match(result.stdout, /case valid-revalidation-signer-subject: ok/);
   for (const field of ["path", "origin", "sha256", "signersubject", "productversiondeclared"]) {
     assert.match(result.stdout, new RegExp(`case evidence-${field}-drift-stops-before-iscc: ok`));

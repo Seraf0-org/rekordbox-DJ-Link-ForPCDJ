@@ -1,3 +1,10 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef WINVER
+#define WINVER 0x0600
+#endif
+
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -17,7 +24,9 @@
 
 #include "MinHook.h"
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 namespace {
 
@@ -100,9 +109,6 @@ using GetInstanceFn = uintptr_t(*)();
 using GetRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t, uintptr_t, uint32_t, uint32_t);
 using InitRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t);
 using DestrRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t);
-using MixerNoArgFloatFn = float(__fastcall*)(uintptr_t);
-using MixerIndexedFloatFn = float(__fastcall*)(uintptr_t, int);
-using MixerTwoIndexFloatFn = float(__fastcall*)(uintptr_t, int, int);
 using CrossfaderGetterFn = float(__fastcall*)(uintptr_t);
 
 SOCKET g_socket = INVALID_SOCKET;
@@ -128,7 +134,6 @@ uint8_t g_lastPlayerStableHits[4] = {};
 ULONGLONG g_lastPlayerProbeTick[4] = {};
 uint32_t g_lastTitleHash[4] = {};
 uint32_t g_lastArtistHash[4] = {};
-ULONGLONG g_lastRowDataDiagTick[4] = {};
 uint32_t g_trackIdHits[4] = {};
 uint32_t g_trackIdMisses[4] = {};
 uint32_t g_loadDetourHits = 0;
@@ -140,7 +145,6 @@ std::unordered_map<std::string, ULONGLONG> g_lastMixerProbeTick;
 std::unordered_map<std::string, uintptr_t> g_lastMixerProbeValue;
 std::unordered_map<std::string, uint32_t> g_mixerProbeCount;
 std::vector<uintptr_t> g_mixerUnits7218;
-std::unordered_map<uintptr_t, std::vector<float>> g_lastMixerStateProbe;
 std::vector<uintptr_t> g_crossfaderWrappers7218;
 std::vector<uintptr_t> g_channelFaders7218;
 std::vector<float> g_lastMixerFaderValues;
@@ -171,15 +175,6 @@ struct LoopState {
 
 LoopState g_loopState[4] = {};
 uint32_t g_loopTrackId[4] = {};
-
-std::string wchar_to_utf8(const wchar_t* wstr) {
-  if (!wstr) return "";
-  int size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
-  if (size <= 1) return "";
-  std::string result(static_cast<size_t>(size - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &result[0], size, nullptr, nullptr);
-  return result;
-}
 
 uint32_t simple_hash(const std::string& s) {
   uint32_t h = 5381;
@@ -275,16 +270,6 @@ bool safe_read_float(uintptr_t address, float& outValue) {
   }
   outValue = *reinterpret_cast<float*>(address);
   return std::isfinite(outValue);
-}
-
-uintptr_t module_image_size(HMODULE module) {
-  if (!module) return 0;
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-      reinterpret_cast<uintptr_t>(module) + static_cast<uintptr_t>(dos->e_lfanew));
-  if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-  return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
 }
 
 bool is_writable_mixer_scan_region(const MEMORY_BASIC_INFORMATION& mbi) {
@@ -487,132 +472,6 @@ void poll_mixer_faders_7218() {
       "{\"type\":\"mixer_state\",\"crossfader\":%.6f,\"channelFaders\":[%.6f,%.6f]}",
       values[0], values[1], values[2]);
   send_packet(payload);
-}
-
-bool read_mixer_method_address(uintptr_t state, size_t index, uintptr_t& method) {
-  uintptr_t vtable = 0;
-  if (!safe_read_ptr(state, vtable)) return false;
-  const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-  const uintptr_t imageSize = module_image_size(reinterpret_cast<HMODULE>(moduleBase));
-  if (vtable != moduleBase + kDjMixerStateVtableRva7218 || imageSize == 0 || index >= 62) {
-    return false;
-  }
-  if (!safe_read_ptr(vtable + index * sizeof(uintptr_t), method)) return false;
-  return method >= moduleBase && method < moduleBase + imageSize &&
-         !IsBadCodePtr(reinterpret_cast<FARPROC>(method));
-}
-
-bool read_mixer_noarg_float(uintptr_t state, size_t index, float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerNoArgFloatFn>(method)(state);
-  return std::isfinite(value);
-}
-
-bool read_mixer_indexed_float(uintptr_t state, size_t index, int item, float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerIndexedFloatFn>(method)(state, item);
-  return std::isfinite(value);
-}
-
-bool read_mixer_two_index_float(uintptr_t state, size_t index, int item, int variant,
-                                float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerTwoIndexFloatFn>(method)(state, item, variant);
-  return std::isfinite(value);
-}
-
-void poll_mixer_state_probe_7218() {
-  for (size_t unitIndex = 0; unitIndex < g_mixerUnits7218.size(); ++unitIndex) {
-    const uintptr_t unit = g_mixerUnits7218[unitIndex];
-    if (!matches_mixer_unit_7218(
-            unit, reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr)))) {
-      continue;
-    }
-    const uintptr_t state = unit + kDjMixerStateOffset7218;
-    std::vector<float> values;
-    values.reserve(34);
-    bool readOk = true;
-    const auto addNoArg = [&](size_t index) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_noarg_float(state, index, value);
-      values.push_back(value);
-    };
-    const auto addIndexed = [&](size_t index, int item) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_indexed_float(state, index, item, value);
-      values.push_back(value);
-    };
-    const auto addTwoIndex = [&](size_t index, int item, int variant) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_two_index_float(state, index, item, variant, value);
-      values.push_back(value);
-    };
-
-    for (int deck = 0; deck < 2; ++deck) addIndexed(16, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(17, deck);
-    addNoArg(18);
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 3; ++variant) addTwoIndex(19, deck, variant);
-    }
-    for (int deck = 0; deck < 2; ++deck) addIndexed(21, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(22, deck);
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 2; ++variant) addTwoIndex(28, deck, variant);
-    }
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 2; ++variant) addTwoIndex(29, deck, variant);
-    }
-    for (int variant = 0; variant < 2; ++variant) addTwoIndex(30, 0, variant);
-    for (int variant = 0; variant < 2; ++variant) addIndexed(31, variant);
-    addNoArg(40);
-    addNoArg(41);
-    addNoArg(43);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(55, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(56, deck);
-    if (!readOk || values.size() != 34) {
-      continue;
-    }
-
-    bool changed = g_lastMixerStateProbe.find(unit) == g_lastMixerStateProbe.end();
-    if (!changed) {
-      const auto& previous = g_lastMixerStateProbe[unit];
-      for (size_t i = 0; i < values.size(); ++i) {
-        if (i >= previous.size() || std::fabs(values[i] - previous[i]) >= 0.002f) {
-          changed = true;
-          break;
-        }
-      }
-    }
-    if (!changed) continue;
-    g_lastMixerStateProbe[unit] = values;
-
-    char payload[2048] = {};
-    _snprintf_s(
-        payload, sizeof(payload), _TRUNCATE,
-        "{\"type\":\"mixer_state_probe\",\"unit\":%llu,\"address\":%llu,"
-        "\"c16\":[%.6f,%.6f],\"c17\":[%.6f,%.6f],\"c18\":%.6f,"
-        "\"c19\":[[%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f]],"
-        "\"c21\":[%.6f,%.6f],\"c22\":[%.6f,%.6f],"
-        "\"c28\":[[%.6f,%.6f],[%.6f,%.6f]],"
-        "\"c29\":[[%.6f,%.6f],[%.6f,%.6f]],"
-        "\"c30\":[%.6f,%.6f],\"c31\":[%.6f,%.6f],"
-        "\"c40\":%.6f,\"c41\":%.6f,\"c43\":%.6f,"
-        "\"c55\":[%.6f,%.6f],\"c56\":[%.6f,%.6f]}",
-        static_cast<unsigned long long>(unitIndex + 1),
-        static_cast<unsigned long long>(unit),
-        values[0], values[1], values[2], values[3], values[4],
-        values[5], values[6], values[7], values[8], values[9], values[10],
-        values[11], values[12], values[13], values[14],
-        values[15], values[16], values[17], values[18],
-        values[19], values[20], values[21], values[22],
-        values[23], values[24], values[25], values[26],
-        values[27], values[28], values[29],
-        values[30], values[31], values[32], values[33]);
-    send_packet(payload);
-  }
 }
 
 void try_add_candidate(uint32_t value, std::unordered_set<uint32_t>& seen,
@@ -907,7 +766,7 @@ void send_loop_olvc_diagnostic(int deckOneBased, const char* name, uintptr_t raw
     return;
   }
 
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   if (g_lastLoopDiagTick != 0 && nowTick - g_lastLoopDiagTick < 250) {
     return;
   }
@@ -1093,7 +952,7 @@ void send_mixer_olvc_probe(uintptr_t deckRaw, const char* name, uintptr_t rawVal
   std::string key = std::to_string(static_cast<unsigned long long>(deckRaw));
   key.push_back('|');
   key += name;
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   const auto lastTick = g_lastMixerProbeTick.find(key);
   const auto lastValue = g_lastMixerProbeValue.find(key);
   if (lastValue != g_lastMixerProbeValue.end() && lastValue->second == rawValue) {
@@ -1195,14 +1054,6 @@ void send_track_meta_extended(int deck, const TrackMetaFields& m) {
   }
   payload += "}";
   send_packet(payload);
-}
-
-// 後方互換: 旧シグネチャの send_track_meta はそのまま維持
-void send_track_meta(int deck, const std::string& title, const std::string& artist) {
-  TrackMetaFields m;
-  m.title = title;
-  m.artist = artist;
-  send_track_meta_extended(deck, m);
 }
 
 // 前方宣言
@@ -1882,7 +1733,7 @@ void poll_player_track_ids() {
   if (!resolve_player_slots()) {
     return;
   }
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   for (int i = 0; i < 4; ++i) {
     const uintptr_t player = g_playerSlots[i];
     if (!player) {
@@ -1999,7 +1850,7 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
   if (g_loadDetourHits < 0xFFFFFFFFu) {
     ++g_loadDetourHits;
   }
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   if (nowTick >= g_lastLoadDetourLogTick + 5000) {
     g_lastLoadDetourLogTick = nowTick;
     char loadDiag[256] = {};

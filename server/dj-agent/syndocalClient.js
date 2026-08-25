@@ -9,7 +9,6 @@ function makeId() {
 
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
 const SUPPORTED_EVENT_TYPES = new Set([
-  "DJ_MASTER_CHANGED",
   "DJ_MASTER_TRACK_ACTIVE",
   "DJ_MASTER_TRACK_SYNC",
   "DJ_LOOP_STATE",
@@ -19,7 +18,6 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "DJ_TIMELINE_LOOP_SET",
 ]);
 const PHYSICAL_EVENT_TYPES = new Set([
-  "DJ_MASTER_CHANGED",
   "DJ_MASTER_TRACK_ACTIVE",
   "DJ_LOOP_STATE",
   "DJ_RELEASE",
@@ -472,13 +470,6 @@ function encodeV2Release(payload) {
   return { state: "released", timelineId, playSessionId };
 }
 
-function encodeV2MasterChanged(payload) {
-  if (!isPlainRecord(payload)) return null;
-  const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
-  if (deck == null) return null;
-  return { deck, deckId: `rekordbox-deck-${deck}` };
-}
-
 function encodeV2BeatJump(payload) {
   if (!isPlainRecord(payload)) return null;
   const bars = strictFinite(payload, "bars", { integer: true });
@@ -494,8 +485,6 @@ function encodeV2LoopSet(payload) {
 
 function encodeV2TypedEvent(type, payload) {
   switch (type) {
-    case "DJ_MASTER_CHANGED":
-      return encodeV2MasterChanged(payload);
     case "DJ_MASTER_TRACK_ACTIVE":
     case "DJ_MASTER_TRACK_SYNC":
       return encodeV2TrackSample(payload);

@@ -6,38 +6,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Initialize-WindowsDesktopPowerShellBuildEnvironment {
-  # npm may launch this file through Git Bash. MSYS preserves a pwsh 7-first
-  # PSModulePath into powershell.exe, which makes Windows PowerShell 5.1
-  # resolve incompatible Core modules (or no cmdlet at all). This build relies
-  # on the inbox Windows PowerShell modules for its compiler provenance checks,
-  # so own that environment boundary instead of accepting caller module paths.
-  if ($PSVersionTable.PSEdition -cne "Desktop") {
-    throw "build-dist.ps1 requires Windows PowerShell Desktop; got PSEdition '$($PSVersionTable.PSEdition)'"
-  }
-
-  $nativeModuleDirectory = Join-Path -Path $PSHOME -ChildPath "Modules"
-  $nativeModuleDirectoryItem = Get-Item -LiteralPath $nativeModuleDirectory -Force -ErrorAction Stop
-  if (-not $nativeModuleDirectoryItem.PSIsContainer) {
-    throw "Windows PowerShell inbox module directory is not a directory: $nativeModuleDirectory"
-  }
-  $env:PSModulePath = $nativeModuleDirectory
-
-  $requiredCommands = @(
-    [pscustomobject]@{ Name = "Get-FileHash"; Source = "Microsoft.PowerShell.Utility"; CommandType = "Function" }
-    [pscustomobject]@{ Name = "Get-AuthenticodeSignature"; Source = "Microsoft.PowerShell.Security"; CommandType = "Cmdlet" }
-    [pscustomobject]@{ Name = "Compress-Archive"; Source = "Microsoft.PowerShell.Archive"; CommandType = "Function" }
-  )
-  foreach ($requiredCommand in $requiredCommands) {
-    $commandInfos = @(Get-Command -Name $requiredCommand.Name -All -ErrorAction SilentlyContinue)
-    $commandInfo = if ($commandInfos.Count -eq 1) { $commandInfos[0] } else { $null }
-    if ($null -eq $commandInfo -or $commandInfo.Source -cne $requiredCommand.Source -or [string]$commandInfo.CommandType -cne $requiredCommand.CommandType) {
-      $actualSource = if ($commandInfos.Count -eq 0) { "missing" } else { ($commandInfos | ForEach-Object { "$($_.CommandType):$($_.Source)" }) -join "," }
-      throw "Windows PowerShell inbox command '$($requiredCommand.Name)' must resolve exactly once as '$($requiredCommand.CommandType):$($requiredCommand.Source)', got '$actualSource'"
-    }
-  }
+$windowsDesktopBootstrapPath = [System.IO.Path]::Combine($PSScriptRoot, "initialize-windows-desktop-powershell.ps1")
+$windowsDesktopBootstrapItem = [System.IO.FileInfo]::new($windowsDesktopBootstrapPath)
+if (-not $windowsDesktopBootstrapItem.Exists -or ($windowsDesktopBootstrapItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+  throw "Windows PowerShell bootstrap helper must be a normal non-reparse file: $windowsDesktopBootstrapPath"
 }
-
+. $windowsDesktopBootstrapPath
 Initialize-WindowsDesktopPowerShellBuildEnvironment
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
@@ -66,8 +40,9 @@ Set-Location $ProjectRoot
 #   3. package server.exe with the LOCAL PINNED pkg (commitment is compiled in)
 #   4. bind measured exe hash into the sidecar (post-package)
 #   5. stage install-manifest.json next to the finalized payloads
-#   6. package ZIP (always) and installer (only with the pinned Inno Setup
-#      6.7.3 compiler; a compiler that exists but fails any pin aborts)
+#   6. package BOTH release artifacts: DJLinkForPCDJ-setup.exe (built only by
+#      the pinned Inno Setup 6.7.3 compiler; an absent or failing-pin
+#      compiler aborts the release) and the versioned ZIP
 #   7. finalize external dist\release-manifest.json binding artifact hashes
 
 function Assert-NoReparseTree {
@@ -227,10 +202,11 @@ function Assert-AbletonLinkNativeAddon {
 #     exactly; prefixes, suffixes, commas, and other zero-like values are
 #     never normalized into a match.
 #
-# An explicit candidate that is missing or fails any pin aborts the release.
-# A discovered candidate that exists but fails any pin also aborts the
-# release; ONLY total absence of any compiler returns null, which leaves the
-# installer out while the ZIP still ships (documented distribution policy).
+# Every candidate outcome either yields a fully pinned compiler object or
+# aborts the release. A candidate that exists but fails any pin aborts, an
+# explicit candidate that is missing aborts, and TOTAL ABSENCE at the
+# discovered location aborts as well: full releases must always ship the
+# installer, so there is no skip path, fallback flag, or degraded success.
 function Resolve-PinnedInnoSetupCompiler {
   param(
     [Parameter(Mandatory = $true)][string]$RequiredVersion,
@@ -279,7 +255,7 @@ function Resolve-PinnedInnoSetupCompiler {
         if ($Origin -ceq "explicit") {
           throw "explicit Inno Setup compiler does not exist: $fullPath"
         }
-        return $null
+        throw "Pinned Inno Setup $RequiredVersion compiler not found at '$fullPath'. A full release must always build the installer: install Inno Setup $RequiredVersion from https://jrsoftware.org/isdl.php or pass -IsccPath/RB_OUTPUT_ISCC_PATH pointing at the exact pinned ISCC.exe"
       }
       if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "$Origin Inno Setup compiler path contains a symbolic link or junction (reparse points are not allowed): $($item.FullName)"
@@ -363,8 +339,8 @@ function Resolve-PinnedInnoSetupCompiler {
 # ISCC.exe invocation. Production re-runs Resolve-PinnedInnoSetupCompiler
 # immediately before Step 6 packaging and passes both results here: a null
 # revalidation means the compiler that was pinned earlier vanished mid-build,
-# which aborts instead of degrading into the documented absent-skip path, and
-# every evidence field must still describe the exact same binary. The helper
+# which aborts instead of ever invoking an unverified binary, and every
+# evidence field must still describe the exact same binary. The helper
 # performs no filesystem, registry, network, or process operations; it is pure
 # comparison, so the window between it and the invocation holds only
 # assignments and logging.
@@ -448,8 +424,8 @@ if ($LASTEXITCODE -ne 0 -or $pyinstallerVersion -cne $pyinstallerRequiredVersion
 
 # Inno Setup compiler pinning: the installer may only be built with an exact
 # ISCC.exe build (see Resolve-PinnedInnoSetupCompiler for the full rules).
-# Resolution happens BEFORE anything in dist is removed so an invalid or
-# tampered compiler aborts before any artifact work.
+# Resolution happens BEFORE anything in dist is removed so an invalid,
+# tampered, or missing compiler aborts before any artifact work.
 $innoSetupRequiredVersion = "6.7.3"
 $innoSetupIsccRequiredSha256 = "0A8757031B33777E4C9CBFFEE40F11A5062B36D25CBE144C1DB73B6102B80AD7"
 $innoSetupRequiredSignerSubjectFragment = "Pyrsys B.V."
@@ -470,21 +446,14 @@ $innoCompiler = Resolve-PinnedInnoSetupCompiler `
   -DiscoveredRelativePath $innoSetupDiscoveredRelativePath `
   -DiscoveredBaseDirectory $osLocalApplicationData `
   -ExplicitPath $explicitIsccPath
-if ($null -ne $innoCompiler) {
-  Write-Host ("Pinned Inno Setup {0} compiler resolved from the {1} location: {2}" -f $innoSetupRequiredVersion, $innoCompiler.Origin, $innoCompiler.Path)
-} else {
-  Write-Host "No Inno Setup 6.7.3 compiler found; installer will be skipped (ZIP still ships)"
-}
-# Build evidence: record the pinned Inno version (and compiler SHA when a
-# compiler resolved) in build identity and release manifest tool entries.
-$innoSetupToolVersion = "absent"
-if ($null -ne $innoCompiler) {
-  $innoSetupToolVersion = $innoSetupRequiredVersion
-}
-$innoIdentityArgs = @("--tool", "inno-setup=$innoSetupToolVersion")
-if ($null -ne $innoCompiler) {
-  $innoIdentityArgs += @("--tool", "inno-setup-iscc-sha256=$($innoCompiler.Sha256)")
-}
+Write-Host ("Pinned Inno Setup {0} compiler resolved from the {1} location: {2}" -f $innoSetupRequiredVersion, $innoCompiler.Origin, $innoCompiler.Path)
+# Build evidence: record the pinned Inno version and the validated compiler
+# SHA in build identity and release manifest tool entries. Resolution above
+# is unconditional, so full releases always carry this evidence.
+$innoIdentityArgs = @(
+  "--tool", "inno-setup=$innoSetupRequiredVersion",
+  "--tool", "inno-setup-iscc-sha256=$($innoCompiler.Sha256)"
+)
 
 # Only after provenance and exact toolchain checks pass may previous outputs be
 # removed. Verify the entire deletion candidate has no reparse point before
@@ -559,36 +528,32 @@ $releaseArtifacts = @()
 $zipPath = "dist\rb-output-$productVersion.zip"
 
 Write-Host "Step 6/7: packaging artifacts..."
-if ($null -ne $innoCompiler) {
-  Write-Host "Building installer with pinned Inno Setup $innoSetupRequiredVersion compiler..."
-  # TOCTOU revalidation: the compiler was pinned before dist was cleaned and
-  # the payloads were built. Re-run the EXACT same resolver with the SAME
-  # captured explicit input (never a fresh environment read) and the SAME
-  # OS-derived discovery inputs immediately before the pinned binary is
-  # invoked, then require identical evidence. A compiler that vanished or was
-  # substituted after the initial pin aborts here instead of building the
-  # installer from an unverified binary.
-  $innoCompilerRevalidated = Resolve-PinnedInnoSetupCompiler `
-    -RequiredVersion $innoSetupRequiredVersion `
-    -RequiredIsccSha256 $innoSetupIsccRequiredSha256 `
-    -RequiredSignerSubjectFragment $innoSetupRequiredSignerSubjectFragment `
-    -DiscoveredRelativePath $innoSetupDiscoveredRelativePath `
-    -DiscoveredBaseDirectory $osLocalApplicationData `
-    -ExplicitPath $explicitIsccPath
-  Assert-InnoCompilerRevalidated -Resolved $innoCompiler -Revalidated $innoCompilerRevalidated
-  # Bind the invocation target and all later tool evidence to the revalidated values.
-  $innoCompiler = $innoCompilerRevalidated
-  Write-Host ("Pinned Inno Setup compiler revalidated before invocation: {0} ({1})" -f $innoCompiler.Path, $innoCompiler.Origin)
-  $iscc = $innoCompiler.Path
-  & $iscc installer.iss
-  if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed" }
-  $setupExe = "dist\DJLinkForPCDJ-setup.exe"
-  if (-not (Test-Path $setupExe)) { throw "Installer output missing: $setupExe" }
-  $releaseArtifacts += $setupExe
-  Write-Host "Done: $setupExe"
-} else {
-  Write-Host "Pinned Inno Setup compiler absent - skipping installer; the ZIP still ships (install Inno Setup 6.7.3 from https://jrsoftware.org/isdl.php or pass -IsccPath/RB_OUTPUT_ISCC_PATH pointing at an exact ISCC.exe)"
-}
+Write-Host "Building installer with pinned Inno Setup $innoSetupRequiredVersion compiler..."
+# TOCTOU revalidation: the compiler was pinned before dist was cleaned and
+# the payloads were built. Re-run the EXACT same resolver with the SAME
+# captured explicit input (never a fresh environment read) and the SAME
+# OS-derived discovery inputs immediately before the pinned binary is
+# invoked, then require identical evidence. A compiler that vanished or was
+# substituted after the initial pin aborts here instead of building the
+# installer from an unverified binary.
+$innoCompilerRevalidated = Resolve-PinnedInnoSetupCompiler `
+  -RequiredVersion $innoSetupRequiredVersion `
+  -RequiredIsccSha256 $innoSetupIsccRequiredSha256 `
+  -RequiredSignerSubjectFragment $innoSetupRequiredSignerSubjectFragment `
+  -DiscoveredRelativePath $innoSetupDiscoveredRelativePath `
+  -DiscoveredBaseDirectory $osLocalApplicationData `
+  -ExplicitPath $explicitIsccPath
+Assert-InnoCompilerRevalidated -Resolved $innoCompiler -Revalidated $innoCompilerRevalidated
+# Bind the invocation target and all later tool evidence to the revalidated values.
+$innoCompiler = $innoCompilerRevalidated
+Write-Host ("Pinned Inno Setup compiler revalidated before invocation: {0} ({1})" -f $innoCompiler.Path, $innoCompiler.Origin)
+$iscc = $innoCompiler.Path
+& $iscc installer.iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed" }
+$setupExe = "dist\DJLinkForPCDJ-setup.exe"
+if (-not (Test-Path $setupExe)) { throw "Installer output missing: $setupExe" }
+$releaseArtifacts += $setupExe
+Write-Host "Done: $setupExe"
 Compress-Archive -Path dist\server.exe, dist\inject_hook.exe, dist\content_lookup.exe, dist\native, dist\public, dist\start-rb.bat, dist\build-identity.json, dist\install-manifest.json -DestinationPath $zipPath -Force
 if (-not (Test-Path $zipPath)) { throw "ZIP output missing: $zipPath" }
 $releaseArtifacts += $zipPath
@@ -603,11 +568,9 @@ foreach ($artifact in $releaseArtifacts) {
   $releaseArgs += $artifact
 }
 $releaseArgs += "--tool"
-$releaseArgs += "inno-setup=$innoSetupToolVersion"
-if ($null -ne $innoCompiler) {
-  $releaseArgs += "--tool"
-  $releaseArgs += "inno-setup-iscc-sha256=$($innoCompiler.Sha256)"
-}
+$releaseArgs += "inno-setup=$innoSetupRequiredVersion"
+$releaseArgs += "--tool"
+$releaseArgs += "inno-setup-iscc-sha256=$($innoCompiler.Sha256)"
 node @releaseArgs
 if ($LASTEXITCODE -ne 0) { throw "Release manifest finalization failed." }
 

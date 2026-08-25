@@ -8,10 +8,14 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const SCRIPT_PATH = path.join(__dirname, "..", "scripts", "build-hook.ps1");
+const WINDOWS_DESKTOP_BOOTSTRAP_PATH = path.join(__dirname, "..", "scripts", "initialize-windows-desktop-powershell.ps1");
 const REPO_ROOT = path.join(__dirname, "..");
+const RELEASE_WORKFLOW_PATH = path.join(REPO_ROOT, ".github", "workflows", "release.yml");
 const MINHOOK_CACHE = path.join(REPO_ROOT, "native", "third_party", "minhook");
 const HOOK_SOURCE = path.join(REPO_ROOT, "native", "hookdll", "hookdll.cpp");
 const SCRIPT = fs.readFileSync(SCRIPT_PATH, "utf8");
+const WINDOWS_DESKTOP_BOOTSTRAP = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP_PATH, "utf8");
+const RELEASE_WORKFLOW = fs.readFileSync(RELEASE_WORKFLOW_PATH, "utf8");
 const MINHOOK_TAG = "v1.3.4";
 const MINHOOK_COMMIT = "c3fcafdc10146beb5919319d0683e44e3c30d537";
 // Must stay byte-identical to $bootstrapStateContent in build-hook.ps1
@@ -65,6 +69,13 @@ function runBuild(root, extraEnv = {}, pathPrefix = "", extraArgs = []) {
     ...process.env,
     ...extraEnv,
     [pathName]: `${pathPrefix}C:\\msys64\\mingw64\\bin;${inheritedPath}`,
+    // Exercise the same pwsh7/Git-Bash inherited module path that made the
+    // pre-shared bootstrap launcher fail. Production must normalize it itself.
+    PSModulePath: [
+      "C:\\Program Files\\PowerShell\\Modules",
+      "C:\\Program Files\\PowerShell\\7\\Modules",
+      "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\Modules",
+    ].join(";"),
   };
   const result = spawnSync("powershell.exe", [
     "-NoProfile",
@@ -213,6 +224,81 @@ test("build-hook pins MinHook to the reviewed immutable release commit", () => {
   assert.match(SCRIPT, new RegExp(`\\$minHookCommit\\s*=\\s*"${MINHOOK_COMMIT}"`));
   assert.equal(MINHOOK_COMMIT.length, 40);
   assert.match(MINHOOK_COMMIT, /^[0-9a-f]{40}$/);
+});
+
+test("release workflow uses only the exact MinGW root and explicit trusted-root argument", () => {
+  assert.match(RELEASE_WORKFLOW, /C:\\mingw64\\bin/);
+  assert.match(RELEASE_WORKFLOW, /run:\s+npm run build:hook -- -AdditionalTrustedCompilerRoots C:\\mingw64/);
+  assert.doesNotMatch(RELEASE_WORKFLOW, /C:\\msys64\\mingw64\\bin/);
+  assert.doesNotMatch(RELEASE_WORKFLOW, /run:\s+npm run build:hook\s*$/m);
+});
+
+test("release workflow pins Actions, serializes each tag, and revalidates before upload", () => {
+  const expectedActionPins = [
+    ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1 (Node 24)"],
+    ["actions/setup-node", "820762786026740c76f36085b0efc47a31fe5020", "v7.0.0 (Node 24)"],
+    ["actions/setup-python", "5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0 (Node 24)"],
+    ["softprops/action-gh-release", "3d0d9888cb7fd7b750713d6e236d1fcb99157228", "v3.0.2 (Node 24)"],
+  ];
+  for (const [action, commit, versionComment] of expectedActionPins) {
+    assert.ok(RELEASE_WORKFLOW.includes(`uses: ${action}@${commit}`), `missing immutable pin for ${action}`);
+    assert.ok(RELEASE_WORKFLOW.includes(`${action} ${versionComment}`), `missing version comment for ${action}`);
+  }
+  assert.doesNotMatch(RELEASE_WORKFLOW, /uses:\s+[^\r\n]+@v\d/);
+  assert.match(RELEASE_WORKFLOW, /concurrency:\s*\r?\n\s+group:\s+release-\$\{\{\s*github\.ref\s*\}\}\s*\r?\n\s+cancel-in-progress:\s+false/);
+
+  const preflightIndex = RELEASE_WORKFLOW.indexOf("run: node scripts/preflight.js");
+  const sealIndex = RELEASE_WORKFLOW.indexOf("node scripts/verify-release-artifacts.js --project-root . --expected-tag $tag");
+  const uploadIndex = RELEASE_WORKFLOW.indexOf("uses: softprops/action-gh-release@");
+  assert.ok(preflightIndex >= 0, "release workflow must rerun preflight immediately before upload");
+  assert.ok(sealIndex > preflightIndex, "release artifact seal must follow the final preflight");
+  assert.ok(uploadIndex > sealIndex, "release upload must follow the final release seal");
+});
+
+test("release workflow seals the exact v1.1.4 tag, artifacts, and compiler before upload", () => {
+  assert.match(RELEASE_WORKFLOW, /runs-on:\s+windows-2025/);
+  assert.doesNotMatch(RELEASE_WORKFLOW, /runs-on:\s+windows-latest/);
+
+  const compilerGate = RELEASE_WORKFLOW.indexOf("Require the exact non-reparse MinGW compiler");
+  const hookBuild = RELEASE_WORKFLOW.indexOf("name: Build hook DLL");
+  assert.ok(compilerGate >= 0 && hookBuild > compilerGate, "exact compiler gate must precede hook build");
+  assert.match(RELEASE_WORKFLOW, /Get-Command g\+\+\.exe -CommandType Application -ErrorAction Stop/);
+  assert.match(RELEASE_WORKFLOW, /\$expected = "C:\\mingw64\\bin\\g\+\+\.exe"/);
+  assert.match(RELEASE_WORKFLOW, /\$command\.Source -cne \$expected/);
+  assert.match(RELEASE_WORKFLOW, /ReparsePoint/);
+
+  assert.match(RELEASE_WORKFLOW, /\$expectedTag = "v1\.1\.4"/);
+  assert.match(RELEASE_WORKFLOW, /\$env:GITHUB_REF_PROTECTED -cne "true"/);
+  assert.match(RELEASE_WORKFLOW, /show-ref --verify --hash "refs\/tags\/\$tag"/);
+  assert.match(RELEASE_WORKFLOW, /cat-file -t \$tagObject/);
+  assert.match(RELEASE_WORKFLOW, /rev-parse "\$tag\^\{\}"/);
+  assert.match(RELEASE_WORKFLOW, /ls-remote --tags --refs origin "refs\/tags\/\$tag"/);
+  assert.match(RELEASE_WORKFLOW, /Get-TagBinding -ExpectedObject \$initialObject -ExpectedCommit \$githubSha/);
+  assert.match(RELEASE_WORKFLOW, /node scripts\/verify-release-artifacts\.js --project-root \. --expected-tag \$tag/);
+  assert.match(RELEASE_WORKFLOW, /tag_name:\s*\$\{\{ github\.ref_name \}\}/);
+  assert.match(RELEASE_WORKFLOW, /target_commitish:\s*\$\{\{ github\.sha \}\}/);
+  assert.match(RELEASE_WORKFLOW, /dist\/rb-output-1\.1\.4\.zip/);
+  assert.doesNotMatch(RELEASE_WORKFLOW, /dist\/rb-output-\*\.zip/);
+});
+
+test("build-hook shares the exact fail-closed Windows PowerShell inbox boundary", () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  assert.equal(
+    packageJson.scripts["build:hook"],
+    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-hook.ps1",
+  );
+  const bootstrapPathIndex = SCRIPT.indexOf("[System.IO.Path]::Combine($PSScriptRoot, \"initialize-windows-desktop-powershell.ps1\")");
+  const dotSourceIndex = SCRIPT.indexOf(". $windowsDesktopBootstrapPath");
+  const invocationIndex = SCRIPT.search(/^Initialize-WindowsDesktopPowerShellBuildEnvironment$/m);
+  const projectRootIndex = SCRIPT.indexOf("if ([string]::IsNullOrWhiteSpace($ProjectRoot))");
+  assert.ok(bootstrapPathIndex >= 0 && dotSourceIndex > bootstrapPathIndex, "build-hook does not load the shared Windows PowerShell bootstrap through .NET");
+  assert.ok(invocationIndex > dotSourceIndex && projectRootIndex > invocationIndex, "build-hook must normalize the PowerShell module path before project work");
+  assert.doesNotMatch(SCRIPT, /function\s+Initialize-WindowsDesktopPowerShellBuildEnvironment/);
+  assert.match(SCRIPT, /\[System\.IO\.FileInfo\]::new\(\$windowsDesktopBootstrapPath\)/);
+  assert.match(SCRIPT, /windowsDesktopBootstrapItem\.Attributes\s+-band\s+\[System\.IO\.FileAttributes\]::ReparsePoint/);
+  assert.match(WINDOWS_DESKTOP_BOOTSTRAP, /\$PSVersionTable\.PSEdition\s+-cne\s+"Desktop"/);
+  assert.match(WINDOWS_DESKTOP_BOOTSTRAP, /\$env:PSModulePath\s*=\s+\$nativeModuleDirectory/);
+  assert.match(WINDOWS_DESKTOP_BOOTSTRAP, /Get-Command\s+-Name\s+\$requiredCommand\.Name\s+-All\s+-ErrorAction\s+SilentlyContinue/);
 });
 
 test("build-hook fetches and verifies the pin without using a moving default branch", () => {

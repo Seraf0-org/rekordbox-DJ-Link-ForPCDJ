@@ -1340,7 +1340,7 @@ test("explicit master change activates an already-playing deck exactly once", ()
   });
   detector.onMasterChange({ deck: 2 });
   detector.onMasterChange({ deck: 2 });
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_CHANGED").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_MASTER_CHANGED").length, 0);
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
   assert.equal(events.find((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").payload.contentId, "b");
 });
@@ -1940,15 +1940,22 @@ test("Syndocal defaults use /dj-link, strict v2, five-second heartbeat, ws, and 
   assert.equal(unknown.skipped, true);
   assert.equal(unknown.reason, "unsupported-type");
   assert.equal(socket.sent.length, sentBeforeUnknown);
+  const retiredMasterChanged = client.sendEvent({
+    type: "DJ_MASTER_CHANGED",
+    payload: { deck: 1, source: "must-not-cross-wire" },
+  });
+  assert.equal(retiredMasterChanged.skipped, true);
+  assert.equal(retiredMasterChanged.reason, "unsupported-type");
+  assert.equal(socket.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
   for (let index = 0; index < 8; index += 1) {
     client.sendEvent({
-      type: "DJ_MASTER_CHANGED",
-      payload: { deck: index + 1, source: "must-not-cross-wire" },
+      type: "DJ_TIMELINE_BEAT_JUMP",
+      payload: { bars: index % 2 === 0 ? -4 : 4, timelineId: "history-bound" },
     });
   }
   assert.equal(client.getStatus().deliveryHistoryMax, 3);
   assert.equal(client.getStatus().deliveryHistorySize, 3);
-  assert.equal(client.getStatus().lastDelivery.type, "DJ_MASTER_CHANGED");
+  assert.equal(client.getStatus().lastDelivery.type, "DJ_TIMELINE_BEAT_JUMP");
 });
 
 test("Syndocal delivery stays pending until ACK and records rejection/timeout", async (t) => {
@@ -2181,7 +2188,7 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   assert.equal(client.getStatus().pendingAcks, 1);
 });
 
-test("every physical event waits for typed ACK outcomes, including master and timeline events", async (t) => {
+test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CHANGED cannot be queued, delivered, or retried", async (t) => {
   class PhysicalAckWebSocket extends EventEmitter {
     static instances = [];
 
@@ -2229,15 +2236,19 @@ test("every physical event waits for typed ACK outcomes, including master and ti
     )));
   };
 
-  const acceptedMaster = client.sendEvent({
+  const retiredMaster = client.sendEvent({
     type: "DJ_MASTER_CHANGED",
+    eventId: "retired-master-changed",
     payload: { deck: 2, isPlaying: true, master: true },
   });
-  assert.equal(acceptedMaster.sent, true);
-  assert.equal(acceptedMaster.ok, false);
-  assert.equal(acceptedMaster.state, "pending");
-  ack(acceptedMaster, "accepted");
-  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
+  assert.equal(retiredMaster.sent, false);
+  assert.equal(retiredMaster.ok, false);
+  assert.equal(retiredMaster.skipped, true);
+  assert.equal(retiredMaster.reason, "unsupported-type");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().deliveryHistorySize, 0);
+  assert.equal(client.getStatus().lastDelivery, null);
+  assert.equal(socket.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
 
   const rejectedTrack = client.sendEvent({
     type: "DJ_MASTER_TRACK_ACTIVE",

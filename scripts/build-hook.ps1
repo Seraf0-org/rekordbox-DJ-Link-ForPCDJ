@@ -11,6 +11,88 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$windowsDesktopBootstrapPath = [System.IO.Path]::Combine($PSScriptRoot, "initialize-windows-desktop-powershell.ps1")
+$windowsDesktopBootstrapItem = [System.IO.FileInfo]::new($windowsDesktopBootstrapPath)
+if (-not $windowsDesktopBootstrapItem.Exists -or ($windowsDesktopBootstrapItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+  throw "Windows PowerShell bootstrap helper must be a normal non-reparse file: $windowsDesktopBootstrapPath"
+}
+. $windowsDesktopBootstrapPath
+Initialize-WindowsDesktopPowerShellBuildEnvironment
+
+# Never implicitly adopt compiler, include, or linker configuration from the
+# caller.  Visual Studio's vcvars64.bat is the sole allowed producer of the
+# MSVC INCLUDE/LIB/LIBPATH variables, and it is invoked later from a verified
+# machine installation.  Empty-but-present variables are rejected as well so
+# an invoking shell cannot make acceptance depend on shell-specific semantics.
+$callerControlledCompilerEnvironmentNames = @(
+  "CC",
+  "CXX",
+  "CFLAGS",
+  "CXXFLAGS",
+  "CPPFLAGS",
+  "CPATH",
+  "C_INCLUDE_PATH",
+  "CPLUS_INCLUDE_PATH",
+  "OBJC_INCLUDE_PATH",
+  "COMPILER_PATH",
+  "GCC_EXEC_PREFIX",
+  "LIBRARY_PATH",
+  "INCLUDE",
+  "LIB",
+  "LIBPATH",
+  "CL",
+  "_CL_",
+  "LINK",
+  "_LINK_",
+  "VCINSTALLDIR",
+  "VCToolsInstallDir",
+  "VSINSTALLDIR",
+  "WindowsSdkDir",
+  "WindowsSDKVersion",
+  "UniversalCRTSdkDir",
+  "UCRTVersion"
+)
+
+function Assert-NoCallerCompilerEnvironmentOverrides {
+  param([Parameter(Mandatory)] [string]$Phase)
+
+  foreach ($name in $callerControlledCompilerEnvironmentNames) {
+    if ($null -ne [Environment]::GetEnvironmentVariable($name, "Process")) {
+      throw "Caller compiler environment override is set during ${Phase}: $name"
+    }
+  }
+}
+
+function Assert-MsvcEnvironmentWasInitializedByVcvars {
+  $vcvarsProducedEnvironmentNames = @(
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "VCINSTALLDIR",
+    "VCToolsInstallDir",
+    "VSINSTALLDIR",
+    "WindowsSdkDir",
+    "WindowsSDKVersion",
+    "UniversalCRTSdkDir",
+    "UCRTVersion"
+  )
+  foreach ($name in @("INCLUDE", "LIB", "LIBPATH")) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name, "Process"))) {
+      throw "vcvars64 did not provide required MSVC environment variable: $name"
+    }
+  }
+  foreach ($name in $callerControlledCompilerEnvironmentNames) {
+    if ($name -in $vcvarsProducedEnvironmentNames) {
+      continue
+    }
+    if ($null -ne [Environment]::GetEnvironmentVariable($name, "Process")) {
+      throw "vcvars64 produced a prohibited compiler override environment variable: $name"
+    }
+  }
+}
+
+Assert-NoCallerCompilerEnvironmentOverrides -Phase "build start"
+
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
@@ -288,6 +370,135 @@ function Invoke-TrustedNativeExecutable {
   return [pscustomobject]@{
     StdOut = @($standardOutputLines)
     StdErr = @($standardErrorLines)
+  }
+}
+
+function Get-TrustedFileEvidence {
+  param(
+    [Parameter(Mandatory)] [string]$Path,
+    [Parameter(Mandatory)] [string]$Label
+  )
+
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  Assert-RegularFile -Path $fullPath -Label $Label
+  Assert-NoReparsePathChain -Path $fullPath -Label $Label
+  $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+  $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToUpperInvariant()
+  return [pscustomobject]@{
+    Path = $fullPath
+    Length = [Int64]$item.Length
+    Sha256 = $hash
+  }
+}
+
+function Assert-TrustedFileEvidence {
+  param(
+    [Parameter(Mandatory)] $Evidence,
+    [Parameter(Mandatory)] [string]$Label
+  )
+
+  $current = Get-TrustedFileEvidence -Path $Evidence.Path -Label $Label
+  if (
+    $current.Path -cne $Evidence.Path -or
+    $current.Length -ne $Evidence.Length -or
+    $current.Sha256 -cne $Evidence.Sha256
+  ) {
+    throw "$Label bytes or identity changed during hook build: $($Evidence.Path)"
+  }
+  return $current
+}
+
+function Get-CompilerEvidence {
+  param(
+    [Parameter(Mandatory)] [ValidateSet("g++", "cl")] [string]$CompilerKind,
+    [Parameter(Mandatory)] [string]$CompilerPath
+  )
+
+  $fileEvidence = Get-TrustedFileEvidence -Path $CompilerPath -Label "$CompilerKind compiler"
+  $versionArguments = if ($CompilerKind -ceq "g++") { @("--version") } else { @("/Bv") }
+  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$CompilerKind version probe" -ExecutablePath $fileEvidence.Path -ArgumentList $versionArguments
+  $version = (@($versionInvocation.StdOut) + @($versionInvocation.StdErr) -join "`n").Trim()
+  if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "$CompilerKind version probe returned no evidence"
+  }
+  return [pscustomobject]@{
+    CompilerKind = $CompilerKind
+    Path = $fileEvidence.Path
+    Length = $fileEvidence.Length
+    Sha256 = $fileEvidence.Sha256
+    Version = $version
+  }
+}
+
+function Assert-CompilerEvidence {
+  param([Parameter(Mandatory)] $Evidence)
+
+  $currentFile = Get-TrustedFileEvidence -Path $Evidence.Path -Label "$($Evidence.CompilerKind) compiler"
+  if (
+    $currentFile.Path -cne $Evidence.Path -or
+    $currentFile.Length -ne $Evidence.Length -or
+    $currentFile.Sha256 -cne $Evidence.Sha256
+  ) {
+    throw "$($Evidence.CompilerKind) compiler path or bytes changed during hook build: $($Evidence.Path)"
+  }
+  $versionArguments = if ($Evidence.CompilerKind -ceq "g++") { @("--version") } else { @("/Bv") }
+  $versionInvocation = Invoke-TrustedNativeExecutable -Label "$($Evidence.CompilerKind) version recheck" -ExecutablePath $Evidence.Path -ArgumentList $versionArguments
+  $version = (@($versionInvocation.StdOut) + @($versionInvocation.StdErr) -join "`n").Trim()
+  if ($version -cne $Evidence.Version) {
+    throw "$($Evidence.CompilerKind) compiler version evidence changed during hook build: $($Evidence.Path)"
+  }
+}
+
+function Assert-HookDllOutput {
+  param([Parameter(Mandatory)] [string]$Path)
+
+  $evidence = Get-TrustedFileEvidence -Path $Path -Label "Hook DLL output"
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = [System.IO.File]::Open(
+      $evidence.Path,
+      [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Read,
+      [System.IO.FileShare]::Read
+    )
+    $reader = New-Object System.IO.BinaryReader($stream)
+    if ($stream.Length -lt 64 -or $reader.ReadByte() -ne 0x4d -or $reader.ReadByte() -ne 0x5a) {
+      throw "Hook DLL output is not an MZ executable: $($evidence.Path)"
+    }
+    $stream.Position = 0x3c
+    $peOffset = $reader.ReadInt32()
+    if ($peOffset -lt 0x40 -or ([Int64]$peOffset + 24) -gt $stream.Length) {
+      throw "Hook DLL output has an invalid PE offset: $($evidence.Path)"
+    }
+    $stream.Position = $peOffset
+    if ($reader.ReadUInt32() -ne [UInt32]0x00004550) {
+      throw "Hook DLL output is missing the PE signature: $($evidence.Path)"
+    }
+    if ($reader.ReadUInt16() -ne [UInt16]0x8664) {
+      throw "Hook DLL output is not AMD64: $($evidence.Path)"
+    }
+    $stream.Position = [Int64]$peOffset + 22
+    $characteristics = $reader.ReadUInt16()
+    if (($characteristics -band 0x2000) -eq 0) {
+      throw "Hook DLL output is not marked as a DLL PE image: $($evidence.Path)"
+    }
+  } finally {
+    if ($null -ne $reader) {
+      $reader.Dispose()
+    } elseif ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
+  # A replacement after the PE parse must not let a different file inherit the
+  # already-accepted metadata. Re-hash and re-check normal-file/reparse state
+  # once the file handle is closed, then record evidence only for those bytes.
+  $finalEvidence = Assert-TrustedFileEvidence -Evidence $evidence -Label "Hook DLL output"
+  return [pscustomobject]@{
+    Path = $finalEvidence.Path
+    Sha256 = $finalEvidence.Sha256
+    Length = $finalEvidence.Length
+    Machine = "AMD64"
   }
 }
 
@@ -916,6 +1127,43 @@ function Assert-MinHookRemoteTag {
   }
 }
 
+function Get-HookCompileInputEvidence {
+  param(
+    [Parameter(Mandatory)] [string]$HookSourcePath,
+    [Parameter(Mandatory)] [ValidateSet("g++", "cl")] [string]$CompilerKind,
+    [Parameter(Mandatory)] [string]$CompilerPath
+  )
+
+  Assert-MinHookCheckout
+  $head = Get-MinHookHead
+  if ($head.ObjectType -cne "commit" -or $head.Commit -cne $minHookCommit) {
+    throw "MinHook identity is not the reviewed pin immediately before compile"
+  }
+  Assert-MinHookTreeAndWorktree -Commit $minHookCommit
+  $evidence = [pscustomobject]@{
+    HookSource = Get-TrustedFileEvidence -Path $HookSourcePath -Label "hookdll.cpp source"
+    Compiler = Get-CompilerEvidence -CompilerKind $CompilerKind -CompilerPath $CompilerPath
+    MinHookCommit = $head.Commit
+  }
+  Write-Host "Hook compiler evidence: kind=$($evidence.Compiler.CompilerKind) path=$($evidence.Compiler.Path) sha256=$($evidence.Compiler.Sha256)"
+  Write-Host "Hook source evidence: path=$($evidence.HookSource.Path) sha256=$($evidence.HookSource.Sha256)"
+  Write-Host "MinHook evidence: commit=$($evidence.MinHookCommit)"
+  return $evidence
+}
+
+function Assert-HookCompileInputEvidence {
+  param([Parameter(Mandatory)] $Evidence)
+
+  Assert-TrustedFileEvidence -Evidence $Evidence.HookSource -Label "hookdll.cpp source" | Out-Null
+  Assert-CompilerEvidence -Evidence $Evidence.Compiler
+  Assert-MinHookCheckout
+  $head = Get-MinHookHead
+  if ($head.ObjectType -cne "commit" -or $head.Commit -cne $Evidence.MinHookCommit -or $head.Commit -cne $minHookCommit) {
+    throw "MinHook identity changed during hook build"
+  }
+  Assert-MinHookTreeAndWorktree -Commit $minHookCommit
+}
+
 # Operator-supplied roots are validated up front with exactly the rules an
 # OS-derived trusted root must satisfy, before anything on disk or network is
 # touched and before any compiler or tool path is accepted beneath them.
@@ -1110,16 +1358,23 @@ $sources = @(
 
 Write-Host "Building hook DLL..."
 $compilerInstallationRoots = @(Get-TrustedCompilerInstallationRoots) + $validatedAdditionalCompilerRoots
+$compileInputEvidence = $null
 $gxxExecutable = Assert-TrustedNativeCompilerExecutable -CommandName "g++" -ExecutableFileName "g++.exe" -TrustedRoots $compilerInstallationRoots
 if ($gxxExecutable) {
+  Assert-NoCallerCompilerEnvironmentOverrides -Phase "g++ invocation"
   $gxxArgs = @(
     "-std=gnu++17",
     "-O2",
+    "-m64",
     "-shared",
     "-s",
     "-static-libgcc",
     "-static-libstdc++",
     "-DWIN32_LEAN_AND_MEAN",
+    "-D_WIN32_WINNT=0x0600",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
     "-I$mhInclude",
     "-I$mhSrc"
   ) + $sources + @(
@@ -1127,6 +1382,8 @@ if ($gxxExecutable) {
     "-o",
     $dllOut
   )
+  $compileInputEvidence = Get-HookCompileInputEvidence -HookSourcePath $hookCpp -CompilerKind "g++" -CompilerPath $gxxExecutable
+  Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
   $gxxInvocation = Invoke-TrustedNativeExecutable -Label "g++" -ExecutablePath $gxxExecutable -ArgumentList $gxxArgs
   foreach ($line in (@($gxxInvocation.StdOut) + @($gxxInvocation.StdErr))) {
     if (-not [string]::IsNullOrWhiteSpace($line)) {
@@ -1206,6 +1463,7 @@ if ($gxxExecutable) {
       [Environment]::SetEnvironmentVariable($name, $value, "Process")
     }
   }
+  Assert-MsvcEnvironmentWasInitializedByVcvars
 
   $objectDir = Join-Path $outDir "obj"
   if (-not (Test-Path $objectDir)) {
@@ -1219,7 +1477,10 @@ if ($gxxExecutable) {
     "/O2",
     "/LD",
     "/EHsc",
+    "/W4",
+    "/WX",
     "/DWIN32_LEAN_AND_MEAN",
+    "/D_WIN32_WINNT=0x0600",
     "/I$mhInclude",
     "/I$mhSrc"
   ) + $sources + @(
@@ -1250,6 +1511,8 @@ if ($gxxExecutable) {
       throw "First linker on PATH is not the pinned MSVC link.exe beside cl.exe; refusing so Git usr\bin\link.exe can never win: $firstLinkerPath"
     }
 
+    $compileInputEvidence = Get-HookCompileInputEvidence -HookSourcePath $hookCpp -CompilerKind "cl" -CompilerPath $clExecutable
+    Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
     $clInvocation = Invoke-TrustedNativeExecutable -Label "cl" -ExecutablePath $clExecutable -ArgumentList $clArgs
     foreach ($line in (@($clInvocation.StdOut) + @($clInvocation.StdErr))) {
       if (-not [string]::IsNullOrWhiteSpace($line)) {
@@ -1262,24 +1525,23 @@ if ($gxxExecutable) {
 }
 
 try {
-  # Re-read config, object identity, tree modes/blob IDs, index flags, and raw
-  # worktree hashes after the compiler returns. A source/config race during
-  # compilation therefore cannot leave a DLL that was built from unverified
-  # bytes; only the exact requested DLL output is removed on failure.
-  Assert-MinHookCheckout
-  $postCompileMinHook = Get-MinHookHead
-  if ($postCompileMinHook.ObjectType -cne "commit" -or $postCompileMinHook.Commit -cne $minHookCommit) {
-    throw "MinHook identity changed after compile"
+  if ($null -eq $compileInputEvidence) {
+    throw "Hook compiler invocation did not produce pre-compile provenance evidence"
   }
-  Assert-MinHookTreeAndWorktree -Commit $minHookCommit
+  # Re-read the exact first-party source bytes, compiler path/hash/version,
+  # and full pinned MinHook worktree after native compilation. A swap in the
+  # compile window can therefore never leave an accepted DLL behind.
+  Assert-HookCompileInputEvidence -Evidence $compileInputEvidence
+  $dllEvidence = Assert-HookDllOutput -Path $dllOut
 } catch {
   $postCompileError = $_.Exception.Message
   try {
     Remove-ExactDllOutput
   } catch {
-    throw "MinHook post-compile verification failed ($postCompileError), and exact DLL cleanup failed: $($_.Exception.Message)"
+    throw "Hook post-compile verification failed ($postCompileError), and exact DLL cleanup failed: $($_.Exception.Message)"
   }
-  throw "MinHook source/config changed or became unverifiable after compile; exact DLL output removed: $postCompileError"
+  throw "Hook post-compile verification failed; source/compiler/MinHook/output became unverifiable and exact DLL output was removed: $postCompileError"
 }
 
+Write-Host "Hook DLL evidence: path=$($dllEvidence.Path) machine=$($dllEvidence.Machine) sha256=$($dllEvidence.Sha256)"
 Write-Host "Built: $dllOut"

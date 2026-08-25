@@ -2,6 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
+echo [rb-output] SOURCE DEVELOPMENT launcher
+echo [rb-output] Installed/live operation must use the DJLinkForPCDJ shortcut.
 echo [rb-output] starting...
 
 if not exist ".venv\Scripts\python.exe" (
@@ -25,16 +27,14 @@ if not exist ".venv\Scripts\python.exe" (
   )
 )
 
-if not exist "native\bin\rb_hook.dll" (
-  echo [rb-output] rb_hook.dll not found. building...
-  call npm run build:hook
-  if errorlevel 1 (
-    echo.
-    echo [ERROR] DLL build failed. Is g++ or Visual Studio C++ Build Tools installed?
-    echo.
-    pause
-    exit /b 1
-  )
+echo [rb-output] rebuilding and verifying rb_hook.dll...
+call npm run build:hook
+if errorlevel 1 (
+  echo.
+  echo [ERROR] DLL build or provenance verification failed.
+  echo.
+  pause
+  exit /b 1
 )
 
 powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"

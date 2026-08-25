@@ -233,6 +233,328 @@ test("detector delays active until complete, emits one active per session, and f
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
 });
 
+test("master switch emits one fresh strict ACTIVE then one strictly newer SYNC without duplicate activation", () => {
+  let nextId = 0;
+  let now = NOW;
+  const detector = createTrackActivityDetector({
+    now: () => now,
+    idFactory: () => `master-switch-${++nextId}`,
+  });
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+  const candidatePlayback = (positionRevision, positionSec) => ({
+    deck: 2,
+    isPlaying: true,
+    bpm: 128,
+    positionSec,
+    positionRevision,
+    positionObservedAt: new Date(now).toISOString(),
+  });
+  const snapshot = (playback) => detector.onSnapshot({
+    explicitMasterDeck: 2,
+    deckNowPlaying: [{
+      deck: 2,
+      contentId: "deck-2-content",
+      title: "Incoming",
+      artist: "DSF",
+      trackBpm: 128,
+    }],
+    deckPlaybacks: [playback],
+  });
+
+  // A complete, fresh non-master candidate must not activate merely because it
+  // is playing. The explicit master event is the activation authority.
+  detector.onSnapshot({
+    masterDeck: 1,
+    deckNowPlaying: [{
+      deck: 2,
+      contentId: "deck-2-content",
+      title: "Incoming",
+      artist: "DSF",
+      trackBpm: 128,
+    }],
+    deckPlaybacks: [candidatePlayback(10, 32.5)],
+  });
+  assert.deepEqual(
+    events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE" || event.type === "DJ_MASTER_TRACK_SYNC"),
+    [],
+  );
+
+  detector.onMasterChange({ deck: 2 });
+  detector.onMasterChange({ deck: 2 });
+  const activationEvents = () => events.filter(
+    (event) => event.type === "DJ_MASTER_TRACK_ACTIVE" || event.type === "DJ_MASTER_TRACK_SYNC",
+  );
+  assert.deepEqual(activationEvents().map((event) => event.type), ["DJ_MASTER_TRACK_ACTIVE"]);
+  const active = activationEvents()[0];
+  assert.equal(active.payload.deck, 2);
+  assert.equal(active.payload.deckId, "rekordbox-deck-2");
+  assert.equal(active.payload.masterDeckRevision, 2);
+  assert.equal(active.payload.contentId, "deck-2-content");
+  assert.equal(active.payload.positionAtSendSec, 32.5);
+  assert.equal(active.payload.effectiveBpm, 128);
+  assert.equal(active.payload.positionRevision, 10);
+  assert.equal(active.payload.sampleAgeMs, 0);
+  assert.equal(active.payload.isPlaying, true);
+  assert.equal(active.payload.master, true);
+  assert.ok(active.payload.playSessionId);
+  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  const activeFrame = adapter.encodeEvent({
+    type: active.type,
+    eventId: active.eventId,
+    sequence: 1,
+    payload: active.payload,
+  });
+  assertV2Frame(activeFrame, "DJ_MASTER_TRACK_ACTIVE");
+  assert.deepEqual(activeFrame.payload, active.payload);
+
+  // Equal revision cannot duplicate either transition; only a strictly newer,
+  // fresh sample may advance the active play session to SYNC.
+  snapshot(candidatePlayback(10, 32.5));
+  assert.deepEqual(activationEvents().map((event) => event.type), ["DJ_MASTER_TRACK_ACTIVE"]);
+  now += 1;
+  snapshot(candidatePlayback(11, 33));
+  assert.deepEqual(
+    activationEvents().map((event) => event.type),
+    ["DJ_MASTER_TRACK_ACTIVE", "DJ_MASTER_TRACK_SYNC"],
+  );
+  const sync = activationEvents()[1];
+  assert.equal(sync.payload.playSessionId, active.payload.playSessionId);
+  assert.equal(sync.payload.masterDeckRevision, active.payload.masterDeckRevision);
+  assert.equal(sync.payload.positionRevision, 11);
+  assert.equal(sync.payload.positionAtSendSec, 33);
+  assert.equal(sync.payload.sampleAgeMs, 0);
+  const syncFrame = adapter.encodeEvent({
+    type: sync.type,
+    eventId: sync.eventId,
+    sequence: 2,
+    payload: sync.payload,
+  });
+  assertV2Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
+  assert.deepEqual(syncFrame.payload, sync.payload);
+});
+
+test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the explicit master generation", () => {
+  let nextId = 0;
+  let now = NOW;
+  const detector = createTrackActivityDetector({
+    now: () => now,
+    idFactory: () => `authority-${++nextId}`,
+  });
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+  const transitions = () => events.filter(
+    (event) => event.type === "DJ_MASTER_TRACK_ACTIVE" || event.type === "DJ_MASTER_TRACK_SYNC",
+  );
+  const deck2Playback = (positionRevision, positionSec) => ({
+    deck: 2,
+    isPlaying: true,
+    bpm: 128,
+    positionSec,
+    positionRevision,
+    positionObservedAt: new Date(now).toISOString(),
+  });
+  const deck2SnapshotFields = {
+    deckNowPlaying: [{ deck: 2, contentId: "incoming", title: "Incoming", artist: "DSF", trackBpm: 128 }],
+    deckPlaybacks: [deck2Playback(10, 32.5)],
+  };
+
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    deckNowPlaying: [{ deck: 1, contentId: "outgoing", title: "Outgoing", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [{
+      deck: 1,
+      isPlaying: true,
+      bpm: 120,
+      positionSec: 8,
+      positionRevision: 5,
+      positionObservedAt: new Date(now).toISOString(),
+    }],
+  });
+  assert.deepEqual(
+    transitions().map((event) => [event.type, event.payload.deck]),
+    [["DJ_MASTER_TRACK_ACTIVE", 1]],
+  );
+  const activeOne = transitions()[0];
+  assert.equal(activeOne.payload.masterDeckRevision, 1);
+  const outgoingSession = activeOne.payload.playSessionId;
+
+  // Reproduced P0 seam: a snapshot reporting a conflicting non-explicit
+  // masterDeck while deck 1 is the established explicit master must not
+  // advance the activation generation or rearm ACTIVE for deck 1.
+  const beforeConflict = events.length;
+  detector.onSnapshot({ masterDeck: 2, masterDeckSource: "snapshot", ...deck2SnapshotFields });
+  assert.equal(detector.getState().explicitMasterDeck, 1);
+  assert.equal(detector.getState().currentMasterDeck, 1);
+  assert.equal(detector.getState().masterDeckSource, "explicit");
+  assert.equal(detector.getState().decks[1].lastActiveMasterGeneration, 1);
+  assert.equal(events.slice(beforeConflict).filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
+  assert.deepEqual(transitions(), [activeOne]);
+
+  // The later actual explicit handover activates deck 2 exactly once.
+  detector.onMasterChange({ logicalDeck: 2 });
+  assert.deepEqual(transitions().map((event) => event.type), [
+    "DJ_MASTER_TRACK_ACTIVE",
+    "DJ_MASTER_TRACK_ACTIVE",
+  ]);
+  const activeTwo = transitions()[1];
+  assert.equal(activeTwo.payload.deck, 2);
+  assert.equal(activeTwo.payload.masterDeckRevision, 2);
+  assert.equal(activeTwo.payload.contentId, "incoming");
+  assert.equal(activeTwo.payload.positionRevision, 10);
+  assert.notEqual(activeTwo.payload.playSessionId, outgoingSession);
+
+  // Same revision stays silent; only a strictly newer fresh sample SYNCs once.
+  const beforeSameRevision = events.length;
+  detector.onSnapshot({ explicitMasterDeck: 2, ...deck2SnapshotFields });
+  assert.equal(events.length, beforeSameRevision);
+
+  now += 1;
+  detector.onSnapshot({
+    explicitMasterDeck: 2,
+    deckNowPlaying: [{ deck: 2, contentId: "incoming", title: "Incoming", artist: "DSF", trackBpm: 128 }],
+    deckPlaybacks: [deck2Playback(11, 33)],
+  });
+  assert.deepEqual(transitions().map((event) => event.type), [
+    "DJ_MASTER_TRACK_ACTIVE",
+    "DJ_MASTER_TRACK_ACTIVE",
+    "DJ_MASTER_TRACK_SYNC",
+  ]);
+  const sync = transitions()[2];
+  assert.equal(sync.payload.deck, 2);
+  assert.equal(sync.payload.masterDeckRevision, 2);
+  assert.equal(sync.payload.playSessionId, activeTwo.payload.playSessionId);
+  assert.equal(sync.payload.positionRevision, 11);
+
+  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  const activeTwoFrame = adapter.encodeEvent({
+    type: activeTwo.type,
+    eventId: activeTwo.eventId,
+    sequence: 1,
+    payload: activeTwo.payload,
+  });
+  assertV2Frame(activeTwoFrame, "DJ_MASTER_TRACK_ACTIVE");
+  assert.deepEqual(activeTwoFrame.payload, activeTwo.payload);
+  const syncFrame = adapter.encodeEvent({
+    type: sync.type,
+    eventId: sync.eventId,
+    sequence: 2,
+    payload: sync.payload,
+  });
+  assertV2Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
+  assert.deepEqual(syncFrame.payload, sync.payload);
+});
+
+test("stale explicit snapshot cannot roll back an explicit master-change authority fence", () => {
+  let nextId = 0;
+  let now = NOW;
+  const detector = createTrackActivityDetector({
+    now: () => now,
+    idFactory: () => `authority-fence-${++nextId}`,
+  });
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+  const authorityEvents = () => events.filter((event) => [
+    "DJ_MASTER_TRACK_ACTIVE",
+    "DJ_MASTER_TRACK_SYNC",
+    "DJ_LOOP_STATE",
+  ].includes(event.type));
+  const deckSnapshot = (deck, positionRevision, positionSec) => ({
+    deckNowPlaying: [{
+      deck,
+      contentId: `content-${deck}`,
+      title: `Deck ${deck}`,
+      artist: "DSF",
+      trackBpm: deck === 1 ? 120 : 128,
+    }],
+    deckPlaybacks: [{
+      deck,
+      isPlaying: true,
+      bpm: deck === 1 ? 120 : 128,
+      positionSec,
+      positionRevision,
+      positionObservedAt: new Date(now).toISOString(),
+    }],
+  });
+  const authorityAtOne = new Date(NOW).toISOString();
+  const authorityAtTwo = new Date(NOW + 1).toISOString();
+  const authorityAtThree = new Date(NOW + 2).toISOString();
+
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    ...deckSnapshot(1, 1, 8),
+  });
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    ...deckSnapshot(2, 1, 32),
+  });
+  assert.deepEqual(
+    authorityEvents().map((event) => [event.type, event.payload.deck, event.payload.masterDeckRevision]),
+    [["DJ_MASTER_TRACK_ACTIVE", 1, 1]],
+  );
+
+  now = NOW + 1;
+  detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAtTwo });
+  assert.deepEqual(
+    authorityEvents().map((event) => [event.type, event.payload.deck, event.payload.masterDeckRevision]),
+    [
+      ["DJ_MASTER_TRACK_ACTIVE", 1, 1],
+      ["DJ_MASTER_TRACK_ACTIVE", 2, 2],
+    ],
+  );
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+
+  // This delayed snapshot is a complete old authority state. It must neither
+  // replace deck 2 nor contribute any track/loop event after the fence.
+  const beforeStaleSnapshot = events.length;
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtOne,
+    ...deckSnapshot(1, 2, 9),
+    loopStates: [{
+      deck: 1,
+      activeKnown: true,
+      active: true,
+      startBeat: 16,
+      endBeat: 24,
+      lengthBeats: 8,
+      revision: 1,
+      source: "rekordbox-hook",
+      updatedAt: new Date(now).toISOString(),
+    }],
+  });
+  assert.deepEqual(events.slice(beforeStaleSnapshot), []);
+  assert.equal(detector.getState().currentMasterDeck, 2);
+  assert.equal(detector.getState().explicitMasterDeck, 2);
+  assert.equal(detector.getState().masterDeckRevision, 2);
+  assert.equal(detector.getState().explicitMasterAuthorityRevision, 2);
+
+  // A strictly newer explicit snapshot is an authority transition and can
+  // activate deck 1 once; replaying that same authority is silent.
+  now = NOW + 2;
+  const newerDeckOne = {
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: authorityAtThree,
+    ...deckSnapshot(1, 3, 10),
+  };
+  detector.onSnapshot(newerDeckOne);
+  detector.onSnapshot(newerDeckOne);
+  assert.deepEqual(
+    authorityEvents().map((event) => [event.type, event.payload.deck, event.payload.masterDeckRevision]),
+    [
+      ["DJ_MASTER_TRACK_ACTIVE", 1, 1],
+      ["DJ_MASTER_TRACK_ACTIVE", 2, 2],
+      ["DJ_MASTER_TRACK_ACTIVE", 1, 3],
+    ],
+  );
+  assert.equal(detector.getState().currentMasterDeck, 1);
+  assert.equal(detector.getState().masterDeckRevision, 3);
+  assert.equal(detector.getState().explicitMasterAuthorityRevision, 3);
+});
+
 test("delayed exact track identity and later authoritative contentId keep one play session and one ACTIVE", () => {
   let nextId = 0;
   const detector = createTrackActivityDetector({ now: () => NOW, idFactory: () => `id-${++nextId}` });
@@ -502,6 +824,22 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function waitForEvent(emitter, name, predicate, { timeoutMs = 500, label = name } = {}) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      emitter.off(name, onEvent);
+      reject(new Error(`Timed out waiting for ${label}`));
+    }, timeoutMs);
+    const onEvent = (value) => {
+      if (!predicate(value)) return;
+      clearTimeout(timeout);
+      emitter.off(name, onEvent);
+      resolve(value);
+    };
+    emitter.on(name, onEvent);
+  });
+}
+
 test("ACK reconnect retry preserves eventId/playSession exactly once and uses a fresh v2 session", async (t) => {
   V2WebSocket.instances = [];
   const client = createSyndocalClient({
@@ -527,11 +865,16 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   assert.equal(sent.state, "pending");
   const firstFrame = first.sent.find((frame) => frame.eventId === "active-reconnect");
   assertV2Frame(firstFrame, "DJ_MASTER_TRACK_ACTIVE");
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "ACK retry reconnect" },
+  );
   first.readyState = 3;
   first.emit("close", 1006, "test-reconnect");
   assert.equal(client.getStatus().lastDelivery.state, "retrying");
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  await flush();
+  await reconnect;
   const second = V2WebSocket.instances[1];
   const replay = second.sent.find((frame) => frame.eventId === "active-reconnect");
   assertV2Frame(replay, "DJ_MASTER_TRACK_ACTIVE");
@@ -693,10 +1036,15 @@ test("continuous TRACK_SYNC exceeds the durable ID budget without storage, repla
   const firstCountBeforeReconnect = first.syncCount;
   const firstSessionId = first.lastSync.sessionId;
 
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "TRACK_SYNC endurance reconnect" },
+  );
   first.readyState = 3;
   first.emit("close", 1006, "endurance-reconnect");
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  await flush();
+  await reconnect;
   const second = EnduranceWebSocket.instances[1];
   assert.equal(second.syncCount, 0);
   assert.equal(first.syncCount, firstCountBeforeReconnect);
@@ -850,4 +1198,97 @@ test("pedal ownership changes only after correlated release and late sync cannot
     type: "DJ_TIMELINE_STATE",
   });
   assert.equal(router.getStatus().mode, "timeline-control");
+});
+
+test("strict v2 capabilities and typed encoders exclude DJ_MASTER_CHANGED entirely", () => {
+  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  const hello = adapter.encodeHello({ eventId: "hello-capabilities", sequence: 1 });
+  assert.equal(hello.payload.capabilities.includes("DJ_MASTER_CHANGED"), false);
+  for (const payload of [
+    { deck: 1, deckId: "rekordbox-deck-1" },
+    { deck: 2 },
+    {},
+    null,
+    "deck-1",
+  ]) {
+    assert.equal(adapter.encodeEvent({
+      type: "DJ_MASTER_CHANGED",
+      eventId: "retired-encoded",
+      sequence: 2,
+      payload,
+    }), null);
+  }
+});
+
+test("DJ_MASTER_CHANGED cannot be queued, encoded, delivered, retried, or replayed", async (t) => {
+  V2WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v2",
+    WebSocketImpl: V2WebSocket,
+    heartbeatMs: 60_000,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    stateSyncProvider: () => ({ released: false, masterDeck: 1, activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  const failures = [];
+  const deliveries = [];
+  client.on("protocol-failure", (failure) => failures.push(failure));
+  client.on("delivery", (delivery) => deliveries.push(delivery.type));
+  client.start();
+  await flush();
+  const first = V2WebSocket.instances[0];
+
+  const attempted = client.sendEvent({
+    type: "DJ_MASTER_CHANGED",
+    eventId: "retired-master-changed",
+    sequence: 50,
+    payload: { deck: 2, deckId: "rekordbox-deck-2" },
+  });
+  assert.equal(attempted.skipped, true);
+  assert.equal(attempted.reason, "unsupported-type");
+  assert.equal(attempted.sent, false);
+  assert.equal(attempted.ok, false);
+  assert.equal(first.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().physicalEventIdRegistrySize, 0);
+  assert.deepEqual(deliveries, []);
+  assert.deepEqual(failures, []);
+
+  first.emit("message", JSON.stringify({
+    v: 2,
+    type: "ACK",
+    eventId: "retired-master-changed",
+    sequence: 50,
+    outcome: "busy",
+    code: "BUSY",
+    stateGeneration: 1,
+  }));
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery, null);
+  assert.equal(first.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
+
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "retired-event reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "retired-reconnect");
+  await reconnect;
+  const second = V2WebSocket.instances.at(-1);
+  assert.equal(second.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
+});
+
+test("router drops a foreign DJ_MASTER_CHANGED detector event without reaching the client", () => {
+  const { detector, client } = createFakeRouter();
+  detector.emit("event", {
+    type: "DJ_MASTER_CHANGED",
+    eventId: "injected-retired-master",
+    payload: { deck: 2 },
+  });
+  assert.equal(client.sent.some((event) => event.type === "DJ_MASTER_CHANGED"), false);
 });

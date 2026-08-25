@@ -10,6 +10,7 @@ const { spawnSync } = require("node:child_process");
 
 const REPO_ROOT = path.join(__dirname, "..");
 const BUILD_SCRIPT = path.join(REPO_ROOT, "scripts", "build-dist.ps1");
+const WINDOWS_DESKTOP_BOOTSTRAP = path.join(REPO_ROOT, "scripts", "initialize-windows-desktop-powershell.ps1");
 const PROBE_HELPER = path.join(REPO_ROOT, "scripts", "invoke-packaging-probe.ps1");
 
 function runPowerShellFile(executable, filePath) {
@@ -74,7 +75,7 @@ function buildProbeScenarioScript(helperPath, rootPath) {
     ``,
     `$metadata = Get-PackagingMetadata -ProjectRoot '${rootLiteral}' -PkgVersion '6.22.0' -TimeoutMs 8000`,
     `if (`,
-    `  $metadata.ProductVersion -cne '1.1.3' -or`,
+    `  $metadata.ProductVersion -cne '1.1.4' -or`,
     `  $metadata.DeclaredPkg -cne '6.22.0' -or`,
     `  $metadata.LockedPkgRoot -cne '6.22.0' -or`,
     `  $metadata.LockedPkgNode -cne '6.22.0'`,
@@ -82,8 +83,8 @@ function buildProbeScenarioScript(helperPath, rootPath) {
     `  throw "real repository metadata did not pass through the shared helper"`,
     `}`,
     ``,
-    `$withStderr = Invoke-NodePackagingProbeProcess -ProjectRoot '${rootLiteral}' -ProbeSource 'process.stdout.write("1.1.3|6.22.0|6.22.0|6.22.0"); process.stderr.write("benign warning");' -TimeoutMs 5000`,
-    `if ($withStderr.ExitCode -ne 0 -or $withStderr.Stdout -cne "1.1.3|6.22.0|6.22.0|6.22.0" -or $withStderr.Stderr -cne "benign warning") {`,
+    `$withStderr = Invoke-NodePackagingProbeProcess -ProjectRoot '${rootLiteral}' -ProbeSource 'process.stdout.write("1.1.4|6.22.0|6.22.0|6.22.0"); process.stderr.write("benign warning");' -TimeoutMs 5000`,
+    `if ($withStderr.ExitCode -ne 0 -or $withStderr.Stdout -cne "1.1.4|6.22.0|6.22.0|6.22.0" -or $withStderr.Stderr -cne "benign warning") {`,
     `  throw "synthetic stderr capture failed"`,
     `}`,
     `$stderrRejectedMessage = Assert-ThrowsLike "success-with-stderr" "emitted stderr on success" {`,
@@ -94,10 +95,10 @@ function buildProbeScenarioScript(helperPath, rootPath) {
     `}`,
     ``,
     `$malformedCases = @(`,
-    `  @{ Name = "malformed field count"; Output = "1.1.3|6.22.0|6.22.0"; Pattern = "invalid field count" },`,
-    `  @{ Name = "missing pin"; Output = "1.1.3||6.22.0|6.22.0"; Pattern = "invalid field" },`,
-    `  @{ Name = "wrong pin"; Output = "1.1.3|6.22.1|6.22.0|6.22.0"; Pattern = "must be exactly" },`,
-    `  @{ Name = "newline field"; Output = "1.1.3\`n|6.22.0|6.22.0|6.22.0"; Pattern = "invalid field" }`,
+    `  @{ Name = "malformed field count"; Output = "1.1.4|6.22.0|6.22.0"; Pattern = "invalid field count" },`,
+    `  @{ Name = "missing pin"; Output = "1.1.4||6.22.0|6.22.0"; Pattern = "invalid field" },`,
+    `  @{ Name = "wrong pin"; Output = "1.1.4|6.22.1|6.22.0|6.22.0"; Pattern = "must be exactly" },`,
+    `  @{ Name = "newline field"; Output = "1.1.4\`n|6.22.0|6.22.0|6.22.0"; Pattern = "invalid field" }`,
     `)`,
     `foreach ($case in $malformedCases) {`,
     `  $result = Invoke-SyntheticOutput -Output $case.Output`,
@@ -176,7 +177,14 @@ test("build-dist and PS5.1 tests execute the same bounded packaging probe helper
   }
 
   const buildSource = fs.readFileSync(BUILD_SCRIPT, "utf8");
+  const bootstrapSource = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP, "utf8");
   const helperSource = fs.readFileSync(PROBE_HELPER, "utf8");
+  assert.match(buildSource, /\[System\.IO\.Path\]::Combine\(\$PSScriptRoot, "initialize-windows-desktop-powershell\.ps1"\)/);
+  assert.match(buildSource, /\[System\.IO\.FileInfo\]::new\(\$windowsDesktopBootstrapPath\)/);
+  assert.match(buildSource, /windowsDesktopBootstrapItem\.Attributes\s+-band\s+\[System\.IO\.FileAttributes\]::ReparsePoint/);
+  assert.match(buildSource, /^Initialize-WindowsDesktopPowerShellBuildEnvironment$/m);
+  assert.doesNotMatch(buildSource, /function\s+Initialize-WindowsDesktopPowerShellBuildEnvironment/);
+  assert.match(bootstrapSource, /function\s+Initialize-WindowsDesktopPowerShellBuildEnvironment/);
   assert.doesNotMatch(buildSource, /ConvertFrom-Json/);
   assert.match(buildSource, /invoke-packaging-probe\.ps1/);
   assert.match(buildSource, /Get-PackagingMetadata/);

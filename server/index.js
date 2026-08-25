@@ -61,7 +61,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.3.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.4.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that

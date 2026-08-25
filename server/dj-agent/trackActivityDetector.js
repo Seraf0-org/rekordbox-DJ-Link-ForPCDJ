@@ -221,9 +221,10 @@ function createTrackActivityDetector({
   const decks = new Map();
   let explicitMasterDeck = null;
   let explicitMasterUpdatedAt = null;
+  let explicitMasterAuthorityUpdatedAtMs = null;
+  let explicitMasterAuthorityRevision = 0;
   let snapshotMasterDeck = null;
   let snapshotMasterSource = "unknown";
-  let lastMasterChangedEventDeck = null;
   let masterActivationGeneration = 0;
   let knownMasterDeck = null;
 
@@ -435,6 +436,9 @@ function createTrackActivityDetector({
     if (!Number.isInteger(deck)) {
       return;
     }
+    if (Number.isInteger(explicitMasterDeck)) {
+      return;
+    }
     if (knownMasterDeck !== deck) {
       knownMasterDeck = deck;
       masterActivationGeneration += 1;
@@ -443,31 +447,73 @@ function createTrackActivityDetector({
     snapshotMasterSource = source;
   }
 
+  function explicitMasterTimestampMs(value) {
+    if (typeof value !== "string" || !value.trim()) {
+      return null;
+    }
+    const timestampMs = Date.parse(value);
+    return Number.isFinite(timestampMs) ? timestampMs : null;
+  }
+
+  function acceptExplicitMaster(deck, { updatedAt = null, requireNewerOnDeckChange = false } = {}) {
+    const reportedAtMs = explicitMasterTimestampMs(updatedAt);
+    const deckChanged = Number.isInteger(explicitMasterDeck) && explicitMasterDeck !== deck;
+    if (
+      deckChanged &&
+      requireNewerOnDeckChange &&
+      (!Number.isFinite(reportedAtMs) ||
+        !Number.isFinite(explicitMasterAuthorityUpdatedAtMs) ||
+        reportedAtMs <= explicitMasterAuthorityUpdatedAtMs)
+    ) {
+      return false;
+    }
+
+    if (!Number.isInteger(explicitMasterDeck) || explicitMasterDeck !== deck) {
+      explicitMasterAuthorityRevision += 1;
+    }
+    explicitMasterDeck = deck;
+
+    const acceptedAtMs = Number.isFinite(reportedAtMs)
+      ? Math.max(reportedAtMs, explicitMasterAuthorityUpdatedAtMs || reportedAtMs)
+      : Number.isFinite(explicitMasterAuthorityUpdatedAtMs)
+        ? explicitMasterAuthorityUpdatedAtMs
+        : now();
+    explicitMasterAuthorityUpdatedAtMs = acceptedAtMs;
+    explicitMasterUpdatedAt = new Date(acceptedAtMs).toISOString();
+
+    if (knownMasterDeck !== deck) {
+      knownMasterDeck = deck;
+      masterActivationGeneration += 1;
+    }
+    return true;
+  }
+
   function updateMasterFromSnapshot(snapshot = {}) {
     const explicit = normalizeDeckNumber(snapshot.explicitMasterDeck);
     if (explicit) {
-      explicitMasterDeck = explicit;
-      explicitMasterUpdatedAt = snapshot.explicitMasterUpdatedAt || explicitMasterUpdatedAt || new Date(now()).toISOString();
-      snapshotMasterSource = "explicit-state";
-      if (knownMasterDeck !== explicit) {
-        knownMasterDeck = explicit;
-        masterActivationGeneration += 1;
+      if (!acceptExplicitMaster(explicit, {
+        updatedAt: snapshot.explicitMasterUpdatedAt,
+        requireNewerOnDeckChange: true,
+      })) {
+        return false;
       }
-      return;
+      snapshotMasterSource = "explicit-state";
+      return true;
     }
     const reported = normalizeDeckNumber(snapshot.masterDeck);
     if (reported) {
       const source = String(snapshot.masterDeckSource || "").trim().toLowerCase();
       if (source === "playback-fallback" && !shouldAcceptFallbackMaster(snapshot, reported)) {
-        return;
+        return true;
       }
       setSnapshotMaster(reported, snapshot.masterDeckSource || "snapshot");
-      return;
+      return true;
     }
     const playbackDeck = normalizeDeckNumber(snapshot.playback?.deck);
     if (playbackDeck) {
       setSnapshotMaster(playbackDeck, "playback-fallback");
     }
+    return true;
   }
 
   function snapshotPlaybackForDeck(snapshot, deck) {
@@ -501,7 +547,9 @@ function createTrackActivityDetector({
   }
 
   function onSnapshot(snapshot = {}) {
-    updateMasterFromSnapshot(snapshot);
+    if (!updateMasterFromSnapshot(snapshot)) {
+      return getState();
+    }
     const measuredLoops = new Map();
     for (const entry of Array.isArray(snapshot.loopStates) ? snapshot.loopStates : []) {
       const deck = normalizeDeckNumber(entry?.deck);
@@ -649,11 +697,9 @@ function createTrackActivityDetector({
     if (!deck) {
       return null;
     }
-    if (knownMasterDeck !== deck) {
-      knownMasterDeck = deck;
-      masterActivationGeneration += 1;
-    }
-    explicitMasterDeck = deck;
+    acceptExplicitMaster(deck, {
+      updatedAt: rawEvent.explicitMasterUpdatedAt || rawEvent.updatedAt,
+    });
     const state = getDeckState(deck);
     const hadPendingTrackChange = state.pendingTrackChange;
     state.pendingTrackChange = false;
@@ -666,19 +712,8 @@ function createTrackActivityDetector({
       state.lastSyncPositionRevision = null;
       state.lastLoopEventRevision = null;
     }
-    explicitMasterUpdatedAt = rawEvent.updatedAt || new Date(now()).toISOString();
     snapshotMasterSource = "explicit-master-change";
-    const changed = lastMasterChangedEventDeck !== deck;
-    lastMasterChangedEventDeck = deck;
-    const masterEvent = changed
-      ? emitEvent("DJ_MASTER_CHANGED", {
-          deck,
-          source: "explicit-master-change",
-          updatedAt: explicitMasterUpdatedAt,
-        })
-      : null;
-    const activeEvent = maybeEmitActive(deck, state, { allowAwaiting: true });
-    return activeEvent || masterEvent;
+    return maybeEmitActive(deck, state, { allowAwaiting: true });
   }
 
   function requestCurrentMasterActive() {
@@ -719,9 +754,11 @@ function createTrackActivityDetector({
     const masterDeck = currentMasterDeck();
     return {
       currentMasterDeck: masterDeck,
+      masterDeckRevision: masterActivationGeneration,
       masterDeckSource: Number.isInteger(explicitMasterDeck) ? "explicit" : snapshotMasterSource,
       explicitMasterDeck,
       explicitMasterUpdatedAt,
+      explicitMasterAuthorityRevision,
       decks: deckState,
     };
   }
@@ -730,9 +767,10 @@ function createTrackActivityDetector({
     decks.clear();
     explicitMasterDeck = null;
     explicitMasterUpdatedAt = null;
+    explicitMasterAuthorityUpdatedAtMs = null;
+    explicitMasterAuthorityRevision = 0;
     snapshotMasterDeck = null;
     snapshotMasterSource = "unknown";
-    lastMasterChangedEventDeck = null;
     masterActivationGeneration = 0;
     knownMasterDeck = null;
   }

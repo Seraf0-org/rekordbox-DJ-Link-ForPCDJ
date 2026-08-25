@@ -5,9 +5,218 @@ const { execFileSync } = require("node:child_process");
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 const REQUIRED_PKG_VERSION = "6.22.0";
+const TRUSTED_WINDOWS_GIT_EXECUTABLE = "C:\\Program Files\\Git\\cmd\\git.exe";
+const WINDOWS_NULL_DEVICE = "NUL";
+
+function normalizeWindowsPath(value) {
+  const withoutExtendedPrefix = String(value).replace(/^\\\\\?\\/, "");
+  return path.win32.normalize(withoutExtendedPrefix).replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function sameWindowsPath(left, right) {
+  return normalizeWindowsPath(left) === normalizeWindowsPath(right);
+}
+
+function resolveWindowsPath(value, label) {
+  const resolved = path.win32.resolve(String(value));
+  if (!path.win32.isAbsolute(resolved)) {
+    throw new Error(`${label} must be an absolute Windows path: ${value}`);
+  }
+  return resolved;
+}
+
+function lstatOrThrow(fsApi, targetPath, label) {
+  try {
+    return fsApi.lstatSync(targetPath);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${targetPath} (${error.message})`);
+  }
+}
+
+function realpathOrThrow(fsApi, targetPath, label) {
+  try {
+    const nativeRealpath = fsApi.realpathSync.native || fsApi.realpathSync;
+    return nativeRealpath(targetPath);
+  } catch (error) {
+    throw new Error(`${label} cannot be resolved without following a reparse point: ${targetPath} (${error.message})`);
+  }
+}
+
+// Every path component is checked. `lstat` catches ordinary symlinks and
+// junctions; comparing native realpath catches reparse traversal that could
+// otherwise escape an apparently trusted lexical root.
+function assertNormalNonReparsePath(fsApi, targetPath, label, expectedType) {
+  const absolutePath = resolveWindowsPath(targetPath, label);
+  const parsed = path.win32.parse(absolutePath);
+  const segments = absolutePath.slice(parsed.root.length).split("\\").filter(Boolean);
+  let current = parsed.root;
+
+  for (const segment of segments) {
+    current = path.win32.join(current, segment);
+    const stats = lstatOrThrow(fsApi, current, label);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} is a symbolic link or junction (reparse points are not allowed): ${current}`);
+    }
+    const resolved = realpathOrThrow(fsApi, current, label);
+    if (!sameWindowsPath(resolved, current)) {
+      throw new Error(`${label} resolves through a reparse point (not allowed): ${current} -> ${resolved}`);
+    }
+  }
+
+  const finalStats = lstatOrThrow(fsApi, absolutePath, label);
+  if (expectedType === "directory" && !finalStats.isDirectory()) {
+    throw new Error(`${label} must be a normal directory: ${absolutePath}`);
+  }
+  if (expectedType === "file" && !finalStats.isFile()) {
+    throw new Error(`${label} must be a normal file: ${absolutePath}`);
+  }
+  return absolutePath;
+}
+
+function pathExists(fsApi, targetPath) {
+  try {
+    fsApi.lstatSync(targetPath);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function assertCriticalMetadataAbsent(fsApi, targetPath, label) {
+  if (!pathExists(fsApi, targetPath)) return;
+  // Do not resolve the object first: an existing reparse point is itself the
+  // rejection condition and must never be followed.
+  const stats = lstatOrThrow(fsApi, targetPath, label);
+  if (stats.isSymbolicLink()) {
+    throw new Error(`${label} is a symbolic link or junction (rejected critical Git metadata): ${targetPath}`);
+  }
+  throw new Error(`${label} is present (rejected critical Git metadata): ${targetPath}`);
+}
+
+function assertPackedReplaceRefsAbsent(fsApi, packedRefsPath) {
+  if (!pathExists(fsApi, packedRefsPath)) return;
+  assertNormalNonReparsePath(fsApi, packedRefsPath, "Git packed-refs", "file");
+  const text = fsApi.readFileSync(packedRefsPath, "utf8");
+  if (/^[0-9a-f]+\s+refs\/replace\//mi.test(text)) {
+    throw new Error(`Git packed-refs contains replace refs (rejected critical Git metadata): ${packedRefsPath}`);
+  }
+}
+
+function assertGitMetadataIsTrusted(fsApi, projectRoot) {
+  const root = assertNormalNonReparsePath(fsApi, projectRoot, "project root", "directory");
+  const gitDir = assertNormalNonReparsePath(fsApi, path.win32.join(root, ".git"), "projectRoot/.git", "directory");
+
+  // These must be normal directories whenever Git uses them. Requiring their
+  // existence deliberately rejects incomplete/non-worktree repositories.
+  for (const [relativePath, label] of [
+    ["objects", "projectRoot/.git/objects"],
+    ["objects\\info", "projectRoot/.git/objects/info"],
+    ["refs", "projectRoot/.git/refs"],
+    ["info", "projectRoot/.git/info"],
+  ]) {
+    assertNormalNonReparsePath(fsApi, path.win32.join(gitDir, relativePath), label, "directory");
+  }
+  for (const [relativePath, label] of [
+    ["HEAD", "projectRoot/.git/HEAD"],
+    ["config", "projectRoot/.git/config"],
+  ]) {
+    assertNormalNonReparsePath(fsApi, path.win32.join(gitDir, relativePath), label, "file");
+  }
+
+  for (const [relativePath, label] of [
+    ["objects\\info\\alternates", "Git object alternates"],
+    ["objects\\info\\http-alternates", "Git HTTP object alternates"],
+    ["refs\\replace", "Git replace refs"],
+    ["worktrees", "Git linked-worktree metadata"],
+    ["commondir", "Git linked-worktree commondir"],
+    ["gitdir", "Git linked-worktree gitdir"],
+    ["config.worktree", "Git linked-worktree config"],
+    ["shallow", "Git shallow history metadata"],
+    ["info\\grafts", "Git graft metadata"],
+  ]) {
+    assertCriticalMetadataAbsent(fsApi, path.win32.join(gitDir, relativePath), label);
+  }
+  assertPackedReplaceRefsAbsent(fsApi, path.win32.join(gitDir, "packed-refs"));
+  return { root, gitDir };
+}
+
+function isolatedGitEnvironment(callerEnvironment, { gitDir, projectRoot }) {
+  const environment = {};
+  for (const [key, value] of Object.entries(callerEnvironment || {})) {
+    if (!key.toUpperCase().startsWith("GIT_")) environment[key] = value;
+  }
+  // The release preflight must not inherit caller-selected repository/object
+  // roots, inline config, aliases, replace refs, or global/system config.
+  return {
+    ...environment,
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "0",
+    GIT_CONFIG_GLOBAL: WINDOWS_NULL_DEVICE,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_DIR: gitDir,
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_WORK_TREE: projectRoot,
+  };
+}
+
+function createTrustedGitRunner(projectRoot, {
+  platform = process.platform,
+  environment = process.env,
+  execFile = execFileSync,
+  fsApi = fs,
+  trustedGitExecutable = TRUSTED_WINDOWS_GIT_EXECUTABLE,
+} = {}) {
+  if (platform !== "win32") {
+    throw new Error(`release provenance Git is supported only on Windows; got platform '${platform}'`);
+  }
+  if (!sameWindowsPath(trustedGitExecutable, TRUSTED_WINDOWS_GIT_EXECUTABLE)) {
+    throw new Error(`release provenance Git executable must be exactly ${TRUSTED_WINDOWS_GIT_EXECUTABLE}; got ${trustedGitExecutable}`);
+  }
+
+  const trustedExecutable = assertNormalNonReparsePath(
+    fsApi,
+    TRUSTED_WINDOWS_GIT_EXECUTABLE,
+    "trusted Git executable",
+    "file",
+  );
+  const initialMetadata = assertGitMetadataIsTrusted(fsApi, projectRoot);
+  const expectedRoot = initialMetadata.root;
+
+  return (args, cwd) => {
+    const requestedRoot = resolveWindowsPath(cwd, "Git working tree");
+    if (!sameWindowsPath(requestedRoot, expectedRoot)) {
+      throw new Error(`release provenance Git working tree changed or is outside the fixed project root: ${cwd}`);
+    }
+    // Revalidate immediately before every subprocess. This makes a metadata
+    // substitution between preflight queries fail rather than silently affect
+    // HEAD/tree/tag evidence.
+    assertNormalNonReparsePath(fsApi, TRUSTED_WINDOWS_GIT_EXECUTABLE, "trusted Git executable", "file");
+    const metadata = assertGitMetadataIsTrusted(fsApi, expectedRoot);
+    const childEnvironment = isolatedGitEnvironment(environment, {
+      gitDir: metadata.gitDir,
+      projectRoot: metadata.root,
+    });
+    const gitArgs = [
+      `--git-dir=${metadata.gitDir}`,
+      `--work-tree=${metadata.root}`,
+      "--no-replace-objects",
+      "--no-pager",
+      ...args,
+    ];
+    return execFile(trustedExecutable, gitArgs, {
+      cwd: metadata.root,
+      encoding: "utf8",
+      env: childEnvironment,
+      windowsHide: true,
+    }).trim();
+  };
+}
 
 function defaultGit(args, cwd) {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  return createTrustedGitRunner(cwd)(args, cwd);
 }
 
 function readJsonFile(filePath) {
@@ -32,6 +241,9 @@ function sha256FileBytes(filePath) {
 // scenarios never touch the real repository.
 function runPreflight({ projectRoot, git = defaultGit } = {}) {
   if (!projectRoot) throw new Error("projectRoot is required");
+  // Preserve the injected seam for deterministic unit tests. Production
+  // callers omit it and are bound to the exact trusted Windows Git runner.
+  const gitRunner = git;
   const checks = [];
   const failures = [];
   const record = (name, ok, detail) => {
@@ -41,7 +253,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
 
   let porcelain;
   try {
-    porcelain = git(["status", "--porcelain"], projectRoot);
+    porcelain = gitRunner(["status", "--porcelain"], projectRoot);
   } catch (error) {
     record("git-status", false, `git status failed: ${error.message}`);
     porcelain = null;
@@ -59,7 +271,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
 
   let head = null;
   try {
-    head = git(["rev-parse", "HEAD"], projectRoot);
+    head = gitRunner(["rev-parse", "HEAD"], projectRoot);
   } catch (error) {
     record("head-full-sha", false, `git rev-parse HEAD failed: ${error.message}`);
   }
@@ -73,7 +285,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
 
   let tree = null;
   try {
-    tree = git(["rev-parse", "HEAD^{tree}"], projectRoot);
+    tree = gitRunner(["rev-parse", "HEAD^{tree}"], projectRoot);
   } catch (error) {
     record("tree-full-sha", false, `git rev-parse HEAD^{{tree}} failed: ${error.message}`);
   }
@@ -173,7 +385,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
     if (head !== null && FULL_SHA_RE.test(head)) {
       let tagCommit = null;
       try {
-        tagCommit = git(["rev-parse", `${expectedTag}^{commit}`], projectRoot);
+        tagCommit = gitRunner(["rev-parse", `${expectedTag}^{commit}`], projectRoot);
       } catch {
         tagCommit = null;
       }
@@ -192,7 +404,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
       // distinguished from an accidental branch-shaped ref.
       let tagObjectType = null;
       try {
-        tagObjectType = git(["cat-file", "-t", expectedTag], projectRoot);
+        tagObjectType = gitRunner(["cat-file", "-t", expectedTag], projectRoot);
       } catch {
         tagObjectType = null;
       }
@@ -207,7 +419,7 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
       );
       let describe = null;
       try {
-        describe = git(["describe", "--tags", "--exact-match", "HEAD"], projectRoot);
+        describe = gitRunner(["describe", "--tags", "--exact-match", "HEAD"], projectRoot);
       } catch {
         describe = null;
       }
@@ -248,4 +460,14 @@ function runPreflight({ projectRoot, git = defaultGit } = {}) {
   };
 }
 
-module.exports = { runPreflight, FULL_SHA_RE, REQUIRED_PKG_VERSION };
+module.exports = {
+  runPreflight,
+  FULL_SHA_RE,
+  REQUIRED_PKG_VERSION,
+  // Test-only exports keep the production entry point fixed to the exact
+  // Windows Git path while allowing deterministic adversarial unit tests.
+  __test: {
+    TRUSTED_WINDOWS_GIT_EXECUTABLE,
+    createTrustedGitRunner,
+  },
+};

@@ -4,16 +4,24 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
-## v1.1.3 リリースノート
+## SUPERSEDED / DO NOT EXECUTE — v1.1.3 リリースノート（immutable historical release evidence）
+
+公開済みimmutable v1.1.3は履歴・provenance evidenceだけです。内部の
+`DJ_MASTER_CHANGED` mismatchがstrict-v2 clean-breakのnegative proofを阻むため、
+現行final artifactとしてinstall、接続、受入れに使ってはなりません。現在の実行可能な
+案内は、修正済みv1.1.4（planned、未tag・未公開）の公開後に切り替えます。
 
 Syndocal公演同期を`syndocal-envelope-v2`へclean breakし、配布物の真正性検証
 （provenance）も大幅に強化しました。
 
-* **strict show-sync v2**: 旧flat/v1 adapterを退役し、exact master deck、
-  playSessionId、track identity、position、BPM、revision、freshnessが揃った時だけ
-  ACTIVEを送信します。継続TRACK_SYNC、実測loop 8/4/2、相関済みRELEASE、
-  reconnect時の同一eventId/playSession再送をstrict v2 envelopeで固定しました。
-  欠落、null、非有限、古いsample、reorder、旧wireは明示的にfail-closedします。
+* **strict show-sync v2**（historical v1.1.3 contract evidence）: 旧flat/v1 adapterを
+  退役し、exact master deck、playSessionId、track identity、position、BPM、revision、
+  freshnessが揃った時だけACTIVEを送信します。継続TRACK_SYNC、`active`/`startBeat`/
+  `endBeat`/`lengthBeats`/`revision`/`sampleAgeMs`/`rekordbox-hook-measured`を持つ
+  実測loop 8/4/2、相関済みRELEASEをstrict v2 envelopeで固定しました。ACK前の
+  physical eventだけが同一eventId/semantic payload/playSessionIdを接続世代間で保持し、
+  TRACK_SYNCは再接続後にreplayせず新世代で再取得します。欠落、null、非有限、古い
+  sample、reorder、旧wireは明示的にfail-closedします。
   TRACK_SYNCは非ACKの連続telemetryとして定数メモリのsession-local IDを使い、
   durable physical ID台帳を消費せず、reconnect後にはreplayしません。
 
@@ -38,7 +46,11 @@ Syndocal公演同期を`syndocal-envelope-v2`へclean breakし、配布物の真
   `dist/release-manifest.json` に束ねます。生成物はすべて `dist/` 配下に出力され、
   再実行してもワークツリーが汚れません。
 
-### v1.1.3 first-run Setup / live checkpoint (2026-08-25)
+### SUPERSEDED / DO NOT EXECUTE — v1.1.3 first-run Setup / live checkpoint (2026-08-25 historical)
+
+このSetup/live checkpointはimmutable v1.1.3の履歴です。内部`DJ_MASTER_CHANGED`
+mismatchのため、現行受入れ用のinstall/setup手順ではありません。修正済みplanned
+v1.1.4がtag・公開されるまで実行しないでください。
 
 初回セットアップカードはDJ Agentがdisabled、未設定、またはnative device未接続でも
 常時表示されます。カードが使用する `GET /api/dj-agent/setup` はDJ PC上の
@@ -63,8 +75,9 @@ port 0を暗黙選択しません。adapterは初回必ず未選択です。devi
 operatorがこのページで明示選択した後だけpreviewへ反映します。同一ページのrefreshでは
 触った選択を維持しますが、name+portが列挙結果から消えた場合はplaceholderへ戻して
 fail-closedにします。出荷・現行productionの唯一のadapterは
-`syndocal-envelope-v2`です。未設定時もv2になり、旧flat `generic-json`と
-`syndocal-envelope-v1`は互換選択肢として残さず明示的に拒否します。
+`syndocal-envelope-v2`です。未設定時もv2です。
+旧flat `generic-json`と `syndocal-envelope-v1`は明示的に拒否し、互換選択肢として
+残しません。
 
 2026-08-25のDJ PC live preflightは受入れ完了を意味しません。
 
@@ -78,7 +91,11 @@ fail-closedにします。出荷・現行productionの唯一のadapterは
 MinHook pinおよび`build-dist`経路の最終レビューはpendingです。このcheckpointでは
 それらの完了や、上表のlive factsからのhardware acceptanceを断言しません。
 
-## v1.1.1 リリースノート
+## SUPERSEDED / DO NOT EXECUTE — v1.1.1 リリースノート（historical）
+
+This release note is retained for provenance only. Do not use its old wire, package,
+or smoke observations for current acceptance; immutable v1.1.3 is blocked and the
+corrected v1.1.4 strict-v2 release is planned, not yet tagged or published.
 
 Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化しました。
 
@@ -90,7 +107,11 @@ Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化
 * 当時の旧Syndocal wireとbuild identityを追加（現在はstrict v2へclean break済み）。
 * npmとPython依存関係の既知脆弱性監査は0件。Nodeテスト69件、Hook DLLビルド、Rekordbox 7.2.18実機接続を確認済み。
 
-## v1.1.0 リリースノート
+## SUPERSEDED / DO NOT EXECUTE — v1.1.0 リリースノート（historical）
+
+This release note is retained for provenance only. Do not use its old wire, package,
+or smoke observations for current acceptance; immutable v1.1.3 is blocked and the
+corrected v1.1.4 strict-v2 release is planned, not yet tagged or published.
 
 既存のNow Playing本体との後方互換を保ったまま、Rekordbox連携と任意の
 DJ Agent拡張を強化しました。
@@ -115,6 +136,38 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 `/api/health`、`/`、`/api/dj-agent/status` のsmokeを通過しています。Rekordboxの
 バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
 相互運用は、対象環境での実機受入試験が別途必要です。
+
+## Current corrective-release guidance — planned v1.1.4
+
+The intended current wire contract is strict `syndocal-envelope-v2`; explicitly reject
+`generic-json` and `syndocal-envelope-v1` with no fallback, alias, or implicit conversion.
+The immutable published v1.1.3 package is historical and blocked by its internal
+`DJ_MASTER_CHANGED` mismatch. Do not install or use it for current acceptance. The next
+corrected v1.1.4 release is planned but not yet tagged or published; hardware acceptance
+remains **0/12**.
+
+The corrected release must use the exact envelope
+`{v:2,type,agentId,sessionId,sequence,eventId,payload}` and the exact control order
+`DJ_AGENT_HELLO` → `DJ_STATE_SYNC` → `DJ_TIMELINE_STATE_REQUEST`. Syndocal's returned
+`DJ_TIMELINE_STATE` is authoritative; timeline actions are fail-closed until its snapshot
+is valid. The accepted event set is `DJ_MASTER_TRACK_ACTIVE`, `DJ_LOOP_STATE`,
+`DJ_RELEASE`, `DJ_TIMELINE_BEAT_JUMP`, and `DJ_TIMELINE_LOOP_SET`; `DJ_MASTER_TRACK_SYNC`
+is non-ACK telemetry. `DJ_MASTER_CHANGED` is retired/unreachable, not a capability or
+accepted wire event, and the v1.1.4 source must carry a passing negative proof for every
+encoder/router path before release.
+
+Track frames carry `deck`, `deckId`, `masterDeckRevision`, exactly one identity form,
+optional `trackBpm`, `positionAtSendSec`, `effectiveBpm`, `positionRevision`,
+`sampleAgeMs`, `isPlaying:true`, `master:true`, `startedAt`, `playSessionId`, and an
+optional measured-loop object. That object carries `active`, optional
+`startBeat`/`endBeat`/`lengthBeats`, `revision`, `sampleAgeMs`, and source
+`rekordbox-hook-measured`; no root-level loop-division counter is a v2 wire field.
+
+The immutable v1.1.3 software/package evidence remains recorded for provenance:
+source commit `5eaf1994e1bf4456857fefd36cc0ce827145b603`, annotated tag `v1.1.3` at
+`24d38f6decbc8880149df1902ef8d2ccfe76b784`, full `npm test` 328 total / 326 pass /
+0 fail / 2 intentional package-smoke skips, `node --check` 18/18, first-party warnings
+0. These results do not make v1.1.3 current-final and do not close hardware acceptance.
 
 ## Core Features
 
@@ -153,11 +206,12 @@ npm start
 空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
 しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
 Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
-unpaired surrogateは拒否します。出荷・現行productionの唯一のadapterは
-`syndocal-envelope-v2`、接続先pathは`/dj-link`、heartbeatは5000msです。接続後は
-`DJ_AGENT_HELLO` → 権威snapshot(`DJ_STATE_SYNC`) →
-`DJ_TIMELINE_STATE_REQUEST`/timeline actionの順序が必須で、snapshot確定前の
-timeline操作はfail-closedです(SnapshotRequired)。adapterは
+unpaired surrogateは拒否します。次の訂正版v1.1.4で出荷する唯一のproduction adapterは
+`syndocal-envelope-v2`、接続先pathは`/dj-link`、heartbeatは5000msです。公開済み
+immutable v1.1.3は`DJ_MASTER_CHANGED` mismatchのため現行受入れに使いません。接続後は
+`DJ_AGENT_HELLO` → `DJ_STATE_SYNC` → `DJ_TIMELINE_STATE_REQUEST` の順序が必須です。
+Syndocalが返す権威`DJ_TIMELINE_STATE`が有効になるまでtimeline操作はfail-closedです
+(SnapshotRequired)。adapterは
 `SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示できます。選択可能値は
 `syndocal-envelope-v2`だけです。旧flat/v1名、未知名、曖昧な別名はfail-closedで、
 変換・fallback・legacy adapterはありません。
@@ -221,20 +275,28 @@ peerを偽装できません。旧env `DJ_AGENT_ALLOW_REMOTE_ACTIONS` とconfig-
 物理ペダルとglobal hotkeyはDJ PCローカルで動作し、FOH側のShow Controlは
 トークン認証済みの `/dj-link` WebSocket経由で行います。この変更で、LAN向けの
 read-only GET APIや既存のSocket.IOイベントが認証付きになったわけではありません
-（両者は従来どおり無認証のままです）。物理wire event（DJ_MASTER_CHANGED、
-DJ_MASTER_TRACK_ACTIVE、DJ_LOOP_STATE、DJ_RELEASE、DJ_TIMELINE_BEAT_JUMP、
-DJ_TIMELINE_LOOP_SET）はすべてACK必須で、送信直後を成功扱いにせず、
-pending/acknowledged/rejected/timed-out/send-failedを `/api/dj-agent/status` とUIに
-反映します。`accepted`/`duplicate`だけが成功、`no_mapping`/`rejected`はterminal failure、
-`busy`だけが同じ`eventId`・`sequence`・flat shape・socket generationのまま短い指数backoffで
-有限回再送されます。型不足・未知outcome・`ok`不整合のACKはprotocol failureとして無視し、
+（両者は従来どおり無認証のままです）。現行v2の物理/control eventは
+`DJ_MASTER_TRACK_ACTIVE`、`DJ_LOOP_STATE`、`DJ_RELEASE`、
+`DJ_TIMELINE_BEAT_JUMP`、`DJ_TIMELINE_LOOP_SET`で、これらはACK必須です。
+`DJ_MASTER_TRACK_SYNC`は連続する非ACK telemetryです。`DJ_MASTER_CHANGED` is retired/unreachable
+(退役済み)で
+v2のcapability setに含まれず、受入れ済みwire eventとして扱いません。公開済み
+v1.1.3はこのencoder/router negative proofを満たさないためblockedです。次の訂正版
+v1.1.4 sourceが経路到達不能のnegative proofを示すまで、これをacceptance evidenceに
+使いません。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
+send-failedを `/api/dj-agent/status` とUIに反映します。`accepted`/`duplicate`だけが
+成功、`no_mapping`/`rejected`はterminal failure、`busy`だけが同じ`eventId`・
+`sequence`・canonical v2 shape・socket generationのまま短い指数backoffで有限回
+再送されます。型不足・未知outcome・`ok`不整合のACKはprotocol failureとして無視し、
 ACK timeoutまでpendingを維持します。HELLO/heartbeat/State Sync/timeline requestは
-physical ID capから分離したcontrol ID/sequenceを使い、再接続時に旧physical eventを再送しません。
-timeline state requestのcaller-supplied eventIdは受け付けず、control IDはプロセス内で生成します。
+physical ID capから分離したcontrol ID/sequenceを使い、再接続時に旧physical eventを
+再送しません。timeline state requestのcaller-supplied eventIdは受け付けず、control
+IDはプロセス内で生成します。
 
-State Sync providerがthrow、null、undefined、またはKDMX flat validationに失敗した場合は、
-空snapshotへ置換せず、state-sync-error/send-failedとstatusへ記録してState Syncもtimeline
-requestも送信しません。valid snapshotを送信できた場合だけtimeline requestを続行します。
+State Sync providerがthrow、null、undefined、またはKDMX strict-v2 validationに失敗した
+場合は、空snapshotへ置換せず、state-sync-error/send-failedとstatusへ記録してState
+Syncもtimeline requestも送信しません。valid snapshotを送信できた場合だけtimeline
+requestを続行します。
 physical caller eventIdはプロセス中再利用不可で、既定262144件のbounded registryが上限到達時に
 fail-closed latchします。sequenceはcontrolを含むsession wire high-waterより厳密に大きい
 safe integerだけを受け付け、rollback/fraction/overflowは送信・予約しません。
@@ -250,7 +312,7 @@ MIDIをRekordboxのmaster deckごとに分ける場合は、`midi.deckChannels` 
 `{"1":1,"2":2}` のようなdeck番号→MIDI channel（1〜16）を指定します。
 loop-half、release、filter rampの全CC送信に適用され、未指定のdeckは各mappingの
 `channel`へfallbackします。実行中のaction resultには `targetDeck` と
-`targetChannel` が含まれます。KDMX flat wire framesはstrict fieldsだけを送信し、
+`targetChannel` が含まれます。KDMX strict-v2 envelope framesはstrict fieldsだけを送信し、
 この診断情報は含めません。環境変数では
 `MIDI_DECK_CHANNELS` に同じJSONを指定できます。
 
@@ -264,13 +326,15 @@ must complete successfully before the ChannelFader ramp sends its first MIDI
 message. Only after both ramps succeed does the agent send the deck Cue/Stop,
 restore Filter 64 and Fader 127, send `DJ_RELEASE`, and enter
 `handoff-pending`. Filter or fade failure never sends Stop/Release; a fade
-failure attempts a safe Filter reset and reports the result. If the macro is
-not configured, the legacy direct stop/release path remains available. F14
-keeps the local LoopHalf mapping. F15 is deliberately inactive in Stage 1 and
+failure attempts a safe Filter reset and reports the result. If
+`releaseMacro.enabled:false` is explicitly configured, the direct Stop/Release
+action path is used; this is a deliberate local mode, not an automatic legacy or
+wire fallback. F14 keeps the local LoopHalf mapping. F15 is deliberately inactive in Stage 1 and
 sends neither MIDI nor Syndocal events.
 
-Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"` changes the
-mode to `timeline-control`. Stage 2 maps F13/F15 to
+Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"`, the current
+`timelineId`/`playSessionId`, `pedalOwner:"timeline"`, and the correlated Release
+event changes the mode to `timeline-control`. Stage 2 maps F13/F15 to
 `DJ_TIMELINE_BEAT_JUMP` with `bars:-4/+4`, and F14 to the absolute
 `DJ_TIMELINE_LOOP_SET {"active":boolean}`. Stage 2 never sends Rekordbox MIDI.
 Disconnects, missing snapshots, invalid state broadcasts, and ACK failures keep
@@ -321,9 +385,16 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 - [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
 - [MSYS2](https://www.msys2.org/) (mingw-w64)
 
-### 2. ワンクリック起動 (おすすめ)
+### 2. インストール済みリリースの起動（公演運用）
 
-先にRekordboxを起動してから、プロジェクトルートにあるバッチファイルを実行してください。「DLLのビルド確認」→「Webサーバー起動」→「起動中のRekordboxへのインジェクト」→「ブラウザ起動」までを処理します。
+Rekordboxを先に起動し、スタートメニューまたはデスクトップの
+`DJLinkForPCDJ` ショートカットを実行してください。これはインストール先の
+`start-rb.bat` を起動し、署名済みmanifestと全payloadを検証してからserverとHookを
+開始します。公演運用ではsource checkoutの `start-all.bat` を使用しません。
+
+### 3. Source checkoutのワンクリック起動（開発専用）
+
+先にRekordboxを起動してから、プロジェクトルートにあるバッチファイルを実行してください。「DLLの再ビルドとprovenance検証」→「Webサーバー起動」→「起動中のRekordboxへのインジェクト」→「ブラウザ起動」までを処理します。既存DLLの存在だけでは成功扱いにしません。
 
 ```powershell
 start-all.bat
@@ -331,7 +402,7 @@ start-all.bat
 
 WebサーバーはRekordboxプロセスを定期監視せず、未起動時の自動起動やフックの自動再注入も行いません。Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実行してください。
 
-### 個別の手動実行コマンド
+### 4. 個別の手動実行コマンド（開発専用）
 もし各処理を単独で実行したい場合は以下のコマンドを使用します。
 
 ```powershell

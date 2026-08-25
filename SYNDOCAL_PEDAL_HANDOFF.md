@@ -18,7 +18,33 @@ nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artist�
 物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの受入れは別途必要で、mockから完了とは
 主張しません。
 
-## 2026-08-25 v1.1.3 pre-commit checkpoint
+## 2026-08-25 current corrective release preparation: v1.1.4
+
+公開済み`v1.1.3`はwire mismatchを含むimmutable historical artifactとして保持し、tagや
+assetを移動・差し替えません。次のcorrective product versionは`1.1.4`です。`package.json`、
+root `package-lock.json` identity、`installer.iss`、Setup HTTP/UIのversioned mapping URL、
+serverのstatic mapping filename、`CustomMIDI1-Syndocal-v1.1.4.csv`、packaging focused
+fixtureはこのversionだけを参照します。依存packageのversion、schema、adapter、runtime event
+contractはこのproduct bumpで変更しません。新しいtag、identity-bound artifact、GitHub Release、
+hardware acceptanceは後続のrelease supervisor gateでのみ作成・主張できます。
+
+公演運用はinstallerが作るスタートメニュー／デスクトップの`DJLinkForPCDJ`
+shortcutから起動し、インストール先`start-rb.bat`のpayload検証を必ず通します。
+source checkoutの`start-all.bat`は開発専用であり、既存DLLの存在を成功扱いせず毎回
+Hookを再ビルド・provenance検証します。公演受入れには使用しません。
+
+release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
+`refs/tags/v*`の削除とnon-fast-forward更新を禁止します。workflowも
+`GITHUB_REF_PROTECTED=true`、local/remote annotated tag dereference、`GITHUB_SHA`一致を
+再検証し、条件を満たさなければassetを公開しません。
+
+version sync source gateは`npm pkg get version`、root lock identityの二箇所、HEADとの差分に
+対するnon-root package-lock entry不変性、Setup HTTP / mapping artifact / packaging focused
+tests 19/19、対象source/testの`node --check`で確認済みです。`v1.1.3`の残存はこの文書と
+READMEのimmutable historical evidenceだけであり、current product source、Setup URL、mapping
+artifactには残っていません。commit、push、tag、build、`dist`生成はこの時点では未実施です。
+
+## SUPERSEDED / HISTORICAL — 2026-08-25 v1.1.3 pre-commit checkpoint
 
 現在の作業位置はbranch `beta-v1.1.2`（配布versionとは独立した履歴上のbranch名）、
 配布product version `1.1.3`です。`package.json`、root package-lock identity、
@@ -62,7 +88,7 @@ native source、Git履歴は削除していません。
 5 files / `1,081,152` logical bytesで、`scripts\build-hook.ps1`から再生成可能です。
 配布入力の`native\bin\rb_hook.dll`とMinHook source/cacheは保持しています。
 
-### v1.1.3 strict-v2 pushed source checkpoint
+### SUPERSEDED / HISTORICAL — v1.1.3 strict-v2 pushed source checkpoint
 
 上記source、version、mapping、byte-exact Ableton reference、tests、handoffを
 `5eaf1994e1bf4456857fefd36cc0ce827145b603`としてcommitし、branch
@@ -72,7 +98,7 @@ remote-tracking HEADが同じfull hashであることを確認し、source workt
 scan 0件、full `npm test` 328 total / 326 pass / 0 fail / 2 intentional skip、
 first-party warning 0です。独立Ox-alpha最終監査はP0/P1なしでPASSしました。
 
-### v1.1.3 immutable tag and distribution checkpoint
+### SUPERSEDED / HISTORICAL — v1.1.3 immutable tag and distribution checkpoint
 
 operatorの明示承認後、annotated tag `v1.1.3`をsource/docs/cleanup HEAD
 `24d38f6decbc8880149df1902ef8d2ccfe76b784`へ作成してGitHubへpushしました。remote tag
@@ -119,11 +145,40 @@ package JSON parse、実際のGit Bash設定下での
 payloadやidentityを変更しません。immutable tagは移動せず、公開assetも再生成・差し替え
 していません。
 
+### post-v1.1.3 packaging host boundary consistency tranche
+
+`build:hook`も`build:dist`と同じexact
+`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass`で起動し、二つのscriptは
+`scripts/initialize-windows-desktop-powershell.ps1`だけをdot-sourceします。このhelperが
+Windows PowerShell Desktopを必須とし、`PSModulePath`をexact `$PSHOME\Modules`へ正規化した後、
+`Get-FileHash` / `Get-AuthenticodeSignature` / `Compress-Archive`を唯一のinbox module sourceと
+command typeで解決できる場合だけ続行します。PowerShell Core、caller由来module path、alias、
+duplicate command、互換fallbackは明示的に拒否します。これは公開済み`v1.1.3`には含まれない
+post-v1.1.3 source maintenanceであり、`v1.1.3` tag、公開asset、product version、`dist`を
+変更しません。次のversion/tag/release統合はこのtrancheの所有者ではなくrelease supervisorが
+別途行います。
+
+このtrancheのfocused source gateは`inno-setup-packaging`と`build-dist-ps51-probe`の
+12/12 pass、`minhook-pin`の新しいshared-boundary named gate 1/1 pass、対象testの
+`node --check`、PowerShell 5.1 parse、package JSON parse、`git diff --check`です。Git Bash
+設定下の`npm run build:dist -- -ValidateAbletonLinkOnly`はPASSしました。実
+`npm run build:hook`はshared bootstrapとMinHook offline pinを通過し、引数なしでは既存の
+trusted compiler root gateが`C:\TDM-GCC-64\bin\g++.exe`を拒否します。既存の明示的
+`-AdditionalTrustedCompilerRoots C:\TDM-GCC-64`ではそのprovenance gateを通過しますが、
+現行`native\hookdll\hookdll.cpp:2235`の`GetTickCount64`が当該g++で未宣言としてcompile
+失敗します。これはhost-boundary変更ではない次版native build blockerであり、このtrancheは
+native sourceを修正しません。失敗実行は新しい配布物を生成せず、既存のignored
+`native\bin\rb_hook.dll` SHA-256
+`A73A0E65CD808E920B5C9C6DF39F8B24734D23D935A767DC98B76FFC294F57DD`は不変でした。
+`minhook-pin`全体は既存native fixtureが未収束で8分以上出力なしとなったため、私が起動した
+test processだけを終了し、全体passの根拠にはしていません。focused gateにfirst-party warningは
+0件です。
+
 配布物までは完成しています。残るDJ-Link完成条件はDJ PCへのinstall、物理LAN、Rekordbox、
 MIDI、ペダル、Syndocal ACK、切断・再接続、両PC restartのhardware acceptance 12項目です。
 現時点は0/12であり、配布生成PASSを実機完成へ読み替えません。
 
-## v1.1.3 first-run Setup契約 (2026-08-25)
+## SUPERSEDED / DO NOT EXECUTE — v1.1.3 first-run Setup契約 (2026-08-25)
 
 DJ PCのSetup cardはDJ Agentがdisabled・未設定・native device未接続でも常時表示
 されます。カードが読むのは `GET /api/dj-agent/setup` だけで、同APIはlocalhost専用
@@ -183,7 +238,7 @@ commit では共有 `tests/smoke.test.js` の MIDI hunks を除外し、interval
 acceptance は引き続き未検証であり、次はHTTP action hardeningとadapter authorityの
 Oxレビューを閉じて次checkpointを作る。
 
-## 2026-08-25 live DJ PC checkpoint（hardware acceptanceではない）
+## SUPERSEDED / HISTORICAL — 2026-08-25 live DJ PC checkpoint（hardware acceptanceではない）
 
 | surface | live fact |
 | --- | --- |

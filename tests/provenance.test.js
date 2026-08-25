@@ -21,7 +21,10 @@ const {
   resolveBuildIdentity,
 } = require("../server/buildIdentity");
 const { verifyInstalledInstall } = require("../server/installVerification");
-const { runPreflight } = require("../scripts/lib/provenance-preflight");
+const {
+  runPreflight,
+  __test: preflightTestApi,
+} = require("../scripts/lib/provenance-preflight");
 const {
   assertSafePayloadRelPath,
   buildInstallManifest,
@@ -438,6 +441,218 @@ function preflightFixture(t, { dirtyOutput = "", head = COMMIT_A, tree = TREE, t
   };
   return { projectRoot, git };
 }
+
+function trustedGitFixture(t) {
+  const projectRoot = tempDir(t, "rb-trusted-git-");
+  const gitDir = path.join(projectRoot, ".git");
+  for (const relativePath of ["objects/info", "refs", "info"]) {
+    fs.mkdirSync(path.join(gitDir, relativePath), { recursive: true });
+  }
+  fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(gitDir, "config"), "[core]\n\trepositoryformatversion = 0\n");
+  return { projectRoot, gitDir };
+}
+
+function virtualTrustedGitFs() {
+  // Unit tests must not depend on a workstation installing Git in Program
+  // Files. Production does not have this seam: it always lstat/realpaths the
+  // exact path itself.
+  const normalized = (value) => path.win32.normalize(value).replace(/[\\/]+$/, "").toLowerCase();
+  const dirs = new Set([
+    normalized("C:\\"),
+    normalized("C:\\Program Files"),
+    normalized("C:\\Program Files\\Git"),
+    normalized("C:\\Program Files\\Git\\cmd"),
+  ]);
+  const file = normalized(preflightTestApi.TRUSTED_WINDOWS_GIT_EXECUTABLE);
+  const isVirtual = (target) => dirs.has(normalized(target)) || normalized(target) === file;
+  const fakeStats = (target) => ({
+    isDirectory: () => dirs.has(normalized(target)),
+    isFile: () => normalized(target) === file,
+    isSymbolicLink: () => false,
+  });
+  const realpathSync = (target) => (isVirtual(target) ? target : fs.realpathSync(target));
+  realpathSync.native = (target) => (isVirtual(target) ? target : fs.realpathSync.native(target));
+  return {
+    ...fs,
+    lstatSync: (target) => (isVirtual(target) ? fakeStats(target) : fs.lstatSync(target)),
+    realpathSync,
+  };
+}
+
+function createCapturedTrustedGitRunner(t, environment = {}) {
+  const fixture = trustedGitFixture(t);
+  const calls = [];
+  const runner = preflightTestApi.createTrustedGitRunner(fixture.projectRoot, {
+    platform: "win32",
+    environment,
+    fsApi: virtualTrustedGitFs(),
+    execFile: (file, args, options) => {
+      calls.push({ file, args, options });
+      return "";
+    },
+  });
+  return { ...fixture, calls, runner };
+}
+
+test("trusted default Git ignores PATH shim, pins git-dir/work-tree, and scrubs caller GIT config", (t) => {
+  const { projectRoot, gitDir, calls, runner } = createCapturedTrustedGitRunner(t, {
+    PATH: "C:\\attacker-shim;C:\\Windows\\System32",
+    GIT_DIR: "C:\\attacker\\.git",
+    GIT_WORK_TREE: "C:\\attacker",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "alias.status",
+    GIT_CONFIG_VALUE_0: "!attacker-command",
+    GIT_CONFIG_GLOBAL: "C:\\attacker\\.gitconfig",
+    GIT_REPLACE_REF_BASE: "refs/replace-attacker",
+  });
+  assert.equal(runner(["status", "--porcelain"], projectRoot), "");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].file, preflightTestApi.TRUSTED_WINDOWS_GIT_EXECUTABLE);
+  assert.deepEqual(calls[0].args, [
+    `--git-dir=${gitDir}`,
+    `--work-tree=${projectRoot}`,
+    "--no-replace-objects",
+    "--no-pager",
+    "status",
+    "--porcelain",
+  ]);
+  assert.equal(calls[0].options.cwd, projectRoot);
+  assert.equal(calls[0].options.env.PATH, "C:\\attacker-shim;C:\\Windows\\System32");
+  assert.equal(calls[0].options.env.GIT_DIR, gitDir);
+  assert.equal(calls[0].options.env.GIT_WORK_TREE, projectRoot);
+  assert.equal(calls[0].options.env.GIT_CONFIG_GLOBAL, "NUL");
+  assert.equal(calls[0].options.env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(calls[0].options.env.GIT_CONFIG_COUNT, "0");
+  assert.equal(calls[0].options.env.GIT_NO_REPLACE_OBJECTS, "1");
+  assert.equal(calls[0].options.env.GIT_CONFIG_KEY_0, undefined);
+  assert.equal(calls[0].options.env.GIT_CONFIG_VALUE_0, undefined);
+  assert.equal(calls[0].options.env.GIT_REPLACE_REF_BASE, undefined);
+});
+
+test("trusted default Git rejects unknown platform and an unexpected work-tree", (t) => {
+  const { projectRoot } = trustedGitFixture(t);
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(projectRoot, {
+      platform: "linux",
+      fsApi: virtualTrustedGitFs(),
+    }),
+    /supported only on Windows/,
+  );
+
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(projectRoot, {
+      platform: "win32",
+      trustedGitExecutable: "C:\\attacker\\git.exe",
+      fsApi: virtualTrustedGitFs(),
+    }),
+    /must be exactly C:\\Program Files\\Git\\cmd\\git\.exe/,
+  );
+
+  const { runner } = createCapturedTrustedGitRunner(t);
+  assert.throws(
+    () => runner(["status", "--porcelain"], path.join(projectRoot, "other")),
+    /outside the fixed project root/,
+  );
+});
+
+test("trusted default Git rejects linked worktrees, alternates, replace refs, and graft metadata", (t) => {
+  const cases = [
+    ["object alternates", "objects/info/alternates", "Git object alternates"],
+    ["HTTP alternates", "objects/info/http-alternates", "Git HTTP object alternates"],
+    ["replace refs", "refs/replace", "Git replace refs"],
+    ["linked worktree", "worktrees/other", "Git linked-worktree metadata"],
+    ["commondir", "commondir", "Git linked-worktree commondir"],
+    ["gitdir", "gitdir", "Git linked-worktree gitdir"],
+    ["config.worktree", "config.worktree", "Git linked-worktree config"],
+    ["shallow history", "shallow", "Git shallow history metadata"],
+    ["graft metadata", "info/grafts", "Git graft metadata"],
+  ];
+  for (const [name, relativePath, expected] of cases) {
+    const { projectRoot, gitDir } = trustedGitFixture(t);
+    const target = path.join(gitDir, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (relativePath.endsWith("replace") || relativePath.endsWith("other")) {
+      fs.mkdirSync(target, { recursive: true });
+    } else {
+      fs.writeFileSync(target, "attacker metadata\n");
+    }
+    assert.throws(
+      () => preflightTestApi.createTrustedGitRunner(projectRoot, {
+        platform: "win32",
+        fsApi: virtualTrustedGitFs(),
+      }),
+      new RegExp(expected),
+      name,
+    );
+  }
+
+  const packed = trustedGitFixture(t);
+  fs.writeFileSync(
+    path.join(packed.gitDir, "packed-refs"),
+    `${COMMIT_A} refs/replace/${COMMIT_B}\n`,
+  );
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(packed.projectRoot, {
+      platform: "win32",
+      fsApi: virtualTrustedGitFs(),
+    }),
+    /packed-refs contains replace refs/,
+  );
+});
+
+test("trusted default Git rejects .git files and reparse-point metadata", (t) => {
+  const fileMetadata = trustedGitFixture(t);
+  fs.rmSync(fileMetadata.gitDir, { recursive: true, force: true });
+  fs.writeFileSync(fileMetadata.gitDir, "gitdir: C:/attacker/worktrees/release\n");
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(fileMetadata.projectRoot, {
+      platform: "win32",
+      fsApi: virtualTrustedGitFs(),
+    }),
+    /projectRoot\/.git must be a normal directory/,
+  );
+
+  const linked = trustedGitFixture(t);
+  const actualGitDir = path.join(linked.projectRoot, "actual-git");
+  fs.renameSync(linked.gitDir, actualGitDir);
+  try {
+    fs.symlinkSync(actualGitDir, linked.gitDir, "junction");
+  } catch {
+    t.skip("directory junction creation unavailable");
+    return;
+  }
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(linked.projectRoot, {
+      platform: "win32",
+      fsApi: virtualTrustedGitFs(),
+    }),
+    /symbolic link or junction|reparse point/,
+  );
+
+  const baseFs = virtualTrustedGitFs();
+  const executableAsLink = {
+    ...baseFs,
+    lstatSync: (target) => {
+      if (path.win32.normalize(target).toLowerCase() === preflightTestApi.TRUSTED_WINDOWS_GIT_EXECUTABLE.toLowerCase()) {
+        return {
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        };
+      }
+      return baseFs.lstatSync(target);
+    },
+  };
+  const executableFixture = trustedGitFixture(t);
+  assert.throws(
+    () => preflightTestApi.createTrustedGitRunner(executableFixture.projectRoot, {
+      platform: "win32",
+      fsApi: executableAsLink,
+    }),
+    /trusted Git executable is a symbolic link or junction/,
+  );
+});
 
 test("preflight passes on clean tree, full SHAs, exact tag, matching versions", (t) => {
   const { projectRoot, git } = preflightFixture(t);

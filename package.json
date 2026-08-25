@@ -1,13 +1,13 @@
 {
   "name": "rb-output",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Rekordbox now-playing and realtime BPM viewer for LAN devices",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "poc:rekordbox": ".venv\\Scripts\\python python/poc_rekordbox_probe.py",
     "poc:link": "node scripts/poc-ableton-link.js",
-    "build:hook": "powershell -ExecutionPolicy Bypass -File scripts/build-hook.ps1",
+    "build:hook": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-hook.ps1",
     "inject:hook": ".venv\\Scripts\\python scripts/inject_hook.py",
     "hook:prepare": "npm run build:hook && npm run inject:hook",
     "build:dist": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-dist.ps1",

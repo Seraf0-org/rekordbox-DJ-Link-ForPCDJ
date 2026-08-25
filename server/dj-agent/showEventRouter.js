@@ -279,7 +279,6 @@ function createShowEventRouter({
       if (!session || session !== activePlaySessionId || releasedPlaySessions.has(session)) return null;
       return routeEvent(event);
     }
-    if (event.type === "DJ_MASTER_CHANGED") return routeEvent(event);
     return null;
   }
 

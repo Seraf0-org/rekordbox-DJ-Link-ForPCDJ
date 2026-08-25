@@ -5,43 +5,77 @@ on:
     tags:
       - 'v*'
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    runs-on: windows-latest
+    # Pin the runner image major. A moving windows-latest image can silently
+    # replace build tools while this workflow is still otherwise pinned.
+    runs-on: windows-2025
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v7.0.1 (Node 24), immutable commit pin.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # Full history/tags so the release preflight can verify that HEAD is
           # exactly the pushed ANNOTATED tag object (git cat-file -t == "tag").
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        # actions/setup-node v7.0.0 (Node 24), immutable commit pin.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        # actions/setup-python v7.0.0 (Node 24), immutable commit pin.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: python/requirements.txt
 
       - name: Add MinGW to PATH
-        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Reproducible installs only: npm ci fails on any package.json/lockfile
       # drift and supplies the exact tracked @yao-pkg/pkg devDependency.
       - name: npm ci
         run: npm ci
 
+      - name: Require the exact non-reparse MinGW compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = "C:\mingw64\bin\g++.exe"
+          $command = Get-Command g++.exe -CommandType Application -ErrorAction Stop
+          if ($command.Source -cne $expected) {
+            throw "first resolved g++.exe must be exactly $expected; got $($command.Source)"
+          }
+          $current = [IO.Path]::GetFullPath($expected)
+          while ($true) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "expected MinGW compiler path contains a symbolic link or junction: $current"
+            }
+            $parentInfo = [IO.Directory]::GetParent($current)
+            if ($null -eq $parentInfo -or $parentInfo.FullName -ceq $current) { break }
+            $current = $parentInfo.FullName
+          }
+          $compiler = Get-Item -LiteralPath $expected -Force -ErrorAction Stop
+          if ($compiler.PSIsContainer -or -not $compiler.Name.Equals("g++.exe", [StringComparison]::Ordinal)) {
+            throw "expected MinGW compiler is not the exact regular g++.exe file: $expected"
+          }
+          Write-Host "Resolved approved compiler: $($compiler.FullName)"
+
       - name: Build hook DLL
-        run: npm run build:hook
+        run: npm run build:hook -- -AdditionalTrustedCompilerRoots C:\mingw64
 
       - name: Setup Python venv (pinned requirements)
         run: |
@@ -56,8 +90,8 @@ jobs:
       # scripts/build-dist.ps1 finds it. scripts/build-dist.ps1 additionally
       # pins the exact ISCC.exe SHA256, Authenticode signer, and file version
       # at build time. No unpinned Chocolatey package is used; setup steps use
-      # first-party actions only (the pre-existing third-party
-      # softprops/action-gh-release upload step is unchanged).
+      # first-party actions only; the release upload below remains limited to
+      # the expected artifacts and is pinned to an immutable action commit.
       - name: Install pinned Inno Setup 6.7.3
         run: |
           $ErrorActionPreference = "Stop"
@@ -91,11 +125,58 @@ jobs:
       - name: Build dist
         run: npm run build:dist
 
+      - name: Revalidate release preflight before release seal
+        run: node scripts/preflight.js
+
+      - name: Verify pushed annotated tag and seal exact release artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expectedTag = "v1.1.4"
+          $tag = $env:GITHUB_REF_NAME
+          $githubSha = $env:GITHUB_SHA
+          $trustedGit = "C:\Program Files\Git\cmd\git.exe"
+          if ($env:GITHUB_REF_TYPE -cne "tag") { throw "release workflow requires a tag ref" }
+          if ($tag -cne $expectedTag) { throw "release tag must be exactly $expectedTag; got $tag" }
+          if ($env:GITHUB_REF_PROTECTED -cne "true") { throw "release tag ref must be protected by a GitHub ruleset before assets can be published" }
+          if ($githubSha -notmatch "^[0-9a-f]{40}$") { throw "GITHUB_SHA must be a full lowercase commit SHA" }
+          $gitItem = Get-Item -LiteralPath $trustedGit -Force -ErrorAction Stop
+          if ($gitItem.PSIsContainer -or ($gitItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "trusted Git executable is not a normal file: $trustedGit"
+          }
+          function Get-TagBinding {
+            param([string]$ExpectedObject, [string]$ExpectedCommit)
+            $tagObject = (& $trustedGit show-ref --verify --hash "refs/tags/$tag").Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $tagObject -notmatch "^[0-9a-f]{40}$") { throw "local tag ref is missing or malformed: refs/tags/$tag" }
+            if ($tagObject -cne $ExpectedObject) { throw "local tag object changed: expected $ExpectedObject, got $tagObject" }
+            $tagType = (& $trustedGit cat-file -t $tagObject).Trim()
+            if ($LASTEXITCODE -ne 0 -or $tagType -cne "tag") { throw "local tag ref is not an annotated tag object" }
+            $deref = (& $trustedGit rev-parse "$tag^{}").Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $deref -cne $ExpectedCommit) { throw "local tag dereference must equal GITHUB_SHA; expected $ExpectedCommit, got $deref" }
+            $remoteLines = @(& $trustedGit ls-remote --tags --refs origin "refs/tags/$tag")
+            if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -ne 1) { throw "remote tag lookup did not return exactly one immutable ref" }
+            $remoteFields = $remoteLines[0].Trim() -split "\s+"
+            if ($remoteFields.Count -ne 2 -or $remoteFields[0].ToLowerInvariant() -cne $tagObject -or $remoteFields[1] -cne "refs/tags/$tag") {
+              throw "remote tag ref does not match the verified local annotated tag object"
+            }
+          }
+          $initialObject = (& $trustedGit show-ref --verify --hash "refs/tags/$tag").Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $initialObject -notmatch "^[0-9a-f]{40}$") { throw "local tag ref is missing or malformed: refs/tags/$tag" }
+          Get-TagBinding -ExpectedObject $initialObject -ExpectedCommit $githubSha
+          node scripts/verify-release-artifacts.js --project-root . --expected-tag $tag
+          if ($LASTEXITCODE -ne 0) { throw "release artifact seal failed" }
+          # Recheck both the local ref and origin after the expensive archive
+          # inspection. A moved remote tag is rejected before upload.
+          Get-TagBinding -ExpectedObject $initialObject -ExpectedCommit $githubSha
+
       - name: Upload installer, ZIP, and release manifest to release
-        uses: softprops/action-gh-release@v2
+        # softprops/action-gh-release v3.0.2 (Node 24), annotated-tag deref commit pin.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/DJLinkForPCDJ-setup.exe
-            dist/rb-output-*.zip
+            dist/rb-output-1.1.4.zip
             dist/release-manifest.json
           fail_on_unmatched_files: true
