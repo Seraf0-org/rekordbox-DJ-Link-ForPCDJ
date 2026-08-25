@@ -55,6 +55,20 @@ installer、build/install/release manifestは存在せず、配布物ではあ�
 checkpoint commit/push前なので削除せず保留し、監査が閉じた後にexact pathを再検証して
 regenerable旧生成物として削除・reclaimed bytesを別記録します。
 
+### v1.1.3 strict-v2 pushed source checkpoint
+
+上記source、version、mapping、byte-exact Ableton reference、tests、handoffを
+`5eaf1994e1bf4456857fefd36cc0ce827145b603`としてcommitし、branch
+`beta-v1.1.2`から`origin/beta-v1.1.2`へpushしました。push直後にlocal HEADと
+remote-tracking HEADが同じfull hashであることを確認し、source worktreeはcleanです。
+最終source gateは`node --check` 18/18、`git diff --check` pass、secret pattern
+scan 0件、full `npm test` 328 total / 326 pass / 0 fail / 2 intentional skip、
+first-party warning 0です。独立Ox-alpha最終監査はP0/P1なしでPASSしました。
+
+このcheckpointはsource pushだけです。versioned ZIP/installerのidentity-bound clean
+build、DJ PCへのinstall、物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACK、切断・再接続、
+両PC restartは未実施であり、hardware acceptance 0/12のままです。
+
 ## v1.1.3 first-run Setup契約 (2026-08-25)
 
 DJ PCのSetup cardはDJ Agentがdisabled・未設定・native device未接続でも常時表示
