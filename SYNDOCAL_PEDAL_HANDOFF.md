@@ -48,12 +48,13 @@ nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artist�
 物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACKの実機受入れも未検証です。
 
 旧生成物inventoryではexact path `C:\Users\kouty\Desktop\rb-output\dist`に
-32 files / `91,752,038` logical bytesが存在します。Git ignored、tracked file 0、
-reparse point 0、実行中process reference 0で、内容は`content_lookup.exe`、
-`inject_hook.exe`とPyInstaller `_build`だけです。`server.exe`、versioned ZIP、
-installer、build/install/release manifestは存在せず、配布物ではありません。
-checkpoint commit/push前なので削除せず保留し、監査が閉じた後にexact pathを再検証して
-regenerable旧生成物として削除・reclaimed bytesを別記録します。
+32 files / `91,752,038` logical bytesが存在しました。内容は`content_lookup.exe`、
+`inject_hook.exe`とPyInstaller `_build`だけで、`server.exe`、versioned ZIP、
+installer、build/install/release manifestを欠く不完全な生成物でした。source checkpoint
+push後に、Git ignored、tracked file 0、reparse point 0、process reference 0、二回の
+安定サンプル、clean worktree、HEAD/upstream同一を再確認し、このexact directoryだけを
+削除しました。`npm run build:dist`で再生成可能です。source、`node_modules`、`.venv`、
+native source、Git履歴は削除していません。
 
 ### v1.1.3 strict-v2 pushed source checkpoint
 
