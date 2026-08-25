@@ -1,8 +1,39 @@
 const { EventEmitter } = require("node:events");
 
+const ABLETON_LINK_MODULE_NAME = "@ktamas77/abletonlink";
+
+// The packaged release carries exactly this supported native adapter.  Do not
+// turn the caller-controlled configuration value into a require() expression:
+// pkg cannot bundle an arbitrary module name, and an installed process must
+// never load an unreviewed native addon merely because an environment variable
+// names it.  The literal require is intentional and must remain a string
+// literal so pkg can follow it in both development and packaged builds.
+function resolveAbletonLinkModule(moduleName = ABLETON_LINK_MODULE_NAME) {
+  if (moduleName !== ABLETON_LINK_MODULE_NAME) {
+    return {
+      module: null,
+      reason: "unsupported-module",
+      error: null,
+    };
+  }
+  try {
+    return {
+      module: require("@ktamas77/abletonlink"),
+      reason: null,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      module: null,
+      reason: "native-module-unavailable",
+      error,
+    };
+  }
+}
+
 function createAbletonLinkProvider({
   enabled = true,
-  moduleName = "@ktamas77/abletonlink",
+  moduleName = ABLETON_LINK_MODULE_NAME,
   initialTempo = 120.0,
   sampleIntervalMs = 200,
 } = {}) {
@@ -26,18 +57,24 @@ function createAbletonLinkProvider({
       return;
     }
 
-    let moduleExport;
-    try {
-      // eslint-disable-next-line global-require, import/no-dynamic-require
-      moduleExport = require(moduleName);
-    } catch (error) {
+    const resolution = resolveAbletonLinkModule(moduleName);
+    if (!resolution.module) {
+      if (resolution.reason === "unsupported-module") {
+        emitStatus(
+          false,
+          `Unsupported Ableton Link module; only ${ABLETON_LINK_MODULE_NAME} is packaged`,
+          { reason: resolution.reason },
+        );
+        return;
+      }
       emitStatus(
         false,
-        `Unable to load ${moduleName}. Install it with "npm install ${moduleName}" and ensure native build tools are installed.`,
-        { error: error.message }
+        `Unable to load ${ABLETON_LINK_MODULE_NAME}. Install the packaged native dependency and ensure its architecture matches Node.`,
+        { reason: resolution.reason, error: resolution.error?.message },
       );
       return;
     }
+    const moduleExport = resolution.module;
 
     const AbletonLink = moduleExport.AbletonLink || moduleExport.default || moduleExport;
     if (typeof AbletonLink !== "function") {
@@ -123,4 +160,8 @@ function createAbletonLinkProvider({
   };
 }
 
-module.exports = { createAbletonLinkProvider };
+module.exports = {
+  ABLETON_LINK_MODULE_NAME,
+  createAbletonLinkProvider,
+  resolveAbletonLinkModule,
+};

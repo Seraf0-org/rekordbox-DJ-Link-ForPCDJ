@@ -488,6 +488,23 @@ function socketIsOpen(socket) {
   return socket.readyState === 1;
 }
 
+// Adapter names that may be reflected on externally readable status
+// surfaces (/api/state, /api/status). Any other value - including a
+// configured-but-unrecognized SYNDOCAL_WS_ADAPTER string - stays internal
+// and is reported as null so hostile configuration is never echoed back.
+const RECOGNIZED_ADAPTER_NAMES = new Set(["generic-json", "syndocal-envelope-v1"]);
+
+function publicAdapterName(adapterObject) {
+  const name = adapterObject && typeof adapterObject === "object" ? adapterObject.name : null;
+  return RECOGNIZED_ADAPTER_NAMES.has(name) ? name : null;
+}
+
+// Stable, non-reflective reason for an unrecognized adapter selection: it
+// must never embed the configured value, its length, or any derived
+// fingerprint, because status.message/lastError are LAN-readable.
+const UNRECOGNIZED_ADAPTER_ERROR =
+  "Syndocal configured adapter is unrecognized; select generic-json or syndocal-envelope-v1 explicitly; no silent generic fallback is allowed";
+
 function resolveAdapter({ adapter, adapterFactory, token }) {
   if (adapter && typeof adapter === "object") {
     return { adapterObject: adapter, error: null };
@@ -522,7 +539,7 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
   }
   return {
     adapterObject: null,
-    error: `Syndocal adapter '${String(adapter)}' is unavailable; no silent generic fallback is allowed`,
+    error: UNRECOGNIZED_ADAPTER_ERROR,
   };
 }
 
@@ -1059,7 +1076,7 @@ function createSyndocalClient({
       : "Syndocal integration disabled by config",
     url,
     nic: nic || null,
-    adapter: adapterObject?.name || (String(adapter || "").trim() || null),
+    adapter: publicAdapterName(adapterObject),
     updatedAt: new Date(now()).toISOString(),
     lastError: adapterError || null,
     lastAckAt: null,
@@ -1089,7 +1106,7 @@ function createSyndocalClient({
       enabled: Boolean(enabled),
       url,
       nic: nic || null,
-      adapter: adapterObject?.name || (String(adapter || "").trim() || null),
+      adapter: publicAdapterName(adapterObject),
       connectionGeneration: socketGeneration,
       wireSequence,
       lastAckResult: lastAckResult ? { ...lastAckResult } : null,

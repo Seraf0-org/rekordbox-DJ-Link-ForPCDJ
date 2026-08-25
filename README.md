@@ -29,6 +29,48 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
   `dist/release-manifest.json` に束ねます。生成物はすべて `dist/` 配下に出力され、
   再実行してもワークツリーが汚れません。
 
+### v1.1.2 first-run Setup / live checkpoint (2026-08-25)
+
+初回セットアップカードはDJ Agentがdisabled、未設定、またはnative device未接続でも
+常時表示されます。カードが使用する `GET /api/dj-agent/setup` はDJ PC上の
+localhost専用のread-only GETです。request peerがloopbackであることに加え、Hostが
+localhost/loopback、Originが空またはlocalhost/loopbackであることを同時に検証し、
+いずれかが不成立なら403を返します。LAN向けの通常status/read-only APIとはこの境界を
+混同しません。
+
+カードはtoken入力・token表示・localStorage保存・サーバーへの設定POST/変更を持たず、
+preview/download/copyするJSONもtoken-freeです。versioned artifact
+`CustomMIDI1-Syndocal-v1.1.2.csv` はカードからダウンロードし、RekordboxのMIDI
+Learn/CustomMIDI1へoperatorが手動でimportします。driver、virtual MIDI、Rekordbox、
+Elgato/Stream Deckの外部操作は自動実行せず、画面上のguided confirmationの対象です。
+カード上で案内する入力はSyndocal host、local NIC、MIDI output、adapterです。
+CSVの検証済み要点は `CFXParameterCH1=B010`、`CFXParameterCH2=B110`、
+`ChannelFader=B011/B111`、`Cue=9025/9125`、`LoopHalf=9024/9124`です。
+
+MIDI outputは、列挙された同一optionの非空device nameとsafe integer portが一致した
+場合だけ既存選択を反映します。`null`/空/boolean/数値文字列をportとしてseedせず、
+port 0を暗黙選択しません。adapterは初回必ず未選択です。device/portは既存設定が
+あり、列挙結果のname+portへ完全一致する場合だけ反映し、それ以外は未選択にします。
+operatorがこのページで明示選択した後だけpreviewへ反映します。同一ページのrefreshでは
+触った選択を維持しますが、name+portが列挙結果から消えた場合はplaceholderへ戻して
+fail-closedにします。出荷・現行productionの既定adapterは `generic-json`
+(flat frame、HELLO後の権威snapshot取得を必須とする順序制約付き)です。
+`syndocal-envelope-v1` は旧KDMX v1 envelope wire向けの明示的なlegacy互換/
+診断用選択肢です。未知名の黙ったfallbackはなく、adapter未選択時は既定の
+`generic-json`が適用されます。
+
+2026-08-25のDJ PC live preflightは受入れ完了を意味しません。
+
+| surface | live fact |
+| --- | --- |
+| peer | 旧buildのpeerはSetup endpointが404 (`peer old build 404`) |
+| local Agent / MIDI / pedal / hook | いずれもOK |
+| Syndocal | 現在disabled。send-failed境界も観測済みで、接続成功とは扱わない |
+| physical acceptance | **0/12**。ハードウェア受入れは未実施 |
+
+MinHook pinおよび`build-dist`経路の最終レビューはpendingです。このcheckpointでは
+それらの完了や、上表のlive factsからのhardware acceptanceを断言しません。
+
 ## v1.1.1 リリースノート
 
 Rekordbox 7.2.18での実機検証を進め、Web表示とHook連携を安定化しました。
@@ -104,17 +146,20 @@ npm start
 空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
 しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
 Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
-unpaired surrogateは拒否します。既定の接続先は
-KDMX互換のflat `generic-json` adapter、`/dj-link`、heartbeat 5000msです。
-adapterは`SYNDOCAL_WS_ADAPTER`で明示選択します。選択できるのは
-`generic-json`(flat frame、ACK 8フィールド固定)と
-`syndocal-envelope-v1`(KDMXレガシーv1 envelope wire、ACK 7フィールド固定)で、
-未設定・未知名はfail-closedとなり黙ってフォールバックしません。
+unpaired surrogateは拒否します。出荷・現行productionの既定adapterはKDMX互換の
+flat `generic-json`、接続先pathは`/dj-link`、heartbeatは5000msです。接続後は
+`DJ_AGENT_HELLO` → 権威snapshot(`DJ_STATE_SYNC`) →
+`DJ_TIMELINE_STATE_REQUEST`/timeline actionの順序が必須で、snapshot確定前の
+timeline操作はfail-closedです(SnapshotRequired)。adapterは
+`SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示選択します。選択できるのは
+`generic-json`(既定。flat frame、ACK 8フィールド固定)と
+`syndocal-envelope-v1`(明示選択時のみ。KDMXレガシーv1 envelope wire、
+ACK 7フィールド固定、legacy互換/診断用途)で、未設定時はこの既定が適用され、
+未知名はfail-closedとなり黙ってフォールバックしません。
 
 ~~~json
 {
   "enabled": true,
-  "allowRemoteActions": false,
   "syndocal": {
     "host": "192.168.10.20",
     "port": 9100,
@@ -142,7 +187,7 @@ adapterは`SYNDOCAL_WS_ADAPTER`で明示選択します。選択できるのは
       "updateIntervalMs": 50, "resetAfterStop": true, "resetValue": 127
     },
     "releaseMacro": {
-      "enabled": true,
+      "enabled": false,
       "sequence": "filter-then-fade",
       "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
       "resetAfterStop": true
@@ -151,6 +196,10 @@ adapterは`SYNDOCAL_WS_ADAPTER`で明示選択します。選択できるのは
 }
 ~~~
 
+`releaseMacro.enabled` はphysical acceptanceが完了するまで必ずfalseのままにします。
+上のramp定義は受入れ後にoperatorが明示的に有効化する場合の契約例であり、
+first-run Setupのpreviewでも常にfalseへ固定されます。
+
 DJ_AGENT_ENABLED未設定時はoptionalなWebSocket/MIDI/global-hotkey依存を読み込まず、
 SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、HTTP APIは
 継続します。拡張を有効にした場合も、/api/dj-agent/actions/loop-half、
@@ -158,9 +207,16 @@ SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、
 /api/dj-agent/actions/track-active は物理ペダルと同じAction経路を使う診断用
 エンドポイントです。Windows global hotkey用adapterとMIDI transportは実行時に
 optional requireされ、未導入なら機能を無効表示して本体を停止させません。
-読み取りAPIはLANから利用できますが、POST actionは既定でIPv4/IPv6 loopback
-だけに限定されます。明示的に `DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` を設定した
-場合のみリモートactionを許可します。物理wire event（DJ_MASTER_CHANGED、
+読み取りAPIはLANから利用できますが、/api/dj-agent/actions/* のPOST action診断は
+**恒久的にIPv4/IPv6 loopback限定**であり、DJ PC上のlocalhostからだけ到達できます。
+判定は実際のTCP peerアドレスに基づき、Host/Origin/X-Forwarded-*や設定では
+peerを偽装できません。旧env `DJ_AGENT_ALLOW_REMOTE_ACTIONS` とconfig-fileの
+`allowRemoteActions` は非推奨です。trueを設定しても権限は一切開かず、起動時に
+固定の（呼び出し値を含まない）セキュリティ警告を1件出力します。
+物理ペダルとglobal hotkeyはDJ PCローカルで動作し、FOH側のShow Controlは
+トークン認証済みの `/dj-link` WebSocket経由で行います。この変更で、LAN向けの
+read-only GET APIや既存のSocket.IOイベントが認証付きになったわけではありません
+（両者は従来どおり無認証のままです）。物理wire event（DJ_MASTER_CHANGED、
 DJ_MASTER_TRACK_ACTIVE、DJ_LOOP_STATE、DJ_RELEASE、DJ_TIMELINE_BEAT_JUMP、
 DJ_TIMELINE_LOOP_SET）はすべてACK必須で、送信直後を成功扱いにせず、
 pending/acknowledged/rejected/timed-out/send-failedを `/api/dj-agent/status` とUIに

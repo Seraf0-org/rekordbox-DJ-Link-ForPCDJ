@@ -35,6 +35,8 @@
     ],
     "assets": [
       "node_modules/ws/**/*",
+      "node_modules/@ktamas77/abletonlink/package.json",
+      "node_modules/@ktamas77/abletonlink/build/Release/abletonlink.node",
       "node_modules/@julusian/midi/prebuilds/**/*",
       "node_modules/@julusian/midi/**/*.node",
       "node_modules/uiohook-napi/prebuilds/**/*",
@@ -50,11 +52,12 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "6.22.0"
+    "@yao-pkg/pkg": "6.22.0",
+    "node-gyp": "12.4.0"
   },
   "optionalDependencies": {
-    "@ktamas77/abletonlink": "^1.2.3",
     "@julusian/midi": "^3.8.1",
+    "@ktamas77/abletonlink": "^1.2.3",
     "uiohook-napi": "^1.5.5",
     "ws": "^8.18.3"
   }

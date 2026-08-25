@@ -382,7 +382,8 @@ test("MIDI port config keeps missing values unset and honors device or explicit 
     },
   });
   namedMidi.start();
-  assert.deepEqual(openedNamed, [1]);
+  assert.deepEqual(openedNamed, []);
+  assert.equal(namedMidi.getStatus().ok, false);
   namedMidi.stop();
 
   const openedZero = [];
@@ -400,7 +401,8 @@ test("MIDI port config keeps missing values unset and honors device or explicit 
     },
   });
   zeroMidi.start();
-  assert.deepEqual(openedZero, [0]);
+  assert.deepEqual(openedZero, []);
+  assert.equal(zeroMidi.getStatus().ok, false);
   zeroMidi.stop();
 });
 
@@ -422,6 +424,8 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
   const sent = [];
   const midi = createRekordboxMidi({
     enabled: true,
+    device: "Test MIDI",
+    port: 0,
     deckChannels: config.midi.deckChannels,
     mappings: {
       loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
@@ -443,6 +447,7 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
     midiModule: {
       Output: class {
         getPortCount() { return 1; }
+        getPortName() { return "Test MIDI"; }
         openPort() {}
         closePort() {}
         sendMessage(message) { messages.push([...message]); }

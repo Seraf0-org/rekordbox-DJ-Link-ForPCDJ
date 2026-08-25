@@ -193,13 +193,22 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, cwd = process.cwd() 
       ? env.MIDI_PORT
       : midiFile.port;
   const resetFile = pickObject(merged.releaseReset || merged.release_reset);
+  // HTTP diagnostic action endpoints are permanently loopback-only on the DJ
+  // PC; FOH control uses the authenticated /dj-link WebSocket. Any env or
+  // config-file attempt to enable remote actions grants no authority and
+  // yields exactly one fixed, secret-free notice (caller values are never
+  // echoed back).
+  const allowRemoteEnablementAttempted =
+    asBoolean(env.DJ_AGENT_ALLOW_REMOTE_ACTIONS, false)
+    || asBoolean(merged.allowRemoteActions, false);
+  const allowRemoteDeprecationWarning = allowRemoteEnablementAttempted
+    ? "DJ Agent security notice: DJ_AGENT_ALLOW_REMOTE_ACTIONS/allowRemoteActions is deprecated and ignored; HTTP action endpoints are permanently loopback-only"
+    : null;
   const config = {
     enabled,
-    allowRemoteActions: asBoolean(
-      env.DJ_AGENT_ALLOW_REMOTE_ACTIONS,
-      asBoolean(merged.allowRemoteActions, false)
-    ),
+    allowRemoteActions: false,
     warning: fileResult.warning,
+    allowRemoteDeprecationWarning,
     syndocal: {
       enabled: asBoolean(env.SYNDOCAL_ENABLED, asBoolean(syndocalFile.enabled, enabled)),
       host: String(env.SYNDOCAL_HOST || syndocalFile.host || "127.0.0.1").trim(),

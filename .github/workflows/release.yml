@@ -48,8 +48,37 @@ jobs:
           python -m venv .venv
           .venv\Scripts\pip install -r python\requirements.txt
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
+      # Reproducible Inno Setup toolchain: the official 6.7.3 installer is
+      # downloaded from the authoritative GitHub release asset
+      # (jrsoftware/issrc tag is-6_7_3) over HTTPS and SHA256-verified BEFORE
+      # execution, then installed per-user (/CURRENTUSER) into
+      # LocalApplicationData so the OS-derived discovery path in
+      # scripts/build-dist.ps1 finds it. scripts/build-dist.ps1 additionally
+      # pins the exact ISCC.exe SHA256, Authenticode signer, and file version
+      # at build time. No unpinned Chocolatey package is used; setup steps use
+      # first-party actions only (the pre-existing third-party
+      # softprops/action-gh-release upload step is unchanged).
+      - name: Install pinned Inno Setup 6.7.3
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expectedSha256 = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
+          $installerUrl = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $installerPath = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash
+          if ($actualSha256 -cne $expectedSha256) {
+            throw "downloaded Inno Setup installer sha256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          $setupProcess = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER" -Wait -PassThru
+          if ($setupProcess.ExitCode -ne 0) {
+            throw "Inno Setup 6.7.3 installer exited with $($setupProcess.ExitCode)"
+          }
+          $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+          $isccPath = Join-Path $localAppData "Programs\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
+            throw "pinned Inno Setup compiler missing after install: $isccPath"
+          }
+          Write-Host "Inno Setup 6.7.3 installed: $isccPath"
 
       - name: Run tests
         run: npm test

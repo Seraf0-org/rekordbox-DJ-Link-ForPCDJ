@@ -118,11 +118,17 @@ the timeline event. The standard show trigger is
 DJ_MASTER_TRACK_ACTIVE, which requires a known track identity, an explicitly
 selected (or documented fallback) master deck, and isPlaying: true.
 
-The built-in Syndocal transport has an explicit adapter registry. The only
-built-in choice is `generic-json`, and it must be selected explicitly; unknown
-or empty adapter names are reported unavailable rather than silently falling
-back. This repository has no authoritative Syndocal/KDMX protocol contract, so
-generic-json is only an adapter boundary. It provides reconnect, heartbeat,
+The built-in Syndocal transport has an explicit adapter registry. The shipped,
+current, and production default is `generic-json`: flat frames selected
+automatically when no adapter is configured, under mandatory snapshot ordering
+(hello, then a valid authoritative state-sync snapshot, before timeline
+requests/actions). `syndocal-envelope-v1` is available only as an explicit
+legacy compatibility/diagnostic choice for the older KDMX v1 envelope wire.
+Unknown adapter names fail closed instead of silently falling back, and there
+is no silent fallback between adapters. The authoritative Syndocal/KDMX wire
+contract is recorded in
+[`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md). generic-json remains
+the transport boundary providing reconnect, heartbeat,
 event IDs, monotonically increasing sequence values, ACK tracking for
 DJ_RELEASE and DJ_LOOP_STATE, delivery states, and DJ_STATE_SYNC on reconnect.
 When Syndocal is disabled, local-only MIDI actions continue to work without a

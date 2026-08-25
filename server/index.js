@@ -1,5 +1,8 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const isPackaged = typeof process.pkg !== "undefined";
@@ -44,8 +47,29 @@ const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetecto
 const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
-const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
+const {
+  getActionRequestOrigin,
+  isActionPreflightAllowed,
+  isActionRequestAllowed,
+  isLocalSetupRequest,
+} = require("./dj-agent/httpSecurity");
+const { buildPublicLookupDiagnostic } = require("./publicDiagnostics");
+const { enumerateMidiOutputs } = require("./dj-agent/midiPorts");
+const { validateCustomMidiCsv } = require("./dj-agent/rekordboxMapping");
+const { SYNDOCAL_ADAPTERS, buildSetupChecklist } = require("./dj-agent/setupChecklist");
+const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupSelection");
 const { resolveBuildIdentity } = require("./buildIdentity");
+
+const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.2.csv";
+const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
+// Readiness-validation seam for operators and tests: point the semantic CSV
+// validator at an alternate artifact without touching the bundled file that
+// /setup serves. An unreadable or invalid override simply fails readiness
+// closed in inspectSetupMappingArtifact().
+const SETUP_MAPPING_PATH = String(process.env.RB_OUTPUT_SETUP_MAPPING_PATH || "").trim()
+  ? path.resolve(String(process.env.RB_OUTPUT_SETUP_MAPPING_PATH).trim())
+  : path.join(PUBLIC_ROOT, "setup", SETUP_MAPPING_FILENAME);
 
 const HTTP_DEFAULT_HOST = "0.0.0.0";
 
@@ -494,19 +518,23 @@ function resolveContentMetadata(contentId) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
-    let stderr = "";
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
+    // Drain diagnostics so a noisy helper cannot block, but never retain or
+    // publish child stderr: Python tracebacks can contain private paths.
+    child.stderr.resume();
     child.on("close", (code) => {
       if (code !== 0) {
-        pushDebugLog("db-lookup-error", `contentId ${key}: lookup process failed (${code})`, {
-          contentId: key,
-          stderr: stderr.trim() || null,
-        });
+        pushDebugLog(
+          "db-lookup-error",
+          `contentId ${key}: lookup process failed`,
+          buildPublicLookupDiagnostic({
+            contentId: key,
+            reason: "lookup-process-failed",
+            exitCode: code,
+          })
+        );
         resolve(null);
         return;
       }
@@ -527,18 +555,24 @@ function resolveContentMetadata(contentId) {
         pushDebugLog("db-lookup-miss", `contentId ${key}: metadata not found`, { contentId: key });
         resolve(null);
       } catch {
-        pushDebugLog("db-lookup-error", `contentId ${key}: invalid lookup payload`, {
-          contentId: key,
-          stdout: raw.slice(0, 240),
-        });
+        pushDebugLog(
+          "db-lookup-error",
+          `contentId ${key}: invalid lookup payload`,
+          buildPublicLookupDiagnostic({ contentId: key, reason: "invalid-lookup-payload" })
+        );
         resolve(null);
       }
     });
     child.on("error", (error) => {
-      pushDebugLog("db-lookup-error", `contentId ${key}: lookup spawn error`, {
-        contentId: key,
-        message: error?.message || String(error),
-      });
+      pushDebugLog(
+        "db-lookup-error",
+        `contentId ${key}: lookup spawn error`,
+        buildPublicLookupDiagnostic({
+          contentId: key,
+          reason: "lookup-spawn-failed",
+          error,
+        })
+      );
       resolve(null);
     });
   }).finally(() => {
@@ -1071,6 +1105,9 @@ function updateDjAgentStatus() {
 if (DJ_AGENT_CONFIG.warning) {
   mergeWarning(DJ_AGENT_CONFIG.warning);
 }
+if (DJ_AGENT_CONFIG.allowRemoteDeprecationWarning) {
+  mergeWarning(DJ_AGENT_CONFIG.allowRemoteDeprecationWarning);
+}
 
 djAgentSyndocalClient.on("status", updateDjAgentStatus);
 djAgentSyndocalClient.on("ack", updateDjAgentStatus);
@@ -1449,8 +1486,94 @@ hookUdpProvider.on("mixer-state", (mixerState) => {
   emitState();
 });
 
+const DJ_AGENT_ACTION_PATH_PREFIX = "/api/dj-agent/actions/";
+
+// Express 5 matches these routes case-insensitively and tolerates a single
+// trailing slash, while percent-encoded or malformed path variants never
+// reach the action handlers (verified against express@5.2.1). A single decode
+// is not enough to recognize every action-shaped request: nested encodings
+// such as %2561ctions hide the "actions" segment behind two rounds of
+// percent-decoding. The fence therefore walks a small bounded number of
+// decode rounds and fails closed: a request is protected action surface when
+// any round resolves to the action shape, or when the walk hits its depth
+// bound or a malformed sequence while the request still sits inside the
+// /api/dj-agent/ namespace with unresolved percent-encoding. Literal prefix
+// characters survive every decode round unchanged, so "inside the namespace"
+// here implies the raw request had the same prefix. This classification only
+// strips wildcard CORS from unroutable lookalikes; Express routing itself is
+// untouched, no new action becomes routable, and read-only surfaces outside
+// the namespace keep the LAN viewer policy.
+const ACTION_PATH_DECODE_LIMIT = 4;
+
+function isDjAgentActionRequestPath(rawPath) {
+  if (typeof rawPath !== "string") {
+    return false;
+  }
+  const matchesActionShape = (text) => {
+    const normalized = text.toLowerCase().replace(/\/+$/, "");
+    return (
+      normalized === "/api/dj-agent/actions"
+      || normalized.startsWith(DJ_AGENT_ACTION_PATH_PREFIX)
+    );
+  };
+  const sitsInActionNamespaceWithUnresolvedEncoding = (text) => {
+    const normalized = text.toLowerCase();
+    return normalized.startsWith("/api/dj-agent/") && normalized.includes("%");
+  };
+
+  if (!rawPath.includes("%")) {
+    // Literal path: no decode round could ever reveal a hidden action shape.
+    return matchesActionShape(rawPath);
+  }
+  let current = rawPath;
+  for (let round = 0; round < ACTION_PATH_DECODE_LIMIT; round += 1) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      // Malformed percent-encoding fails closed exactly as documented: only
+      // while the walk still sits inside the /api/dj-agent/ namespace with
+      // unresolved encoding. Malformed targets elsewhere are unrelated 404
+      // surface and keep the LAN viewer policy; none of them can route.
+      return sitsInActionNamespaceWithUnresolvedEncoding(current);
+    }
+    if (decoded === current) {
+      // Fully decoded: no percent-encoding remains anywhere in the path.
+      break;
+    }
+    current = decoded;
+    if (matchesActionShape(current)) {
+      return true;
+    }
+  }
+  return sitsInActionNamespaceWithUnresolvedEncoding(current);
+}
+
 app.use(express.json());
 app.use((_req, res, next) => {
+  const isDjAgentActionPath = isDjAgentActionRequestPath(_req.path);
+  if (isDjAgentActionPath) {
+    // Action endpoints never inherit the LAN viewer's wildcard CORS policy.
+    // A browser preflight must pass the same action fence as the POST itself.
+    res.removeHeader("Access-Control-Allow-Origin");
+    if (_req.method === "OPTIONS") {
+      if (!isActionPreflightAllowed(_req)) {
+        res.status(403).end();
+        return;
+      }
+      const origin = getActionRequestOrigin(_req);
+      if (origin) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+      }
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+      res.status(204).end();
+      return;
+    }
+    next();
+    return;
+  }
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Last-Event-ID");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -1460,7 +1583,7 @@ app.use((_req, res, next) => {
   }
   next();
 });
-app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
+app.use(express.static(PUBLIC_ROOT));
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -1510,18 +1633,232 @@ app.get("/api/state", (_req, res) => {
   res.json(buildSnapshot());
 });
 
+function listSetupNetworkInterfaces() {
+  const interfaces = [];
+  for (const [name, entries] of Object.entries(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (!entry || entry.internal === true || entry.family !== "IPv4" || net.isIP(entry.address) !== 4) {
+        continue;
+      }
+      interfaces.push({ name, address: entry.address });
+    }
+  }
+  return interfaces.sort((left, right) =>
+    left.name.localeCompare(right.name) || left.address.localeCompare(right.address)
+  );
+}
+
+function inspectSetupMappingArtifact() {
+  let result;
+  try {
+    result = validateCustomMidiCsv(fs.readFileSync(SETUP_MAPPING_PATH, "utf8"));
+  } catch {
+    result = { ok: false, code: "artifact-unavailable", summary: null, canonicalString: null };
+  }
+  return {
+    filename: SETUP_MAPPING_FILENAME,
+    url: SETUP_MAPPING_URL,
+    valid: result.ok === true,
+    code: result.ok === true ? "ok" : result.code || "artifact-invalid",
+    semanticFingerprint: result.ok === true
+      ? crypto.createHash("sha256").update(result.canonicalString, "utf8").digest("hex")
+      : null,
+    summary: result.ok === true ? result.summary : null,
+    operatorVerified: false,
+  };
+}
+
+function sanitizeMidiEnumeration(result) {
+  return {
+    ok: result?.ok === true,
+    available: result?.available === true,
+    reason: typeof result?.reason === "string" ? result.reason : null,
+    ports: Array.isArray(result?.ports)
+      ? result.ports.map((port) => ({
+          port: Number.isInteger(port?.port) ? port.port : null,
+          name: typeof port?.name === "string" ? port.name : null,
+        }))
+      : [],
+  };
+}
+
+function buildDjAgentSetupSnapshot() {
+  const mappingArtifact = inspectSetupMappingArtifact();
+  const networkInterfaces = listSetupNetworkInterfaces();
+  const midiPorts = sanitizeMidiEnumeration(enumerateMidiOutputs({
+    moduleName: DJ_AGENT_CONFIG.midi.moduleName,
+  }));
+  const runtime = state.status.djAgent || {};
+  const runtimeMidi = runtime.midi || {};
+  const runtimePedal = runtime.pedal || {};
+  const runtimeSyndocal = runtime.syndocal || {};
+  const midiSelection = verifyRuntimeMidiSelection({
+    config: DJ_AGENT_CONFIG.midi,
+    runtime: runtimeMidi,
+    ports: midiPorts.ports,
+  });
+  const readiness = buildSetupChecklist({
+    enabled: DJ_AGENT_CONFIG.enabled,
+    mapping: {
+      enabled: true,
+      valid: mappingArtifact.valid,
+      // The bundled, exact-validated CSV is software artifact readiness.
+      // operatorVerified remains false in the artifact response; physical
+      // Rekordbox Learn/hardware acceptance is a separate gate.
+      ready: mappingArtifact.valid,
+    },
+    pedal: DJ_AGENT_CONFIG.pedal.enabled
+      ? {
+          enabled: true,
+          available: runtimePedal.available === true,
+          state: runtimePedal.state === "listening" ? "verification-required" : runtimePedal.state,
+          ready: false,
+        }
+      : { enabled: false },
+    midi: DJ_AGENT_CONFIG.midi.enabled
+      ? {
+          enabled: true,
+          available: runtimeMidi.available === true,
+          ok: runtimeMidi.ok === true,
+          selected: midiSelection.ready,
+          selectionValid: midiSelection.ready,
+          nameVerified: midiSelection.nameVerified,
+        }
+      : { enabled: false },
+    syndocal: DJ_AGENT_CONFIG.syndocal.enabled
+      ? {
+          enabled: true,
+          available: runtimeSyndocal.state !== "unavailable",
+          state: runtimeSyndocal.state || "not-started",
+          connected: runtimeSyndocal.state === "connected",
+          adapter: DJ_AGENT_CONFIG.syndocal.adapter,
+        }
+      : { enabled: false },
+    macro: DJ_AGENT_CONFIG.midi.releaseMacro.enabled
+      ? {
+          enabled: true,
+          ready: false,
+          sequence: DJ_AGENT_CONFIG.midi.releaseMacro.sequence,
+        }
+      : { enabled: false },
+  });
+  const configuredHost = DJ_AGENT_CONFIG.syndocal.host === "127.0.0.1"
+    ? ""
+    : DJ_AGENT_CONFIG.syndocal.host;
+  const configuredDevice = DJ_AGENT_CONFIG.midi.device || "";
+  const matchingPort = exactMidiPort(
+    midiPorts.ports,
+    DJ_AGENT_CONFIG.midi.port,
+    configuredDevice
+  );
+
+  return {
+    ok: true,
+    localOnly: true,
+    enabled: DJ_AGENT_CONFIG.enabled,
+    tokenConfigured: typeof DJ_AGENT_CONFIG.syndocal.token === "string"
+      && DJ_AGENT_CONFIG.syndocal.token.length > 0,
+    readiness,
+    networkInterfaces,
+    midiPorts,
+    mappingArtifact,
+    configTemplate: {
+      schemaVersion: 1,
+      enabled: true,
+      allowRemoteActions: false,
+      syndocal: {
+        enabled: true,
+        host: configuredHost,
+        port: DJ_AGENT_CONFIG.syndocal.port || 9100,
+        path: DJ_AGENT_CONFIG.syndocal.path || "/dj-link",
+        nic: DJ_AGENT_CONFIG.syndocal.nic || "",
+        // Fail-closed template adapter: only an exact recognized adapter may
+        // be echoed. An unknown/invalid configured adapter renders as the
+        // blank/unselected value instead of being silently rewritten to
+        // syndocal-envelope-v1 or any other valid adapter; the syndocal
+        // readiness gate reports `syndocal-adapter-invalid` and the caller's
+        // input is never reflected back here.
+        adapter: SYNDOCAL_ADAPTERS.includes(DJ_AGENT_CONFIG.syndocal.adapter)
+          ? DJ_AGENT_CONFIG.syndocal.adapter
+          : "",
+        heartbeatMs: DJ_AGENT_CONFIG.syndocal.heartbeatMs || 5_000,
+      },
+      pedal: {
+        enabled: true,
+        bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" },
+      },
+      midi: {
+        enabled: true,
+        moduleName: "@julusian/midi",
+        device: matchingPort?.name || "",
+        port: matchingPort?.port ?? null,
+        deckChannels: { "1": 1, "2": 2 },
+        mappings: {
+          loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
+          stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+          filter: { channel: 1, messageType: "controlChange", cc: 16 },
+          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+        },
+        releaseFade: {
+          enabled: true,
+          mapping: "releaseFade",
+          target: "deck",
+          startValue: 127,
+          endValue: 0,
+          durationMs: 1_000,
+          updateIntervalMs: 50,
+          resetAfterStop: true,
+          resetValue: 127,
+        },
+        releaseMacro: {
+          enabled: false,
+          sequence: "filter-then-fade",
+          filter: {
+            startValue: 64,
+            endValue: 127,
+            durationMs: 1_000,
+            updateIntervalMs: 50,
+            resetValue: 64,
+          },
+          resetAfterStop: true,
+        },
+      },
+    },
+  };
+}
+
+app.get("/api/dj-agent/setup", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  // This diagnostic/config-template response is deliberately same-machine.
+  // Remove the server-wide LAN-viewer CORS header and reject DNS rebinding or
+  // cross-origin reads even when the TCP peer itself is loopback.
+  res.removeHeader("Access-Control-Allow-Origin");
+  if (!isLocalSetupRequest(req)) {
+    res.status(403).json({
+      ok: false,
+      localOnly: true,
+      error: "DJ Agent setup is available only on the DJ PC through localhost",
+    });
+    return;
+  }
+  res.status(200).json(buildDjAgentSetupSnapshot());
+});
+
 function handleDjAgentAction(action, _req, res) {
+  res.removeHeader("Access-Control-Allow-Origin");
+  // Permanently loopback-only: the socket peer must be the DJ PC itself.
+  // Env/config opt-outs were removed; proxy headers cannot forge the peer.
+  if (!isActionRequestAllowed(_req)) {
+    res.status(403).json({
+      ok: false,
+      error: "DJ Agent actions are available only on the DJ PC through localhost",
+    });
+    return;
+  }
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
       error: "DJ Agent extension is disabled; set DJ_AGENT_ENABLED=true or use DJ_AGENT_CONFIG_PATH",
-    });
-    return;
-  }
-  if (!DJ_AGENT_CONFIG.allowRemoteActions && !isLoopbackRequest(_req)) {
-    res.status(403).json({
-      ok: false,
-      error: "DJ Agent actions are loopback-only unless DJ_AGENT_ALLOW_REMOTE_ACTIONS=true",
     });
     return;
   }

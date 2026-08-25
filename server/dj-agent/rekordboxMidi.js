@@ -1,4 +1,5 @@
 const { EventEmitter } = require("node:events");
+const { resolveMidiModule } = require("./midiModuleResolver");
 
 function clampMidi(value, fallback = 0) {
   const number = Number(value);
@@ -78,28 +79,6 @@ function statusByte(mapping) {
   return base + mapping.channel - 1;
 }
 
-function resolveMidiModule(moduleName = "") {
-  const candidates = moduleName
-    ? [moduleName]
-    : ["@julusian/midi", "midi"];
-  for (const candidate of candidates) {
-    try {
-      // Keep the supported optional packages as literal requires so pkg can
-      // discover and include their Windows native prebuilds.
-      if (candidate === "@julusian/midi") {
-        return require("@julusian/midi");
-      }
-      if (candidate === "midi") {
-        return require("midi");
-      }
-      return require(candidate);
-    } catch {
-      // Optional adapters are best-effort; try the next built-in fallback.
-    }
-  }
-  return null;
-}
-
 function createRekordboxMidi({
   enabled = false,
   moduleName = "@julusian/midi",
@@ -147,28 +126,66 @@ function createRekordboxMidi({
     emitter.emit("status", { ...status });
   }
 
-  function choosePort(outputObject) {
-    const count = Number(outputObject?.getPortCount?.() || 0);
-    if (count <= 0) {
+  function readExactPortName(outputObject, index) {
+    try {
+      const name = outputObject?.getPortName?.(index);
+      return typeof name === "string" ? name.trim() : null;
+    } catch {
+      // A native name-read failure must fail closed, never guess a match.
       return null;
     }
-    const requestedPort =
-      port == null || String(port).trim() === ""
-        ? null
-        : Number.isFinite(Number(port))
-          ? Math.trunc(Number(port))
-          : null;
-    if (requestedPort != null && requestedPort >= 0 && requestedPort < count) {
-      return requestedPort;
+  }
+
+  function choosePort(outputObject) {
+    const count = Number(outputObject?.getPortCount?.() || 0);
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      return null;
     }
-    if (device && typeof outputObject.getPortName === "function") {
-      for (let index = 0; index < count; index += 1) {
-        if (String(outputObject.getPortName(index) || "").toLowerCase().includes(device.toLowerCase())) {
-          return index;
-        }
+    const requestedPort = typeof port === "number" && Number.isSafeInteger(port) && port >= 0
+      ? port
+      : null;
+    const requestedDevice = typeof device === "string" && device.trim() ? device.trim() : null;
+    if (
+      requestedPort == null
+      || requestedPort >= count
+      || requestedDevice == null
+      || typeof outputObject.getPortName !== "function"
+    ) {
+      return null;
+    }
+    // One exact, case-sensitive, trimmed device-name rule shared with the
+    // setup probe: the selected port must carry the literal configured name,
+    // and that name must be unique across every enumerated port. Duplicate
+    // identical port names are ambiguous and always fail closed.
+    if (readExactPortName(outputObject, requestedPort) !== requestedDevice) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      if (index !== requestedPort && readExactPortName(outputObject, index) === requestedDevice) {
+        return null;
       }
     }
-    return device ? null : 0;
+    return { port: requestedPort, device: requestedDevice };
+  }
+
+  function releaseOutput(outputObject, closeOpenedPort = false) {
+    if (!outputObject) {
+      return;
+    }
+    if (closeOpenedPort && typeof outputObject.closePort === "function") {
+      try {
+        outputObject.closePort();
+      } catch {
+        // Shutdown and failed-start cleanup remain best-effort.
+      }
+    }
+    if (typeof outputObject.destroy === "function") {
+      try {
+        outputObject.destroy();
+      } catch {
+        // Native-handle release failure is reported through connection state.
+      }
+    }
   }
 
   function start() {
@@ -179,8 +196,7 @@ function createRekordboxMidi({
     if (opened) {
       return;
     }
-    const moduleObject =
-      midiModule || resolveMidiModule(moduleName === "@julusian/midi" ? "" : moduleName);
+    const moduleObject = midiModule || resolveMidiModule(moduleName);
     const factory = outputFactory || (() => new moduleObject.Output());
     if (!moduleObject && !outputFactory) {
       updateStatus({
@@ -191,28 +207,58 @@ function createRekordboxMidi({
       emitter.emit("unavailable", { reason: "missing-midi-dependency" });
       return;
     }
+    let portOpened = false;
     try {
       output = factory();
-      const selectedPort = choosePort(output);
-      if (selectedPort == null || typeof output.openPort !== "function") {
+      const selection = choosePort(output);
+      if (!selection || typeof output.openPort !== "function") {
         updateStatus({ ok: false, available: true, message: "No configured MIDI output device found" });
+        releaseOutput(output);
         output = null;
         return;
       }
-      output.openPort(selectedPort);
+      try {
+        if (output.openPort(selection.port) === false) {
+          // An explicit refusal means no port was opened; skip the close attempt.
+          updateStatus({ ok: false, available: true, message: "Configured MIDI output could not be opened" });
+          releaseOutput(output);
+          output = null;
+          return;
+        }
+        portOpened = true;
+      } catch {
+        // A thrown open can leave the port partially opened natively, so the
+        // open attempt gets exactly one best-effort close before destroy,
+        // without masking the primary failure.
+        releaseOutput(output, true);
+        output = null;
+        updateStatus({ ok: false, available: true, message: "MIDI output error" });
+        emitter.emit("adapter-error", { code: "midi-open-failed", message: "MIDI output error" });
+        return;
+      }
+      const observedAfterOpen = typeof output.getPortName === "function"
+        ? String(output.getPortName(selection.port) || "").trim()
+        : "";
+      if (observedAfterOpen !== selection.device) {
+        releaseOutput(output, true);
+        output = null;
+        updateStatus({ ok: false, available: true, message: "Configured MIDI output identity changed" });
+        return;
+      }
       opened = true;
       updateStatus({
         ok: true,
         available: true,
         message: "MIDI output connected",
-        port: selectedPort,
-        device: typeof output.getPortName === "function" ? output.getPortName(selectedPort) : device || null,
+        port: selection.port,
+        device: selection.device,
       });
-    } catch (error) {
+    } catch {
+      releaseOutput(output, portOpened || opened);
       output = null;
       opened = false;
-      updateStatus({ ok: false, available: true, message: `MIDI output error: ${error?.message || String(error)}` });
-      emitter.emit("adapter-error", error);
+      updateStatus({ ok: false, available: true, message: "MIDI output error" });
+      emitter.emit("adapter-error", { code: "midi-start-failed", message: "MIDI output error" });
     }
   }
 
@@ -225,9 +271,9 @@ function createRekordboxMidi({
       output.sendMessage(message);
       emitter.emit("sent", { message, ...context });
       return true;
-    } catch (error) {
-      emitter.emit("send-failed", { reason: "send-error", error, message, ...context });
-      updateStatus({ ok: false, message: `MIDI send failed: ${error?.message || String(error)}` });
+    } catch {
+      emitter.emit("send-failed", { reason: "send-error", code: "midi-send-failed", message, ...context });
+      updateStatus({ ok: false, message: "MIDI send failed" });
       return false;
     }
   }
@@ -489,13 +535,7 @@ function createRekordboxMidi({
     }
     rampStartedAt = 0;
     releaseFadeStartedAt = 0;
-    if (opened && output && typeof output.closePort === "function") {
-      try {
-        output.closePort();
-      } catch {
-        // Ignore close errors during shutdown.
-      }
-    }
+    releaseOutput(output, opened);
     output = null;
     opened = false;
     updateStatus({ ok: false, rampActive: false, message: enabled ? "MIDI output stopped" : status.message });

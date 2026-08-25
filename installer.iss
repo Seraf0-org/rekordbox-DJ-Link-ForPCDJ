@@ -17,7 +17,7 @@ Source: "dist\inject_hook.exe";     DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\content_lookup.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\native\bin\rb_hook.dll"; DestDir: "{app}\native\bin"; Flags: ignoreversion
 Source: "dist\public\*";            DestDir: "{app}\public"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "start-rb.bat";             DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\start-rb.bat";       DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\build-identity.json";   DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\install-manifest.json"; DestDir: "{app}"; Flags: ignoreversion
 

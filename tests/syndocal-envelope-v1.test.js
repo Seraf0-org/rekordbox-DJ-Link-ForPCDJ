@@ -392,6 +392,134 @@ test("adapter selection is explicit: no silent fallback to generic-json", () => 
   }).valid, true);
 });
 
+test("hostile adapter selections are never reflected through client status surfaces", () => {
+  const EXPECTED_UNRECOGNIZED_ERROR =
+    "Syndocal configured adapter is unrecognized; select generic-json or syndocal-envelope-v1 explicitly; no silent generic fallback is allowed";
+  const hostile = [
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    "javascript:void(0)",
+    "kdmx-turbo",
+    "KDMX-TURBO",
+    "\u0000\u001f<svg onload=alert(1)>",
+    "  syndocal-envelope-v1\u0000",
+    42,
+    true,
+    ["kdmx-turbo"],
+    { name: "<iframe src=//evil.example>" },
+    { name: "\u0007bell" },
+  ];
+  const observedErrors = new Set();
+  for (const value of hostile) {
+    const client = createSyndocalClient({ enabled: true, adapter: value });
+    try {
+      const snapshot = client.getStatus();
+      assert.equal(snapshot.adapter, null, `raw value must never appear as status.adapter: ${typeof value}`);
+      if (snapshot.lastError !== null) {
+        observedErrors.add(snapshot.lastError);
+        // Verbatim equality proves the reason is a fixed constant: it can
+        // carry no configured value, length, hash, or markup fragment.
+        assert.equal(snapshot.lastError, EXPECTED_UNRECOGNIZED_ERROR);
+        assert.equal(/[<>]|onerror|onload|alert|void\(0\)|kdmx|turbo/i.test(snapshot.lastError), false);
+        for (let code = 0; code <= 0x1f; code += 1) {
+          assert.equal(snapshot.lastError.includes(String.fromCharCode(code)), false);
+        }
+      }
+      const serialized = JSON.stringify(snapshot);
+      for (const fragment of [
+        "<script>", "onerror", "onload", "kdmx-turbo", "void(0)",
+        "\u0000", "\u001f", "\u0007", "evil.example",
+      ]) {
+        assert.equal(serialized.includes(fragment), false, `status JSON must not contain ${JSON.stringify(fragment)}`);
+      }
+    } finally {
+      client.stop();
+    }
+  }
+  // The unrecognized-selection reason is one single stable string regardless
+  // of how hostile or distinct each configured value was.
+  assert.equal(observedErrors.size, 1);
+  assert.match([...observedErrors][0], /no silent generic fallback/);
+});
+
+test("unavailable events and post-start updates keep the stable non-reflective reason", () => {
+  const unavailableEvents = [];
+  const client = createSyndocalClient({ enabled: true, adapter: "<script>alert('xss')</script>" });
+  client.on("unavailable", (event) => unavailableEvents.push(event));
+  client.start();
+  try {
+    const status = client.getStatus();
+    assert.equal(status.state, "unavailable");
+    assert.match(status.message, /unrecognized/);
+    assert.match(status.lastError, /no silent generic fallback/);
+    assert.equal(status.adapter, null);
+    assert.equal(unavailableEvents.length, 1);
+    assert.equal(JSON.stringify(unavailableEvents).includes("<script>"), false);
+    assert.equal(JSON.stringify(status).includes("<script>"), false);
+  } finally {
+    client.stop();
+  }
+
+  // Whitespace-only selection takes the explicit not-configured branch, also
+  // stable and non-reflective.
+  const blank = createSyndocalClient({ enabled: true, adapter: "   " });
+  try {
+    blank.start();
+    const status = blank.getStatus();
+    assert.equal(status.adapter, null);
+    assert.match(status.lastError, /not configured/);
+  } finally {
+    blank.stop();
+  }
+});
+
+test("valid adapters expose only their exact recognized name on status surfaces", () => {
+  const generic = createSyndocalClient({ adapter: "generic-json" });
+  assert.equal(generic.getStatus().adapter, "generic-json");
+  generic.stop();
+
+  // Internal case/whitespace leniency still resolves, but the externally
+  // exposed name is canonicalized to the exact recognized identifier.
+  const legacyLenient = createSyndocalClient({ adapter: "  GENERIC-JSON  " });
+  assert.equal(legacyLenient.getStatus().adapter, "generic-json");
+  legacyLenient.stop();
+
+  const envelope = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "SYNDOCAL-ENVELOPE-V1",
+    WebSocketImpl: EnvelopeWebSocket,
+    heartbeatMs: 60_000,
+  });
+  try {
+    const status = envelope.getStatus();
+    assert.equal(status.adapter, "syndocal-envelope-v1");
+    assert.equal(status.state, "disconnected");
+    assert.equal(status.lastError, null);
+    assert.equal(JSON.stringify(status).toLowerCase().includes("syndocal-envelope-v1"), true);
+  } finally {
+    envelope.stop();
+  }
+
+  // A custom factory-provided adapter keeps working internally but its
+  // unrecognizable name is withheld from public status (null, not coerced).
+  const rogue = { name: "<marquee>pwn</marquee>" };
+  const viaFactory = resolveAdapter({ adapter: "anything", adapterFactory: () => rogue });
+  assert.equal(viaFactory.error, null);
+  const viaFactoryClient = createSyndocalClient({
+    enabled: true,
+    adapterFactory: () => rogue,
+    WebSocketImpl: EnvelopeWebSocket,
+    heartbeatMs: 60_000,
+  });
+  try {
+    assert.equal(viaFactoryClient.getStatus().adapter, null);
+    assert.equal(JSON.stringify(viaFactoryClient.getStatus()).includes("marquee"), false);
+  } finally {
+    viaFactoryClient.stop();
+  }
+});
+
 test("envelope ACK validator enforces the exact seven-field KDMX contract", () => {
   assert.equal(
     validateEnvelopeAck({ v: 1, type: "ACK", eventId: "e", sequence: 2, outcome: "accepted", code: null, stateGeneration: 0 }).valid,
