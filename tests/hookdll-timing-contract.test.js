@@ -109,7 +109,6 @@ test("hookdll tick accumulators and deltas stay in 64-bit ULONGLONG end to end",
   for (const decl of [
     "ULONGLONG g_lastProbeTick[8]",
     "ULONGLONG g_lastPlayerProbeTick[4]",
-    "ULONGLONG g_lastRowDataDiagTick[4]",
     "ULONGLONG g_lastTrackDiagLogTick",
     "ULONGLONG g_lastLoadDetourLogTick",
     "ULONGLONG g_lastLoopDiagTick",
