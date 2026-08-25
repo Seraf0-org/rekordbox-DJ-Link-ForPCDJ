@@ -1042,6 +1042,538 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   router.stop();
 });
 
+function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
+  let identityCounter = 0;
+  const detector = createTrackActivityDetector({
+    idFactory: () => `stage2-identity-${++identityCounter}`,
+  });
+  const midiCalls = [];
+  const midi = {
+    sendMapping: (name) => { midiCalls.push(name); return true; },
+    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
+    start() {},
+    stop() {},
+    getStatus: () => ({ ok: true }),
+  };
+  let connection = { enabled: true, state: "connected" };
+  const setConnection = (state) => {
+    connection = { enabled: true, state };
+  };
+  let nextEventId = 0;
+  const sent = [];
+  const client = new EventEmitter();
+  client.sendEvent = (event) => {
+    const eventId = `stage2-event-${++nextEventId}`;
+    sent.push({ ...event, eventId });
+    const connected = connection.state === "connected";
+    const state = connected ? sendState : "send-failed";
+    return {
+      eventId,
+      type: event.type,
+      sent: connected,
+      ok: state === "acknowledged",
+      state,
+      ackState: state,
+    };
+  };
+  client.getStatus = () => ({ ...connection });
+  client.start = () => {};
+  client.stop = () => {};
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+  });
+  router.on("warning", () => {});
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
+    deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1)],
+  });
+  const sessionA = detector.getState().decks[1].playSessionId;
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: sessionA,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
+  const stage1Release = router.triggerAction("release");
+  const handoffEventId = stage1Release.delivery.eventId;
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.getStatus().mode, "timeline-control");
+  const replaceSession = (contentId) => {
+    detector.onTrackLoaded({ deck: 1, contentId, title: "Next Track", artist: "DSF" });
+    detector.onSnapshot({
+      explicitMasterDeck: 1,
+      explicitMasterUpdatedAt: new Date().toISOString(),
+      deckNowPlaying: [{ deck: 1, contentId, title: "Next Track", artist: "DSF", trackBpm: 120 }],
+      deckPlaybacks: [strictDetectorPlayback(1, 2, { isPlaying: false })],
+    });
+    detector.onSnapshot({
+      explicitMasterDeck: 1,
+      explicitMasterUpdatedAt: new Date().toISOString(),
+      deckNowPlaying: [{ deck: 1, contentId, title: "Next Track", artist: "DSF", trackBpm: 120 }],
+      deckPlaybacks: [strictDetectorPlayback(1, 3)],
+    });
+    return detector.getState().decks[1].playSessionId;
+  };
+  return {
+    router,
+    client,
+    detector,
+    sent,
+    midiCalls,
+    sessionA,
+    handoffEventId,
+    setConnection,
+    replaceSession,
+  };
+}
+
+test("stage2 timeline actions stamp the exact current authoritative playSessionId", () => {
+  const { router, sent, sessionA } = createStage2TimelineFixture();
+  const jump = router.triggerAction("release");
+  assert.equal(jump.ok, true);
+  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").payload, {
+    bars: -4,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  const loop = router.triggerAction("loop-half");
+  assert.equal(loop.ok, true);
+  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").payload, {
+    active: true,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  assert.deepEqual(
+    sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).map((event) => event.type),
+    ["DJ_TIMELINE_BEAT_JUMP", "DJ_TIMELINE_LOOP_SET"],
+  );
+  router.stop();
+});
+
+test("absent or replaced stage2 session authority rejects locally without sending", () => {
+  const { router, client, sent, midiCalls, sessionA, replaceSession } = createStage2TimelineFixture();
+  const sessionB = replaceSession("next-b");
+  assert.notEqual(sessionB, sessionA);
+  const replacement = sent.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").at(-1);
+  assert.equal(replacement.payload.playSessionId, sessionB);
+  for (const action of ["release", "loop-half", "filter-close"]) {
+    const blocked = router.triggerAction(action);
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.reason, "timeline-state-pending");
+    assert.equal(blocked.delivery, null);
+    assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
+  }
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 40,
+    playSessionId: sessionB,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
+  assert.equal(router.getStatus().mode, "dj-control");
+  const stage1Loop = router.triggerAction("loop-half");
+  assert.equal(stage1Loop.midiSent, true);
+  assert.deepEqual(midiCalls, ["stop", "loopHalf"]);
+  assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
+  router.stop();
+});
+
+test("a queued stage2 command keeps its original playSessionId when the session is replaced mid-flight", () => {
+  const { router, client, sent, sessionA, replaceSession } = createStage2TimelineFixture({ sendState: "pending" });
+  const queuedResult = router.triggerAction("filter-close");
+  assert.equal(queuedResult.delivery.state, "pending");
+  const queuedEvent = sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP");
+  assert.deepEqual(queuedEvent.payload, {
+    bars: 4,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  const sessionC = replaceSession("next-c");
+  assert.notEqual(sessionC, sessionA);
+  assert.deepEqual(
+    sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")),
+    [queuedEvent],
+  );
+  client.emit("delivery", {
+    eventId: queuedEvent.eventId,
+    type: "DJ_TIMELINE_BEAT_JUMP",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+  });
+  assert.equal(router.getStatus().lastTimelineAction.ok, true);
+  assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 1);
+  const blocked = router.triggerAction("release");
+  assert.equal(blocked.reason, "timeline-state-pending");
+  assert.deepEqual(queuedEvent.payload, {
+    bars: 4,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 1);
+  router.stop();
+});
+
+test("reconnect requires a fresh authoritative snapshot before stage2 sends resume", () => {
+  const { router, client, sent, sessionA, handoffEventId, setConnection } = createStage2TimelineFixture();
+  setConnection("disconnected");
+  client.emit("status", { enabled: true, state: "disconnected" });
+  let blocked = router.triggerAction("filter-close");
+  assert.equal(blocked.reason, "timeline-network-disconnected");
+  assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
+
+  setConnection("connected");
+  client.emit("status", { enabled: true, state: "connected" });
+  blocked = router.triggerAction("filter-close");
+  assert.equal(blocked.reason, "timeline-state-pending");
+  assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
+
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 48,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  const resumed = router.triggerAction("filter-close");
+  assert.equal(resumed.ok, true);
+  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").payload, {
+    bars: 4,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  assert.equal(
+    sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length,
+    1,
+  );
+  router.stop();
+});
+
+test("terminal LOOP_SET outcomes clear the pending latch immediately and stay retryable", () => {
+  const detector = createTrackActivityDetector({ idFactory: (() => {
+    let id = 0;
+    return () => `loop-latch-${++id}`;
+  })() });
+  const client = new EventEmitter();
+  const sent = [];
+  let scriptedDelivery = null;
+  let nextEventId = 0;
+  client.sendEvent = (event) => {
+    const eventId = `latch-event-${++nextEventId}`;
+    sent.push({ ...event, eventId });
+    if (!scriptedDelivery) {
+      return { eventId, type: event.type, sent: true, ok: true, state: "acknowledged", ackState: "acknowledged" };
+    }
+    return { eventId, type: event.type, ...scriptedDelivery() };
+  };
+  client.getStatus = () => ({ enabled: true, state: "connected" });
+  client.start = () => {};
+  client.stop = () => {};
+  const midi = {
+    sendMapping: () => true,
+    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
+    start() {},
+    stop() {},
+    getStatus: () => ({ ok: true }),
+  };
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+  });
+  router.on("warning", () => {});
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: new Date().toISOString(),
+    deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
+    deckPlaybacks: [strictDetectorPlayback(1, 1)],
+  });
+  const session = detector.getState().decks[1].playSessionId;
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 8,
+    playSessionId: session,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
+  const stage1Release = router.triggerAction("release");
+  const handoffEventId = stage1Release.delivery.eventId;
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    timelineId: "show-1",
+    positionBars: 8,
+    playSessionId: session,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.getStatus().mode, "timeline-control");
+  const loopSends = () => sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET");
+
+  // A skipped result is terminal and will never publish a delivery update.
+  // It must not wedge the latch: the action reports truthful no-send and the
+  // very next pedal press retries instead of being blocked forever.
+  scriptedDelivery = () => ({
+    sent: false,
+    ok: false,
+    skipped: true,
+    state: "skipped",
+    ackState: "skipped",
+    reason: "invalid-payload",
+  });
+  const skipped = router.triggerAction("loop-half");
+  assert.equal(skipped.ok, false);
+  assert.equal(skipped.delivery.state, "skipped");
+  assert.equal(skipped.delivery.sent, false);
+  const retryable = router.triggerAction("loop-half");
+  assert.notEqual(retryable.reason, "timeline-loop-action-pending");
+  assert.equal(retryable.delivery.state, "skipped");
+  assert.equal(loopSends().length, 2);
+  assert.equal(loopSends().every((event) => event.payload.active === true), true);
+
+  // Pending still holds the exact latch against double-fire.
+  scriptedDelivery = () => ({ sent: true, ok: false, state: "pending", ackState: "pending" });
+  const held = router.triggerAction("loop-half");
+  assert.equal(held.delivery.state, "pending");
+  const blockedWhilePending = router.triggerAction("loop-half");
+  assert.equal(blockedWhilePending.ok, false);
+  assert.equal(blockedWhilePending.reason, "timeline-loop-action-pending");
+  assert.equal(blockedWhilePending.delivery, null);
+  assert.equal(loopSends().length, 3);
+
+  // A late terminal delivery update releases the latch immediately.
+  client.emit("delivery", {
+    eventId: held.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "timed-out",
+    ackState: "timed-out",
+    ok: false,
+    reason: "ack-timeout",
+  });
+  const retriedAfterTimeout = router.triggerAction("loop-half");
+  assert.notEqual(retriedAfterTimeout.reason, "timeline-loop-action-pending");
+  assert.equal(retriedAfterTimeout.delivery.state, "pending");
+  assert.equal(loopSends().length, 4);
+
+  // An ACK alone never unblocks the latch; only the authoritative broadcast
+  // may release it. ACKed/pending behavior is unchanged.
+  client.emit("delivery", {
+    eventId: retriedAfterTimeout.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+  });
+  assert.equal(router.triggerAction("loop-half").reason, "timeline-loop-action-pending");
+  assert.equal(loopSends().length, 4);
+
+  // A terminal rejection also releases, and the retry recomputes desired
+  // from the last authoritative truth (still inactive -> active).
+  client.emit("delivery", {
+    eventId: retriedAfterTimeout.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "rejected",
+    ackState: "rejected",
+    ok: false,
+    reason: "denied",
+  });
+  scriptedDelivery = null;
+  const afterReject = router.triggerAction("loop-half");
+  assert.equal(afterReject.ok, true);
+  assert.equal(afterReject.delivery.state, "acknowledged");
+  assert.equal(sent.at(-1).payload.active, true);
+  assert.equal(loopSends().length, 5);
+
+  // The authoritative broadcast clears the latch and flips the next desired.
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    timelineId: "show-1",
+    positionBars: 16,
+    playSessionId: session,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  const flipped = router.triggerAction("loop-half");
+  assert.equal(flipped.ok, true);
+  assert.equal(sent.at(-1).payload.active, false);
+  assert.equal(loopSends().length, 6);
+  router.stop();
+});
+
+test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state", async (t) => {
+  class FenceWebSocket extends EventEmitter {
+    static instances = [];
+
+    constructor() {
+      super();
+      this.readyState = 0;
+      this.sent = [];
+      FenceWebSocket.instances.push(this);
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.emit("open");
+      });
+    }
+
+    send(value) {
+      this.sent.push(JSON.parse(value));
+    }
+
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v2",
+    WebSocketImpl: FenceWebSocket,
+    heartbeatMs: 60_000,
+    reconnectMinMs: 10,
+    reconnectMaxMs: 20,
+    stateSyncProvider: () => ({ released: false, masterDeck: 1, activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  const detector = createTrackActivityDetector({ idFactory: (() => {
+    let id = 0;
+    return () => `fence-detector-${++id}`;
+  })() });
+  const midi = {
+    sendMapping: () => true,
+    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
+    start() {},
+    stop() {},
+    getStatus: () => ({ ok: true }),
+  };
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+  });
+  t.after(() => router.stop());
+  const warnings = [];
+  router.on("warning", (warning) => warnings.push(warning.message));
+  client.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const socket = FenceWebSocket.instances.at(-1);
+  const stateMessage = ({ sequence, eventId, sessionId = "syndocal-session", ...overrides }) => JSON.stringify({
+    v: 2,
+    type: "DJ_TIMELINE_STATE",
+    agentId: "syndocal",
+    sessionId,
+    sequence,
+    eventId,
+    payload: {
+      state: "running",
+      loopActive: false,
+      timelineId: "show-1",
+      positionBars: 16,
+      playSessionId: "play-session-1",
+      pedalOwner: "dj",
+      releaseEventId: null,
+      ...overrides,
+    },
+  });
+
+  socket.emit("message", stateMessage({ sequence: 5, eventId: "fence-5" }));
+  const applied = router.getStateSync();
+  assert.equal(applied.timelinePositionBars, 16);
+  assert.equal(applied.timelineSnapshotReady, true);
+
+  // Equal-sequence duplicate and stale replay are provably rejectable: no
+  // mutation of any router state, including the freshness timestamp.
+  socket.emit("message", stateMessage({ sequence: 5, eventId: "fence-5-duplicate" }));
+  socket.emit("message", stateMessage({ sequence: 4, eventId: "fence-4-stale", positionBars: 99 }));
+  const afterReplays = router.getStateSync();
+  assert.equal(afterReplays.timelinePositionBars, applied.timelinePositionBars);
+  assert.equal(afterReplays.timelineStateUpdatedAt, applied.timelineStateUpdatedAt);
+  assert.equal(warnings.filter((message) => message === "Stale duplicate DJ_TIMELINE_STATE ignored").length, 2);
+
+  // A strictly newer sequence applies normally.
+  socket.emit("message", stateMessage({ sequence: 6, eventId: "fence-6", positionBars: 20 }));
+  assert.equal(router.getStateSync().timelinePositionBars, 20);
+
+  // A replacement session owns its own sequence space: the fence re-keys and
+  // applies it, then fences replays inside the new session too.
+  socket.emit("message", stateMessage({
+    sequence: 2,
+    eventId: "fence-replacement-2",
+    sessionId: "syndocal-session-replacement",
+    positionBars: 24,
+  }));
+  assert.equal(router.getStateSync().timelinePositionBars, 24);
+  socket.emit("message", stateMessage({
+    sequence: 2,
+    eventId: "fence-replacement-dup",
+    sessionId: "syndocal-session-replacement",
+    positionBars: 31,
+  }));
+  assert.equal(router.getStateSync().timelinePositionBars, 24);
+  assert.equal(warnings.filter((message) => message === "Stale duplicate DJ_TIMELINE_STATE ignored").length, 3);
+
+  // Connection replacement resets the fence: after a real reconnect, the
+  // next identified frame is judged on its own merits even at a sequence far
+  // below the previous session's high-water mark.
+  const generationBefore = client.getStatus().connectionGeneration;
+  assert.ok(generationBefore >= 1);
+  const reconnected = new Promise((resolve) => {
+    const listener = (event) => {
+      if (event?.generation > generationBefore) {
+        client.off("connected", listener);
+        resolve(event);
+      }
+    };
+    client.on("connected", listener);
+  });
+  socket.readyState = 3;
+  socket.emit("close", 1006, "fence-reconnect");
+  await reconnected;
+  const replacement = FenceWebSocket.instances.at(-1);
+  assert.notEqual(replacement, socket);
+  replacement.emit("message", stateMessage({ sequence: 1, eventId: "fence-post-reset", positionBars: 28 }));
+  assert.equal(router.getStateSync().timelinePositionBars, 28);
+  // The post-reset frame was accepted, not rejected as stale.
+  assert.equal(warnings.filter((message) => message === "Stale duplicate DJ_TIMELINE_STATE ignored").length, 3);
+});
+
 test("Syndocal disconnect does not gate Stage 1 local MIDI actions", () => {
   const detector = createTrackActivityDetector({ idFactory: () => "snapshot-gate-id" });
   const client = new EventEmitter();
@@ -1964,7 +2496,7 @@ test("Syndocal defaults use /dj-link, strict v2, five-second heartbeat, ws, and 
   for (let index = 0; index < 8; index += 1) {
     client.sendEvent({
       type: "DJ_TIMELINE_BEAT_JUMP",
-      payload: { bars: index % 2 === 0 ? -4 : 4, timelineId: "history-bound" },
+      payload: { bars: index % 2 === 0 ? -4 : 4, timelineId: "history-bound", playSessionId: "play-session-1" },
     });
   }
   assert.equal(client.getStatus().deliveryHistoryMax, 3);
@@ -2298,7 +2830,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const timedOutTimeline = client.sendEvent({
     type: "DJ_TIMELINE_BEAT_JUMP",
-    payload: { bars: -4, timelineId: "timeline-1" },
+    payload: { bars: -4, timelineId: "timeline-1", playSessionId: "play-session-1" },
   });
   assert.equal(timedOutTimeline.state, "pending");
   await new Promise((resolve) => setTimeout(resolve, 35));
@@ -2306,7 +2838,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const acceptedTimelineLoop = client.sendEvent({
     type: "DJ_TIMELINE_LOOP_SET",
-    payload: { active: true, timelineId: "timeline-1" },
+    payload: { active: true, timelineId: "timeline-1", playSessionId: "play-session-1" },
   });
   assert.equal(acceptedTimelineLoop.state, "pending");
   ack(acceptedTimelineLoop, "accepted");

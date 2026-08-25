@@ -51,6 +51,11 @@ function createShowEventRouter({
   let releaseMacroGeneration = 0;
   let activePlaySessionId = null;
   const releasedPlaySessions = new Set();
+  // Same-session staleness fence for authoritative DJ_TIMELINE_STATE frames.
+  // connectionGeneration comes from the client's status events and resets the
+  // fence on connection replacement; sessionId+sequence come from the decoded
+  // v2 envelope and fence stale/equal replays within one session.
+  let timelineStateFence = null;
 
   function fenceReleasedSession(playSessionId) {
     if (!playSessionId) return;
@@ -199,6 +204,19 @@ function createShowEventRouter({
     return delivery?.state || delivery?.ackState || null;
   }
 
+  // The loop latch may only stay armed while a delivery can still resolve
+  // later: pending (awaiting ACK), acknowledged (awaiting the authoritative
+  // broadcast), or retrying (queued for reconnect replay). Every other state
+  // is terminal and will never emit another delivery update, so holding the
+  // latch would wedge timeline loop actions forever. Fail closed to
+  // retryability: clear the exact latch immediately.
+  const LOOP_LATCH_AWAIT_STATES = new Set(["pending", "acknowledged", "retrying"]);
+
+  function loopDeliveryIsFinalWithoutUpdate(delivery) {
+    const state = deliveryState(delivery);
+    return typeof state === "string" && state.length > 0 && !LOOP_LATCH_AWAIT_STATES.has(state);
+  }
+
   function isDeliveryFailure(delivery) {
     const state = deliveryState(delivery);
     return ["send-failed", "rejected", "timed-out"].includes(state) ||
@@ -292,6 +310,48 @@ function createShowEventRouter({
     emitWarning(warning?.message || String(warning || "Unknown timeline warning"), "syndocal");
   }
 
+  function resetTimelineStateFenceForConnection(status) {
+    const generation = status?.connectionGeneration;
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      return;
+    }
+    if (!timelineStateFence || timelineStateFence.connectionGeneration !== generation) {
+      timelineStateFence = { connectionGeneration: generation, sessionId: null, sequence: 0 };
+    }
+  }
+
+  // Returns true when the frame may mutate router state. A frame is rejected
+  // without any mutation only when it provably replays the same session at a
+  // stale or equal sequence. Frames lacking provable identity cannot be
+  // fenced; no synthetic timestamps or defaults are invented for them. A new
+  // sessionId is a session replacement with its own sequence space, so the
+  // fence re-keys instead of comparing across sessions.
+  function timelineStateFenceAccepts(state) {
+    const sessionId = typeof state.sessionId === "string" && state.sessionId.length > 0
+      ? state.sessionId
+      : null;
+    const sequence = Number.isSafeInteger(state.sequence) && state.sequence >= 1
+      ? state.sequence
+      : null;
+    if (!sessionId || sequence == null) {
+      return true;
+    }
+    if (timelineStateFence && timelineStateFence.sessionId === sessionId) {
+      if (sequence <= timelineStateFence.sequence) {
+        emitWarning("Stale duplicate DJ_TIMELINE_STATE ignored", "syndocal");
+        return false;
+      }
+      timelineStateFence.sequence = sequence;
+      return true;
+    }
+    timelineStateFence = {
+      connectionGeneration: timelineStateFence?.connectionGeneration ?? null,
+      sessionId,
+      sequence,
+    };
+    return true;
+  }
+
   function onTimelineState(state) {
     if (
       !state ||
@@ -299,6 +359,9 @@ function createShowEventRouter({
       typeof state.loopActive !== "boolean"
     ) {
       onTimelineWarning("Invalid authoritative timeline state ignored");
+      return;
+    }
+    if (!timelineStateFenceAccepts(state)) {
       return;
     }
     const wasHandoffPending = mode === "handoff-pending" ||
@@ -352,6 +415,7 @@ function createShowEventRouter({
     const nextState = status.state || "unknown";
     const changed = nextState !== lastSyndocalState;
     lastSyndocalState = nextState;
+    resetTimelineStateFenceForConnection(status);
     if (syndocalEnabled() && changed && nextState === "connected") {
       // handleOpen sends an explicit state request. Do not permit timeline
       // actions until the authoritative snapshot answers that request.
@@ -407,7 +471,7 @@ function createShowEventRouter({
         }
       }
       if (delivery?.type === "DJ_TIMELINE_LOOP_SET") {
-        if (["rejected", "timed-out", "send-failed"].includes(delivery.state)) {
+        if (loopDeliveryIsFinalWithoutUpdate(delivery)) {
           pendingLoopDesired = null;
         }
         emitState();
@@ -473,8 +537,16 @@ function createShowEventRouter({
     }
   }
 
-  function timelineReady() {
-    return mode === "timeline-control" && timelineSnapshotReady && syndocalState() === "connected";
+  function authoritativeTimelinePlaySessionId() {
+    if (
+      timelinePedalOwner === "timeline" &&
+      typeof timelinePlaySessionId === "string" &&
+      timelinePlaySessionId.length > 0 &&
+      timelinePlaySessionId === activePlaySessionId
+    ) {
+      return timelinePlaySessionId;
+    }
+    return null;
   }
 
   function sendTimelineAction(action, type, payload, target = timelineTarget()) {
@@ -508,11 +580,15 @@ function createShowEventRouter({
     if (!timelineSnapshotReady) {
       return blockedAction(action, "timeline-state-pending");
     }
+    const playSessionId = authoritativeTimelinePlaySessionId();
+    if (!playSessionId) {
+      return blockedAction(action, "timeline-play-session-unproven");
+    }
     if (action === "beat-jump-minus-4") {
-      return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: -4, timelineId });
+      return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: -4, timelineId, playSessionId });
     }
     if (action === "beat-jump-plus-4") {
-      return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: 4, timelineId });
+      return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: 4, timelineId, playSessionId });
     }
     if (action === "timeline-loop-toggle") {
       if (timelineLoopActive == null) {
@@ -526,10 +602,10 @@ function createShowEventRouter({
       const result = sendTimelineAction(
         action,
         "DJ_TIMELINE_LOOP_SET",
-        { active: desired, timelineId },
+        { active: desired, timelineId, playSessionId },
         { ...timelineTarget(), desiredLoopActive: desired },
       );
-      if (["send-failed", "rejected", "timed-out"].includes(result.delivery?.state)) {
+      if (!result.delivery || loopDeliveryIsFinalWithoutUpdate(result.delivery)) {
         pendingLoopDesired = null;
       }
       return result;

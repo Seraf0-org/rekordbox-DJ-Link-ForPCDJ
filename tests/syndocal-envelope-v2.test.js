@@ -177,6 +177,105 @@ test("v2 loop and release encoders accept only measured/correlated state", () =>
   }), null);
 });
 
+test("v2 beat jump and loop set encoders require a canonical playSessionId", () => {
+  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  adapter.encodeHello({ eventId: "hello-actions", sequence: 1 });
+  const beatJump = { bars: -4, timelineId: "life-over", playSessionId: "play-session-1" };
+  const loopSet = { active: true, timelineId: "life-over", playSessionId: "play-session-1" };
+  const jumpFrame = adapter.encodeEvent({
+    type: "DJ_TIMELINE_BEAT_JUMP",
+    eventId: "jump-canonical",
+    sequence: 2,
+    payload: beatJump,
+  });
+  assertV2Frame(jumpFrame, "DJ_TIMELINE_BEAT_JUMP");
+  assert.deepEqual(jumpFrame.payload, beatJump);
+  const loopFrame = adapter.encodeEvent({
+    type: "DJ_TIMELINE_LOOP_SET",
+    eventId: "loop-canonical",
+    sequence: 3,
+    payload: loopSet,
+  });
+  assertV2Frame(loopFrame, "DJ_TIMELINE_LOOP_SET");
+  assert.deepEqual(loopFrame.payload, loopSet);
+
+  // The router's exact source="pedal" local-only metadata is accepted on
+  // input and never emitted onto the wire.
+  const jumpPedal = adapter.encodeEvent({
+    type: "DJ_TIMELINE_BEAT_JUMP",
+    eventId: "jump-pedal-source",
+    sequence: 4,
+    payload: { ...beatJump, source: "pedal" },
+  });
+  assertV2Frame(jumpPedal, "DJ_TIMELINE_BEAT_JUMP");
+  assert.deepEqual(jumpPedal.payload, beatJump);
+  const loopPedal = adapter.encodeEvent({
+    type: "DJ_TIMELINE_LOOP_SET",
+    eventId: "loop-pedal-source",
+    sequence: 5,
+    payload: { ...loopSet, source: "pedal" },
+  });
+  assertV2Frame(loopPedal, "DJ_TIMELINE_LOOP_SET");
+  assert.deepEqual(loopPedal.payload, loopSet);
+
+  // Hostile inputs are rejected, never silently stripped.
+  for (const [type, canonical] of [
+    ["DJ_TIMELINE_BEAT_JUMP", beatJump],
+    ["DJ_TIMELINE_LOOP_SET", loopSet],
+  ]) {
+    let variant = 0;
+    for (const patch of [
+      { ignoredExtra: "must-reject" },
+      { source: "dj" },
+      { source: 42 },
+      { source: null },
+      { source: " pedal" },
+      { extra: true, source: "pedal" },
+    ]) {
+      variant += 1;
+      assert.equal(adapter.encodeEvent({
+        type,
+        eventId: `hostile-${variant}`,
+        sequence: 40 + variant,
+        payload: { ...canonical, ...patch },
+      }), null, `${type} must reject ${JSON.stringify(patch)}`);
+    }
+    const symbolKeyed = { ...canonical };
+    Object.defineProperty(symbolKeyed, Symbol.for("injected"), { value: "hostile", enumerable: true });
+    assert.equal(adapter.encodeEvent({
+      type,
+      eventId: `hostile-symbol-${variant}`,
+      sequence: 60 + variant,
+      payload: symbolKeyed,
+    }), null, `${type} must reject symbol keys`);
+  }
+
+  const invalidSessions = [
+    { playSessionId: null },
+    { playSessionId: "" },
+    { playSessionId: "   " },
+    { playSessionId: " pad" },
+    { playSessionId: 42 },
+    {},
+  ];
+  let variant = 0;
+  for (const patch of invalidSessions) {
+    variant += 1;
+    assert.equal(adapter.encodeEvent({
+      type: "DJ_TIMELINE_BEAT_JUMP",
+      eventId: `jump-bad-${variant}`,
+      sequence: 10 + variant,
+      payload: { bars: 4, timelineId: "life-over", ...patch },
+    }), null);
+    assert.equal(adapter.encodeEvent({
+      type: "DJ_TIMELINE_LOOP_SET",
+      eventId: `loop-bad-${variant}`,
+      sequence: 30 + variant,
+      payload: { active: false, timelineId: "life-over", ...patch },
+    }), null);
+  }
+});
+
 test("detector delays active until complete, emits one active per session, and fences revisions/reorder/staleness", () => {
   let nextId = 0;
   let now = NOW;
@@ -1177,6 +1276,45 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 });
 
+test("reconnect replay of a queued timeline command keeps its originally bound playSessionId", async (t) => {
+  V2WebSocket.instances = [];
+  let currentSession = "play-session-a";
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v2",
+    WebSocketImpl: V2WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false, masterDeck: 1, activePlaySessionId: currentSession }),
+  });
+  t.after(() => client.stop());
+  client.start();
+  await flush();
+  const first = V2WebSocket.instances[0];
+  const boundPayload = { bars: -4, timelineId: "life-over", playSessionId: currentSession };
+  const queued = client.sendEvent({ type: "DJ_TIMELINE_BEAT_JUMP", payload: boundPayload });
+  assert.equal(queued.state, "pending");
+  currentSession = "play-session-b";
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "queued beat jump reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "session-replacement");
+  await reconnect;
+  const second = V2WebSocket.instances.at(-1);
+  const replay = second.sent.find((frame) => frame.eventId === queued.eventId);
+  assertV2Frame(replay, "DJ_TIMELINE_BEAT_JUMP");
+  assert.deepEqual(replay.payload, boundPayload);
+  assert.equal(replay.payload.playSessionId, "play-session-a");
+  assert.notEqual(replay.payload.playSessionId, currentSession);
+});
+
 test("durable physical event IDs are single-use and caller sequence reorder fails closed", async (t) => {
   V2WebSocket.instances = [];
   const client = createSyndocalClient({
@@ -1362,6 +1500,20 @@ test("inbound flat/v1 frames are visible protocol failures and v2 timeline state
   assert.deepEqual(failures.map((failure) => failure.reason), ["strict-envelope-v2-required", "retired-protocol-v1"]);
   assert.equal(states.length, 1);
   assert.equal(states[0].playSessionId, "play-session-1");
+  // The decoded state exposes authoritative session identity and the
+  // monotonic per-session sequence so the router can fence same-session
+  // stale/equal replays without inventing any defaults.
+  assert.equal(states[0].sessionId, "syndocal-session");
+  assert.equal(states[0].sequence, 1);
+  assert.equal(states[0].eventId, "timeline-state-1");
+  const decoded = decodeV2TimelineState({
+    ...strictTimelineState(),
+    sequence: 9,
+    eventId: "timeline-state-9",
+  });
+  assert.equal(decoded.sessionId, "syndocal-session");
+  assert.equal(decoded.sequence, 9);
+  assert.equal(decoded.eventId, "timeline-state-9");
   assert.equal(decodeV2TimelineState({ ...strictTimelineState(), bonus: true }), null);
 });
 

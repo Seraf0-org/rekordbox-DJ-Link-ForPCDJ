@@ -470,17 +470,50 @@ function encodeV2Release(payload) {
   return { state: "released", timelineId, playSessionId };
 }
 
+// Timeline command payloads accept exactly the canonical wire fields plus,
+// optionally, the single intentional local-only metadata field the router
+// supplies: source must be the exact string "pedal". Any other own key
+// (including symbols), a missing wire field, or wrong metadata rejects the
+// payload; only canonical wire fields are ever emitted onto the wire.
+const V2_TIMELINE_COMMAND_LOCAL_SOURCE = "pedal";
+
+function v2TimelineCommandShapeOk(payload, wireFields) {
+  if (!isPlainRecord(payload)) return false;
+  const keys = Reflect.ownKeys(payload);
+  if (
+    keys.length < wireFields.length ||
+    keys.length > wireFields.length + 1 ||
+    !keys.every((key) =>
+      typeof key === "string" &&
+      (wireFields.includes(key) || key === "source"))
+  ) {
+    return false;
+  }
+  if (!wireFields.every((field) => Object.hasOwn(payload, field))) return false;
+  if (Object.hasOwn(payload, "source") && requiredString(payload, "source") !== V2_TIMELINE_COMMAND_LOCAL_SOURCE) {
+    return false;
+  }
+  return true;
+}
+
 function encodeV2BeatJump(payload) {
-  if (!isPlainRecord(payload)) return null;
+  if (!v2TimelineCommandShapeOk(payload, ["bars", "timelineId", "playSessionId"])) return null;
   const bars = strictFinite(payload, "bars", { integer: true });
   const timelineId = requiredString(payload, "timelineId");
-  return [-4, 4].includes(bars) && timelineId ? { bars, timelineId } : null;
+  const playSessionId = requiredString(payload, "playSessionId");
+  return [-4, 4].includes(bars) && timelineId && playSessionId
+    ? { bars, timelineId, playSessionId }
+    : null;
 }
 
 function encodeV2LoopSet(payload) {
-  if (!isPlainRecord(payload) || typeof payload.active !== "boolean") return null;
+  if (!v2TimelineCommandShapeOk(payload, ["active", "timelineId", "playSessionId"])) return null;
+  if (typeof payload.active !== "boolean") return null;
   const timelineId = requiredString(payload, "timelineId");
-  return timelineId ? { active: payload.active, timelineId } : null;
+  const playSessionId = requiredString(payload, "playSessionId");
+  return timelineId && playSessionId
+    ? { active: payload.active, timelineId, playSessionId }
+    : null;
 }
 
 function encodeV2TypedEvent(type, payload) {
@@ -546,6 +579,9 @@ function decodeV2TimelineState(message) {
     playSessionId,
     pedalOwner: payload.pedalOwner,
     releaseEventId,
+    // Session identity plus the monotonic per-session sequence let the
+    // router fence same-session stale/equal replays without mutation.
+    sessionId: message.sessionId,
     eventId: message.eventId,
     sequence: message.sequence,
   };

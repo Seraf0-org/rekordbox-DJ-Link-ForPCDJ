@@ -1,22 +1,101 @@
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
 const repoRoot = path.resolve(__dirname, "..");
 
-test("source launcher is explicit development-only and always rebuilds the hook", () => {
+const forbiddenShowEnv = new Set([
+  "REKORDBOX_EXE_PATH",
+  "DJ_AGENT_CONFIG",
+  "DJ_AGENT_ENABLED",
+  "DJ_AGENT_ALLOW_REMOTE_ACTIONS",
+  "SYNDOCAL_ENABLED",
+  "SYNDOCAL_HOST",
+  "SYNDOCAL_PORT",
+  "SYNDOCAL_PATH",
+  "SYNDOCAL_NIC",
+  "SYNDOCAL_TOKEN",
+  "SYNDOCAL_WS_ADAPTER",
+  "SYNDOCAL_HEARTBEAT_MS",
+  "PEDAL_ENABLED",
+  "PEDAL_MODULE",
+  "MIDI_ENABLED",
+  "MIDI_MODULE",
+  "MIDI_DEVICE",
+  "MIDI_PORT",
+  "MIDI_RELEASE_FADE",
+  "MIDI_RELEASE_MACRO",
+  "MIDI_DECK_CHANNELS",
+  "PORT",
+  "RB_OUTPUT_HOST",
+  "RB_OUTPUT_SETUP_MAPPING_PATH",
+]);
+
+function cleanShowEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (forbiddenShowEnv.has(key.toUpperCase()) || key.toUpperCase() === "DJ_AGENT_CONFIG_PATH") {
+      delete env[key];
+    }
+  }
+  return { ...env, ...extra };
+}
+
+function runLauncher(command, env) {
+  const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+  return childProcess.spawnSync(comspec, ["/d", "/c", `call start-all.bat ${command}`], {
+    cwd: repoRoot,
+    env,
+    encoding: "utf8",
+    timeout: 20_000,
+    windowsHide: true,
+  });
+}
+
+test("controlled show source launcher fails closed before rebuilding and injecting", () => {
   const source = fs.readFileSync(path.join(repoRoot, "start-all.bat"), "utf8");
+  const retiredOverrideIndex = source.search(/call\s+:reject_retired_rekordbox_override/i);
+  const configPreflightIndex = source.search(/call\s+:validate_show_config/i);
   const buildIndex = source.search(/call\s+npm\s+run\s+build:hook/i);
   const serverIndex = source.search(/scripts\\restart_source_server\.py/i);
   const injectIndex = source.search(/scripts\\inject_hook\.py/i);
+  const browserIndex = source.search(/start\s+""\s+"http:\/\/localhost:8787"/i);
 
-  assert.match(source, /SOURCE DEVELOPMENT launcher/);
-  assert.match(source, /Installed\/live operation must use the DJLinkForPCDJ shortcut/);
+  assert.match(source, /CONTROLLED SOURCE-ACCEPTANCE launcher/);
+  assert.match(source, /2026-08-30 DJ-PC source-acceptance exception only/);
+  assert.ok(retiredOverrideIndex >= 0, "retired override preflight must be present");
+  assert.ok(configPreflightIndex > retiredOverrideIndex, "show config preflight must follow the retired override check");
+  assert.ok(buildIndex > configPreflightIndex, "no build may run before both fail-closed preflights");
   assert.ok(buildIndex >= 0, "source launcher must rebuild the hook");
   assert.ok(serverIndex > buildIndex, "server must start only after the hook build succeeds");
   assert.ok(injectIndex > serverIndex, "injection must follow the verified build and server start");
+  assert.ok(browserIndex > injectIndex, "the browser must not open before successful hook injection");
   assert.match(source, /--launch-installed\s+--wait-seconds\s+60/i);
+  assert.match(source, /Microsoft\.Win32\.Registry]::CurrentUser/);
+  assert.match(source, /Microsoft\.Win32\.Registry]::LocalMachine/);
+  assert.match(source, /GetValueNames\(\)/);
+  assert.match(source, /set "_RB_REGISTRY_RESULT=%errorlevel%"/i);
+  assert.match(source, /if "%_RB_REGISTRY_RESULT%"=="0" goto retired_registry_override_absent/i);
+  assert.match(source, /if "%_RB_REGISTRY_RESULT%"=="1"/i);
+  assert.match(source, /if not "%_RB_REGISTRY_RESULT%"=="0"/i);
+  assert.match(source, /set "__APPDIR__="/i);
+  assert.match(source, /"%__APPDIR__%WindowsPowerShell\\v1\.0\\powershell\.exe"/i);
+  assert.doesNotMatch(source, /%SystemRoot%.*powershell\.exe/i);
+  assert.match(source, /User\/Machine REKORDBOX_EXE_PATH state could not be verified conclusively/i);
+  assert.doesNotMatch(source, /reg\s+query/i, "ambiguous reg.exe exit code must not decide absence");
+  assert.match(source, /--preflight-only/i);
+  assert.match(source, /strict source preflight passed; no show-side process or build action was taken/i);
+  assert.match(source, /DJ_AGENT_CONFIG_PATH is required for the controlled source path/i);
+  assert.match(source, /path\.isAbsolute\(raw\)/);
+  assert.match(source, /fs\.lstatSync\(requested\)/);
+  assert.match(source, /fs\.realpathSync\.native\(requested\)/);
+  assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
+  assert.match(source, /c\.syndocal\.adapter!==['"]syndocal-envelope-v2['"]/);
+  assert.match(source, /c\.midi\.device!==['"]CustomMIDI1['"]/);
+  assert.match(source, /c\.midi\.releaseMacro\.enabled/);
   assert.doesNotMatch(source, /web server already running/i);
   assert.doesNotMatch(
     source,
@@ -55,3 +134,124 @@ test("source injection auto-launch remains restricted to supported Rekordbox bui
   assert.match(source, /for _, installed in installed_supported_rekordbox\(\):/);
   assert.match(source, /_norm_path\(str\(installed\)\) == candidate_norm/);
 });
+
+test(
+  "cmd launcher executes strict preflight branches without show-side actions",
+  { skip: process.platform !== "win32" },
+  () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-launcher-"));
+    const validPath = path.join(tempRoot, "valid.json");
+    const macroPath = path.join(tempRoot, "macro-enabled.json");
+    const valid = {
+      enabled: true,
+      syndocal: {
+        enabled: true,
+        host: "192.168.50.1",
+        port: 9100,
+        path: "/dj-link",
+        nic: "192.168.50.2",
+        token: "0123456789abcdef0123456789abcdef",
+        adapter: "syndocal-envelope-v2",
+      },
+      pedal: { enabled: true },
+      midi: {
+        enabled: true,
+        device: "CustomMIDI1",
+        port: 1,
+        releaseMacro: { enabled: false },
+      },
+    };
+    fs.writeFileSync(validPath, JSON.stringify(valid), "utf8");
+    fs.writeFileSync(
+      macroPath,
+      JSON.stringify({
+        ...valid,
+        midi: { ...valid.midi, releaseMacro: { enabled: true } },
+      }),
+      "utf8",
+    );
+
+    try {
+      const unknown = runLauncher("--preflight-onyl", cleanShowEnv());
+      assert.equal(unknown.status, 64, unknown.stdout + unknown.stderr);
+      assert.match(unknown.stdout, /Unknown launcher argument/i);
+
+      const extra = runLauncher("--preflight-only unexpected", cleanShowEnv());
+      assert.equal(extra.status, 64, extra.stdout + extra.stderr);
+      assert.match(extra.stdout, /Unexpected launcher arguments/i);
+
+      const caseVariantFlag = runLauncher("--PREFLIGHT-ONLY", cleanShowEnv());
+      assert.equal(caseVariantFlag.status, 64, caseVariantFlag.stdout + caseVariantFlag.stderr);
+      assert.match(caseVariantFlag.stdout, /Unknown launcher argument/i);
+
+      const hiddenThird = runLauncher('\"\" \"\" unexpected', cleanShowEnv());
+      assert.equal(hiddenThird.status, 64, hiddenThird.stdout + hiddenThird.stderr);
+      assert.match(hiddenThird.stdout, /Unknown launcher argument/i);
+
+      const processOverride = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({ REKORDBOX_EXE_PATH: "retired-value" }),
+      );
+      assert.equal(processOverride.status, 1, processOverride.stdout + processOverride.stderr);
+      assert.match(processOverride.stdout, /remains in Process scope/i);
+
+      const missingConfig = runLauncher("--preflight-only", cleanShowEnv());
+      assert.equal(missingConfig.status, 1, missingConfig.stdout + missingConfig.stderr);
+      assert.match(missingConfig.stdout, /DJ_AGENT_CONFIG_PATH is required/i);
+
+      const pseudoAppDirTamper = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({
+          DJ_AGENT_CONFIG_PATH: validPath,
+          __APPDIR__: `${tempRoot}${path.sep}`,
+        }),
+      );
+      assert.equal(pseudoAppDirTamper.status, 0, pseudoAppDirTamper.stdout + pseudoAppDirTamper.stderr);
+      assert.match(pseudoAppDirTamper.stdout, /strict source preflight passed/i);
+
+      const macroEnabled = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({ DJ_AGENT_CONFIG_PATH: macroPath }),
+      );
+      assert.equal(macroEnabled.status, 1, macroEnabled.stdout + macroEnabled.stderr);
+      assert.match(macroEnabled.stdout, /failed strict readiness validation/i);
+
+      const caseVariantOverride = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({
+          DJ_AGENT_CONFIG_PATH: validPath,
+          syndocal_host: "192.168.50.1",
+        }),
+      );
+      assert.equal(caseVariantOverride.status, 1, caseVariantOverride.stdout + caseVariantOverride.stderr);
+      assert.match(caseVariantOverride.stdout, /failed strict readiness validation/i);
+
+      const accepted = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({ DJ_AGENT_CONFIG_PATH: validPath }),
+      );
+      assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+      assert.match(accepted.stdout, /strict source preflight passed/i);
+
+      for (const result of [
+        unknown,
+        extra,
+        caseVariantFlag,
+        hiddenThird,
+        processOverride,
+        missingConfig,
+        pseudoAppDirTamper,
+        macroEnabled,
+        caseVariantOverride,
+        accepted,
+      ]) {
+        assert.doesNotMatch(
+          result.stdout + result.stderr,
+          /venv not found|rebuilding and verifying rb_hook\.dll|restarting the source server|injecting hook/i,
+        );
+      }
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  },
+);
