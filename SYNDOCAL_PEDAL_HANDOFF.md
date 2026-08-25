@@ -50,7 +50,16 @@ version sync source gateは`npm pkg get version`、root lock identityの二箇�
 対するnon-root package-lock entry不変性、Setup HTTP / mapping artifact / packaging focused
 tests 19/19、対象source/testの`node --check`で確認済みです。`v1.1.3`の残存はこの文書と
 READMEのimmutable historical evidenceだけであり、current product source、Setup URL、mapping
-artifactには残っていません。commit、push、tag、build、`dist`生成はこの時点では未実施です。
+artifactには残っていません。
+
+2026-08-26のsource checkpointはbranch `beta-v1.1.2`、pushed HEAD
+`f3da76f212c1919d4f813efce18b61a8c3813860`です。未対応Rekordboxへの暗黙注入と退役済み
+`REKORDBOX_EXE_PATH`経路をfail-closeした`ab643e6`、追随テスト修正`5110b2c`／`590115a`、
+現在の公演用source runbook `f3da76f`はすべて`origin/beta-v1.1.2`へpush済みです。
+最新sourceでの`npm test`は368 tests、366 pass、0 fail、2 skip、所要371652.9948ms。
+skipは`RB_OUTPUT_PKG_SMOKE=1`を必要とするreal/adversary pkg exe smokeだけです。
+この成功はsource regression gateであり、v1.1.4 tag、identity-bound build、installer、`dist`、
+GitHub Release、DJ-PC実機、Rekordbox、LAN、MIDI、Pedal、Syndocal ACKの完了を主張しません。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 v1.1.3 pre-commit checkpoint
 
