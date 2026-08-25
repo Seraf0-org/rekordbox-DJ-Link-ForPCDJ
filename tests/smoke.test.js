@@ -2757,7 +2757,41 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
 });
 
 test("physical IDs and sequences fail closed before reservation while controls outlive the physical cap", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  function createManualIntervalClock() {
+    const active = new Set();
+    const started = [];
+    const cleared = [];
+    return {
+      started,
+      cleared,
+      get activeCount() {
+        return active.size;
+      },
+      intervalApi: {
+        setInterval(callback, intervalMs) {
+          const handle = { id: started.length + 1, callback, intervalMs };
+          started.push(handle);
+          active.add(handle);
+          return handle;
+        },
+        clearInterval(handle) {
+          if (!active.has(handle)) {
+            return false;
+          }
+          cleared.push(handle);
+          active.delete(handle);
+          return true;
+        },
+      },
+      tick(count) {
+        for (let index = 0; index < count; index += 1) {
+          for (const handle of [...active]) {
+            handle.callback();
+          }
+        }
+      },
+    };
+  }
 
   class IdentityCapWebSocket extends EventEmitter {
     static instances = [];
@@ -2782,11 +2816,13 @@ test("physical IDs and sequences fail closed before reservation while controls o
     }
   }
 
+  const heartbeatClock = createManualIntervalClock();
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
     adapter: "generic-json",
     WebSocketImpl: IdentityCapWebSocket,
+    intervalApi: heartbeatClock.intervalApi,
     heartbeatMs: 60_000,
     maxPendingAcks: 8,
     eventIdRegistryMax: 5,
@@ -2849,11 +2885,13 @@ test("physical IDs and sequences fail closed before reservation while controls o
   }).reason, "event-id-reused");
   assert.equal(client.getStatus().eventIdRegistrySize, 3);
 
+  const capClock = createManualIntervalClock();
   const capClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
     adapter: "generic-json",
     WebSocketImpl: IdentityCapWebSocket,
+    intervalApi: capClock.intervalApi,
     heartbeatMs: 1,
     reconnectMinMs: 50,
     reconnectMaxMs: 100,
@@ -2865,6 +2903,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   capClient.start();
   await new Promise((resolve) => setImmediate(resolve));
   const capSocket = IdentityCapWebSocket.instances.at(-1);
+  assert.equal(capClock.activeCount, 1);
   const controlId = capSocket.sent.find((frame) => frame.type === "DJ_AGENT_HELLO").eventId;
   const controlSequenceBeforeCallerId = capClient.getStatus().wireSequence;
   const callerControl = capClient.sendEvent({
@@ -2883,7 +2922,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   }).reason, "event-id-conflicts-with-control");
   assert.equal(capClient.getStatus().physicalEventIdLatched, true);
   assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: { state: "released" } }).reason, "event-id-admission-limit");
-  t.mock.timers.tick(4_097);
+  capClock.tick(4_097);
   const controlFrames = capSocket.sent.filter((frame) => [
     "DJ_AGENT_HELLO",
     "DJ_STATE_SYNC",
@@ -2897,17 +2936,20 @@ test("physical IDs and sequences fail closed before reservation while controls o
   capSocket.emit("close", 1006, "reconnect");
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.ok(IdentityCapWebSocket.instances.length >= 3);
+  assert.equal(capClock.activeCount, 1);
   const reconnectSocket = IdentityCapWebSocket.instances.at(-1);
   const reconnectHello = reconnectSocket.sent.find((frame) => frame.type === "DJ_AGENT_HELLO");
   assert.ok(reconnectHello.eventId.startsWith("control-"));
   assert.equal(oldControlIds.has(reconnectHello.eventId), false);
   assert.equal(reconnectSocket.sent.some((frame) => frame.eventId === capped.eventId), false);
 
+  const recreatedClock = createManualIntervalClock();
   const recreatedClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
     adapter: "generic-json",
     WebSocketImpl: IdentityCapWebSocket,
+    intervalApi: recreatedClock.intervalApi,
     heartbeatMs: 60_000,
   });
   t.after(() => recreatedClient.stop());
@@ -2922,6 +2964,226 @@ test("physical IDs and sequences fail closed before reservation while controls o
     eventId: controlId,
     payload: { state: "released" },
   }).reason, "event-id-conflicts-with-control");
+
+  client.stop();
+  capClient.stop();
+  recreatedClient.stop();
+  const expectedHeartbeatMs = new Map([
+    [heartbeatClock, 60_000],
+    [capClock, 1],
+    [recreatedClock, 60_000],
+  ]);
+  for (const [clock, heartbeatMs] of expectedHeartbeatMs) {
+    assert.ok(clock.started.length > 0);
+    for (const handle of clock.started) {
+      assert.equal(handle.intervalMs, heartbeatMs);
+    }
+    assert.equal(clock.activeCount, 0);
+    assert.equal(clock.cleared.length, clock.started.length);
+    const clearedCounts = new Map();
+    for (const handle of clock.cleared) {
+      clearedCounts.set(handle, (clearedCounts.get(handle) || 0) + 1);
+    }
+    for (const handle of clock.started) {
+      assert.equal(clearedCounts.get(handle), 1);
+    }
+  }
+});
+
+test("Syndocal interval seam accepts class-instance clocks and keeps invalid adapters fail-fast", async (t) => {
+  class ManualHeartbeatClock {
+    constructor() {
+      this.started = [];
+      this.cleared = [];
+      this.active = new Set();
+    }
+
+    setInterval(callback, intervalMs) {
+      const handle = { callback, intervalMs };
+      this.started.push(handle);
+      this.active.add(handle);
+      return handle;
+    }
+
+    clearInterval(handle) {
+      if (!this.active.has(handle)) {
+        return false;
+      }
+      this.cleared.push(handle);
+      this.active.delete(handle);
+      return true;
+    }
+  }
+
+  class HeartbeatProbeWebSocket extends EventEmitter {
+    static instances = [];
+
+    constructor() {
+      super();
+      this.readyState = 0;
+      this.sent = [];
+      HeartbeatProbeWebSocket.instances.push(this);
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.emit("open");
+      });
+    }
+
+    send(value) {
+      this.sent.push(JSON.parse(value));
+    }
+
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  const clock = new ManualHeartbeatClock();
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "generic-json",
+    WebSocketImpl: HeartbeatProbeWebSocket,
+    intervalApi: clock,
+    heartbeatMs: 250,
+  });
+  t.after(() => client.stop());
+  client.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const socket = HeartbeatProbeWebSocket.instances.at(-1);
+  assert.equal(socket.sent.some((frame) => frame.type === "DJ_HEARTBEAT"), false);
+  const tickHandles = [...clock.active];
+  for (const handle of tickHandles) {
+    handle.callback();
+  }
+  assert.equal(socket.sent.filter((frame) => frame.type === "DJ_HEARTBEAT").length, tickHandles.length);
+  assert.equal(clock.started.length, tickHandles.length);
+  for (const handle of clock.started) {
+    assert.equal(handle.intervalMs, 250);
+  }
+  client.stop();
+  assert.equal(clock.active.size, 0);
+  assert.equal(clock.cleared.length, clock.started.length);
+  const clearedCounts = new Map();
+  for (const handle of clock.cleared) {
+    clearedCounts.set(handle, (clearedCounts.get(handle) || 0) + 1);
+  }
+  for (const handle of clock.started) {
+    assert.equal(clearedCounts.get(handle), 1);
+  }
+
+  class MethodlessClock {}
+  assert.throws(
+    () => createSyndocalClient({
+      enabled: true,
+      token: TEST_TOKEN,
+      adapter: "generic-json",
+      intervalApi: new MethodlessClock(),
+    }),
+    TypeError,
+  );
+  assert.throws(
+    () => createSyndocalClient({
+      enabled: true,
+      token: TEST_TOKEN,
+      adapter: "generic-json",
+      intervalApi: "setInterval-string",
+    }),
+    TypeError,
+  );
+});
+
+test("Syndocal heartbeat seam treats numeric 0 as a valid opaque interval handle", async (t) => {
+  class ZeroFirstClock {
+    constructor() {
+      this.started = [];
+      this.cleared = [];
+      this.active = new Set();
+    }
+
+    setInterval(callback, intervalMs) {
+      const handle = this.started.length;
+      this.started.push({ handle, callback, intervalMs });
+      this.active.add(handle);
+      return handle;
+    }
+
+    clearInterval(handle) {
+      if (!this.active.has(handle)) {
+        return false;
+      }
+      this.cleared.push(handle);
+      this.active.delete(handle);
+      return true;
+    }
+  }
+
+  class ZeroHandleProbeWebSocket extends EventEmitter {
+    static instances = [];
+
+    constructor() {
+      super();
+      this.readyState = 0;
+      this.sent = [];
+      ZeroHandleProbeWebSocket.instances.push(this);
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.emit("open");
+      });
+    }
+
+    send(value) {
+      this.sent.push(JSON.parse(value));
+    }
+
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  const clock = new ZeroFirstClock();
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "generic-json",
+    WebSocketImpl: ZeroHandleProbeWebSocket,
+    intervalApi: clock,
+    heartbeatMs: 60_000,
+  });
+  t.after(() => client.stop());
+  client.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(clock.started.length, 1);
+  assert.equal(clock.started[0].handle, 0);
+  const socket = ZeroHandleProbeWebSocket.instances.at(-1);
+  clock.started[0].callback();
+  assert.equal(socket.sent.filter((frame) => frame.type === "DJ_HEARTBEAT").length, 1);
+  client.stop();
+  assert.deepEqual(clock.cleared, [0]);
+  assert.equal(clock.active.size, 0);
+
+  client.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const restartedSocket = ZeroHandleProbeWebSocket.instances.at(-1);
+  assert.notEqual(restartedSocket, socket);
+  assert.equal(clock.started.length, 2);
+  assert.equal(clock.started[1].handle, 1);
+  assert.deepEqual(clock.cleared, [0]);
+  restartedSocket.emit("open");
+  assert.deepEqual(clock.cleared, [0, 1]);
+  assert.equal(clock.active.size, 1);
+  assert.ok(clock.active.has(2));
+  client.stop();
+  assert.deepEqual(clock.cleared, [0, 1, 2]);
+  assert.equal(clock.active.size, 0);
+  const clearedCounts = new Map();
+  for (const handle of clock.cleared) {
+    clearedCounts.set(handle, (clearedCounts.get(handle) || 0) + 1);
+  }
+  for (const entry of clock.started) {
+    assert.equal(entry.intervalMs, 60_000);
+    assert.equal(clearedCounts.get(entry.handle), 1);
+  }
 });
 
 test("malformed or inconsistent typed ACKs are protocol failures and never acknowledge", async (t) => {

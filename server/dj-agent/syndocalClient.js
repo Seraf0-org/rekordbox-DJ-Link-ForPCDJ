@@ -957,6 +957,31 @@ function createSyndocalEnvelopeV1Adapter({ token = "" } = {}) {
   };
 }
 
+const DEFAULT_INTERVAL_API = Object.freeze({
+  setInterval(callback, ms) {
+    return setInterval(callback, ms);
+  },
+  clearInterval(handle) {
+    clearInterval(handle);
+  },
+});
+
+function resolveIntervalApi(intervalApi) {
+  if (intervalApi == null) {
+    return DEFAULT_INTERVAL_API;
+  }
+  if (
+    (typeof intervalApi !== "object" && typeof intervalApi !== "function") ||
+    typeof intervalApi.setInterval !== "function" ||
+    typeof intervalApi.clearInterval !== "function"
+  ) {
+    throw new TypeError(
+      "Syndocal intervalApi must be an object providing setInterval and clearInterval functions",
+    );
+  }
+  return intervalApi;
+}
+
 function createSyndocalClient({
   enabled = false,
   host = "127.0.0.1",
@@ -968,6 +993,7 @@ function createSyndocalClient({
   adapterFactory = null,
   WebSocketImpl = null,
   wsModule = "ws",
+  intervalApi = null,
   reconnectMinMs = 500,
   reconnectMaxMs = 10_000,
   heartbeatMs = 5_000,
@@ -1012,12 +1038,14 @@ function createSyndocalClient({
   );
   const heartbeatInterval = Math.max(1, Number(heartbeatMs) || 1);
   const ackTimeout = Math.max(1, Number(ackTimeoutMs) || 1);
+  const intervals = resolveIntervalApi(intervalApi);
   let socket = null;
   let socketGeneration = 0;
   let generationCounter = 0;
   let running = false;
   let reconnectTimer = null;
   let heartbeatTimer = null;
+  let heartbeatArmed = false;
   let reconnectDelay = Math.max(50, reconnectMinMs);
   let wireSequence = 0;
   let physicalEventIdLatched = false;
@@ -1124,10 +1152,13 @@ function createSyndocalClient({
   }
 
   function clearHeartbeat() {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
+    if (!heartbeatArmed) {
+      return;
     }
+    heartbeatArmed = false;
+    const handle = heartbeatTimer;
+    heartbeatTimer = null;
+    intervals.clearInterval(handle);
   }
 
   function trimDeliveryHistory() {
@@ -1513,7 +1544,8 @@ function createSyndocalClient({
 
   function startHeartbeat() {
     clearHeartbeat();
-    heartbeatTimer = setInterval(sendHeartbeat, heartbeatInterval);
+    heartbeatTimer = intervals.setInterval(sendHeartbeat, heartbeatInterval);
+    heartbeatArmed = true;
   }
 
   function sendHello() {
