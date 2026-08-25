@@ -45,19 +45,29 @@ function readConfigFile(filePath, fsApi = fs) {
   if (!filePath) {
     return { config: {}, warning: null };
   }
+
+  // These warnings are copied into the public /api/status snapshot. Keep the
+  // reason useful to an operator without reflecting the requested path,
+  // username, token, or filesystem/parser exception text to LAN clients.
+  const warning = (code) => `DJ Agent config warning: ${code}`;
+
+  let raw;
   try {
-    const raw = fsApi.readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { config: {}, warning: `DJ Agent config must be a JSON object: ${filePath}` };
-    }
-    return { config: parsed, warning: null };
-  } catch (error) {
-    return {
-      config: {},
-      warning: `DJ Agent config could not be read: ${filePath} (${error?.message || String(error)})`,
-    };
+    raw = fsApi.readFileSync(filePath, "utf8");
+  } catch {
+    return { config: {}, warning: warning("config-read-failed") };
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { config: {}, warning: warning("config-invalid-json") };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { config: {}, warning: warning("config-invalid-object") };
+  }
+  return { config: parsed, warning: null };
 }
 
 function pickObject(value) {
