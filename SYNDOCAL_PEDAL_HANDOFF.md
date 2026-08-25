@@ -18,6 +18,36 @@ nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artist�
 物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの受入れは別途必要で、mockから完了とは
 主張しません。
 
+## 2026-08-30 show-first source operation: v1.1.4
+
+The only current show path is the target DJ PC's controlled source-acceptance
+exception. Runtime checkpoint H is the exact full commit
+`c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2`, product
+source version `1.1.4`; it does not claim that the present DJ-PC branch tip is
+clean or upstream-equal, and a docs-only commit touching exactly
+`README.md`/`SYNDOCAL_PEDAL_HANDOFF.md`/`API.md` may legitimately sit above H.
+Before use, run the canonical runtime checkout proof (branch `beta-v1.1.2`,
+clean, upstream-equal, `git merge-base --is-ancestor H HEAD`, docs-only diff
+against the exact three-file allowlist) and require its documented expected result in
+[README's current show-first source position](README.md#current-show-first-source-position--2026-08-30).
+The immutable `v1.1.3` tag and installer are blocked from current operator use;
+they remain historical evidence only. There is no `v1.1.4` tag, identity-bound
+installer, or GitHub Release. General-public distribution is therefore incomplete.
+
+For the 2026-08-30 show, configure the checkout-external JSON with the current
+Syndocal one-time token, exact selected NIC and `CustomMIDI1` name+port, then use
+only [README's source-launch command](README.md#3-v114未公開期間の公演前source-acceptance現在の暫定正規経路).
+That sole route makes the `REKORDBOX_EXE_PATH` Process/User/Machine preflight
+fail closed before it starts a process. `start-all.bat` runs with no arguments;
+its only other accepted invocation is exactly the lowercase `--preflight-only`
+preflight, and no installer or packaged exe substitutes for it on the current
+show. This is a narrow DJ-PC pre-release
+source-acceptance path. `start-all.bat` does not persist configuration or turn a
+connected socket into an authenticated/accepted session. The matrix is **0/12**
+until the following exact rows have recorded physical evidence. See README's
+**DJ-PC wake and HW-4 acceptance sequence (exactly 12 rows)**; that sequence is
+the single executable operator order for this handoff.
+
 ## 2026-08-25 current corrective release preparation: v1.1.4
 
 公開済み`v1.1.3`はwire mismatchを含むimmutable historical artifactとして保持し、tagや
@@ -32,14 +62,14 @@ hardware acceptanceは後続のrelease supervisor gateでのみ作成・主張�
 `DJLinkForPCDJ` shortcutから起動し、インストール先`start-rb.bat`のpayload検証を
 必ず通します。公開済みv1.1.3 shortcutは現行受入れに使用しません。
 
-v1.1.4 installerが未公開の現在は、2026-08-30公演の対象DJ PCに限りREADME
-「v1.1.4未公開期間の公演前source acceptance」を暫定正規経路とします。checkout外の
-JSONへhost `192.168.50.1`、NIC `192.168.50.2`、one-time token、adapter
-`syndocal-envelope-v2`、Setup列挙に完全一致する`CustomMIDI1` name+portを設定し、
-同じPowerShellで`DJ_AGENT_CONFIG_PATH`を指定して`.\start-all.bat`を実行します。
-`REKORDBOX_EXE_PATH`は退役済みで、残っていれば明示的に失敗します。source launcherは
-既存DLLを成功扱いせず、毎回Hookを再ビルド・provenance検証します。この例外は対象DJ PC
-のpre-release acceptanceだけで、一般配布完成の主張ではありません。
+v1.1.4 installerが未公開の現在は、2026-08-30公演の対象DJ PCに限り
+[READMEの唯一のsource-acceptance導線](README.md#3-v114未公開期間の公演前source-acceptance現在の暫定正規経路)
+を暫定正規経路とします。checkout外のJSONへhost `192.168.50.1`、NIC
+`192.168.50.2`、one-time token、adapter `syndocal-envelope-v2`、Setup列挙に完全一致する
+`CustomMIDI1` name+portを設定します。`REKORDBOX_EXE_PATH`は退役済みで、source
+launcherがProcess/User/Machine全scopeを明示的にfail-closeします。source launcherは
+既存DLLを成功扱いせず、毎回Hookを再ビルド・provenance検証します。この例外は対象DJ PCの
+pre-release acceptanceだけで、一般配布完成の主張ではありません。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
 `refs/tags/v*`の削除とnon-fast-forward更新を禁止します。workflowも
@@ -52,14 +82,24 @@ tests 19/19、対象source/testの`node --check`で確認済みです。`v1.1.3`
 READMEのimmutable historical evidenceだけであり、current product source、Setup URL、mapping
 artifactには残っていません。
 
-2026-08-26のsource checkpointはbranch `beta-v1.1.2`、pushed HEAD
-`f3da76f212c1919d4f813efce18b61a8c3813860`です。未対応Rekordboxへの暗黙注入と退役済み
+2026-08-26のcertified runtime-source checkpoint Hはbranch `beta-v1.1.2`、product
+source version `1.1.4`の`c6ebb0fd917a82574b9ef61f12ebb41283db357e`です。branch tipの
+clean/upstream-equalは固定記述ではなく、実行時にREADMEのproof commandと期待値で確認します。
+proofはH直後にdocs-only commit（`README.md`、`SYNDOCAL_PEDAL_HANDOFF.md`、`API.md`の3file
+のみ）が続き得ることを前提に設計されており、HEAD==Hを要求せず、ancestor成立とdocs-only差分で
+検証します。未対応Rekordboxへの暗黙注入と退役済み
 `REKORDBOX_EXE_PATH`経路をfail-closeした`ab643e6`、追随テスト修正`5110b2c`／`590115a`、
-現在の公演用source runbook `f3da76f`はすべて`origin/beta-v1.1.2`へpush済みです。
-最新sourceでの`npm test`は368 tests、366 pass、0 fail、2 skip、所要371652.9948ms。
-skipは`RB_OUTPUT_PKG_SMOKE=1`を必要とするreal/adversary pkg exe smokeだけです。
-この成功はsource regression gateであり、v1.1.4 tag、identity-bound build、installer、`dist`、
-GitHub Release、DJ-PC実機、Rekordbox、LAN、MIDI、Pedal、Syndocal ACKの完了を主張しません。
+公演用source runbook`f3da76f`、およびその直前のregression gate checkpoint
+`600ec0fd46729ed6c7bf5501ad70da8350141ec7`（履歴: full `npm test` 368 total /
+366 pass / 0 fail / 2 skip / 371652.9948ms）は、いずれも履歴として
+`origin/beta-v1.1.2`に存在します。
+
+checkpoint Hの最終gateは次のとおりです。focused smoke+envelope 89/89、launcher/config
+focused 12/12、full `npm test` 377 total / 375 pass / 0 fail / 2 intentional pkg skip、
+所要379134.5901ms、独立OxレビューAPPROVE。skipは`RB_OUTPUT_PKG_SMOKE=1`を必要とする
+real/adversary pkg exe smokeだけです。これらはsource regression gateであり、v1.1.4 tag、
+identity-bound build、installer、`dist`、GitHub Release、DJ-PC実機、Rekordbox、LAN、MIDI、
+Pedal、Syndocal ACKの完了を主張しません。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 v1.1.3 pre-commit checkpoint
 
@@ -350,26 +390,14 @@ Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時まで
 
 ## Stage 1: Rekordbox操作とhandoff
 
-設定例で明示的にrelease macroを有効にした場合、既定の
-`sequence:"parallel"`ではF13がmaster deckに対してFilter HP（64→127）と
-deck別`ChannelFader`（127→0）を独立タイマーで1000ms並行rampします。
-`sequence:"filter-then-fade"`を選ぶと、Filter HP rampが完全成功するまで
-ChannelFaderは一通も送らず、その後に1000ms fadeを開始します。Filterと
-fadeの両方が成功した後だけCue/Stopを送り、停止中にFilter 64 / Fader 127
-へresetし、最後に`DJ_RELEASE`を送って`handoff-pending`へ移ります。
-Filter failureではfade/Stop/Releaseを開始せず、fade failureではStop/
-Releaseを開始せず、安全に可能なFilter resetを試行して結果を表示します。
-片方のramp、Stop、resetが失敗した場合も後続のStop/Releaseを成功扱いに
-せず、failure/warningを表示します。API/statusとaction resultには
-`sequence`（`parallel`/`filter-then-fade`）と`phase`
-（`filter-ramp`、`parallel-ramp`、`fade-ramp`、`stopping`、`resetting`、
-`handoff-pending`、`complete`、`failed`）を保持します。
-失敗時は`releaseMacroReason`と`lastAction.reason`に同じrampまたはACKの
-理由を保持し、DJ_RELEASEのcanonical eventIdに紐付いたdelivery更新で
-phase/status/UIを同時に更新します。authoritative `running`を受信した後の
-遅延reject/timeoutは既に確定した`complete`を巻き戻しません。
-F14は従来のLoopHalf、F15はStage 1ではinactive（MIDIもSyndocalも送信
-しない）です。macro未設定時は既存互換の直接Stop/Release経路になります。
+2026-08-30のsource acceptanceでは`releaseMacro.enabled:false`を固定します。
+Stage 1のF13はmaster deckの直接Cue/Stopを一度だけ実行し、その結果を伴う
+`DJ_RELEASE`を送って`handoff-pending`へ移ります。Filter ramp、ChannelFader fade、
+reset、parallel/serial sequenceはこのacceptanceの対象外であり、暗黙には有効化しません。
+F13のACK/rejected/timed-out/send-failedは同じcanonical eventIdで表示し、失敗を
+成功へ昇格させません。F14は従来のLoopHalf、F15はStage 1ではinactive（MIDIも
+Syndocalも送信しない）です。release macroを有効化する検討は、全12行のphysical
+acceptance後に、このshow source設定から独立した設定・受入れtrancheとしてのみ行えます。
 
 推奨Learn例（CustomMIDI1、1-based channel）は次です。
 
@@ -392,12 +420,21 @@ Rekordbox MIDIを一切呼びません。
 
 | Pedal | outbound | payload |
 | --- | --- | --- |
-| F13 | `DJ_TIMELINE_BEAT_JUMP` | `{ "bars": -4, "timelineId": "..." }` |
-| F14 | `DJ_TIMELINE_LOOP_SET` | `{ "active": true|false, "timelineId": "..." }` |
-| F15 | `DJ_TIMELINE_BEAT_JUMP` | `{ "bars": 4, "timelineId": "..." }` |
+| F13 | `DJ_TIMELINE_BEAT_JUMP` | `{ "bars": -4, "timelineId": "...", "playSessionId": "..." }` |
+| F14 | `DJ_TIMELINE_LOOP_SET` | `{ "active": true\|false, "timelineId": "...", "playSessionId": "..." }` |
+| F15 | `DJ_TIMELINE_BEAT_JUMP` | `{ "bars": 4, "timelineId": "...", "playSessionId": "..." }` |
 
+両commandのpayloadは上表のexact fieldだけからなり、`timelineId`と`playSessionId`には
+権威`DJ_TIMELINE_STATE`が示す現在値をそのままstampします。encoderは未知fieldを1つでも
+受け取りません。内部だけが持つ出典marker `source:"pedal"`はexact一致でのみ許容され、
+wire frameへはstripされます。送信frameにlocal由来のfieldは現れません。権威
+`DJ_TIMELINE_STATE`の受入は同一session内では`sessionId`+`sequence`によるstaleness fenceで
+判定し、stale/equal sequenceは状態を変えずに破棄します。再接続で新しいconnection
+generation/sessionIdになるとfenceは再keyingされ、旧sessionとの比較は行いません。
 F14は前回の権威`loopActive`を反転した絶対値を送ります。送信中は次の
-toggleを保留し、rejected/timed-out/send-failedなら保留値を破棄します。
+toggleを保留し、terminal outcome（rejected/timed-out/send-failed）では保留latchを直ちに
+解放して破棄します。skipまたはterminal失敗したLOOP_SETは次のF14操作を妨げず、新しい
+絶対値として再試行可能です。
 ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` broadcastを
 待ちます。time signatureとbar gridはSyndocal側が決定し、`bars`は音楽的な
 小節数（秒数ではない）です。

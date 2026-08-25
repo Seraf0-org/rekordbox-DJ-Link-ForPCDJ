@@ -162,9 +162,21 @@ HTTP 200 so an intentional no-op is not rendered as a hardware/network error.
 
 When Stage 2 is active, the pedal aliases are:
 
-* F13 / `release` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": -4 }`
-* F14 / `loop-half` → `DJ_TIMELINE_LOOP_SET` with an absolute `{ "active": true|false }`
-* F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4 }`
+* F13 / `release` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": -4, "timelineId": "...", "playSessionId": "..." }`
+* F14 / `loop-half` → `DJ_TIMELINE_LOOP_SET` with an absolute `{ "active": true|false, "timelineId": "...", "playSessionId": "..." }`
+* F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4, "timelineId": "...", "playSessionId": "..." }`
+
+Both commands stamp the authoritative snapshot's exact current `timelineId` and
+`playSessionId`. Their encoders accept only those exact payload fields; any
+unknown field fails closed, and the internal local-source marker
+(`source:"pedal"`) is stripped so transmitted frames carry only canonical
+fields. Authoritative `DJ_TIMELINE_STATE` frames are fenced within one session
+by `sessionId` + `sequence`: stale/equal sequences are dropped without
+mutation, and the fence re-keys on each new connection generation after a
+reconnect instead of comparing across sessions. A skipped or terminally failed
+(rejected/timed-out/send-failed) `DJ_TIMELINE_LOOP_SET` clears its pending
+toggle latch immediately and stays retryable as a fresh absolute value on the
+next F14 press.
 
 `DJ_TIMELINE_STATE` is an exact v2 envelope. Its payload has exactly
 `state`, `loopActive`, `timelineId`, `positionBars`, `playSessionId`,

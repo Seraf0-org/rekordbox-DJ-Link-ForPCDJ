@@ -137,14 +137,116 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
 相互運用は、対象環境での実機受入試験が別途必要です。
 
+## Current show-first source position — 2026-08-30
+
+The current show path is deliberately **source only**, not a public distribution.
+Runtime checkpoint H is the exact full commit
+`c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2` (product
+source version `1.1.4`). A docs-only commit changing exactly `README.md`,
+`SYNDOCAL_PEDAL_HANDOFF.md`, and `API.md` may follow H, so the proof must
+never require `HEAD == H`; it verifies ancestry plus an all-docs diff instead.
+Before each controlled source acceptance, prove the checkout at runtime:
+
+```powershell
+git fetch origin
+$checkpointH = "c6ebb0fd917a82574b9ef61f12ebb41283db357e"
+$docsAllowlist = @("README.md", "SYNDOCAL_PEDAL_HANDOFF.md", "API.md")
+if (([string](git branch --show-current)).Trim() -ne "beta-v1.1.2") { throw "wrong source branch" }
+$dirty = @(git status --porcelain)
+if ($dirty.Count -ne 0) { throw "source checkout is not clean" }
+$head = ([string](git rev-parse HEAD)).Trim()
+$upstream = ([string](git rev-parse origin/beta-v1.1.2)).Trim()
+if ($head -ne $upstream) {
+  throw "HEAD is not upstream-equal on beta-v1.1.2"
+}
+git merge-base --is-ancestor $checkpointH HEAD
+if ($LASTEXITCODE -ne 0) {
+  throw "checkpoint H is not an ancestor of HEAD"
+}
+$outside = @((git diff --name-only "$checkpointH..HEAD") | Where-Object { $docsAllowlist -notcontains $_ })
+if ($outside.Count -ne 0) {
+  throw "non-allowlisted path changed since checkpoint H"
+}
+```
+
+Expected result: the script exits `0`; branch is `beta-v1.1.2`, the checkout
+is clean, `HEAD` equals `origin/beta-v1.1.2`,
+`git merge-base --is-ancestor H HEAD` succeeds, and
+`git diff --name-only H..HEAD` contains only the exact allowlist
+`README.md`, `SYNDOCAL_PEDAL_HANDOFF.md`, `API.md` and no other path.
+Any other result is a failed source acceptance; do not launch or substitute a
+different checkout.
+
+Checkpoint H's recorded software gates are: focused smoke+envelope suite
+89/89 pass, launcher/config focused suite 12/12 pass, full `npm test`
+377 total / 375 pass / 0 fail / 2 intentional package-smoke skips
+(`RB_OUTPUT_PKG_SMOKE=1`) in 379134.5901 ms, and an independent Ox adversarial
+review verdict APPROVE. These are source-level gates only; hardware acceptance
+remains **0/12** and is not closed by them.
+
+The immutable `v1.1.3` tag and installer are blocked for current acceptance because
+of the `DJ_MASTER_CHANGED` wire mismatch. Do not install, launch, or use their
+shortcuts as a substitute. `v1.1.4` has no tag, identity-bound installer, or GitHub
+Release yet; general-public distribution is explicitly incomplete. The current
+show therefore requires neither an installer nor a packaged exe; only the
+proven source checkout below is used.
+
+For the 2026-08-30 controlled source-acceptance exception, use only the target
+DJ PC's proven checkout, a checkout-external config file, and the current
+Syndocal one-time token:
+
+```powershell
+$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.4.json"
+.\start-all.bat
+```
+
+`start-all.bat` is the sole source-launch path, not an installer. Run it with
+**no arguments**; the only other accepted invocation is exactly the lowercase
+`--preflight-only`, which runs the same fail-closed preflight and then starts
+no build or show-side process. Any other argument fails closed before anything
+is built or started. It must be
+started in the same PowerShell that set `DJ_AGENT_CONFIG_PATH`; it does not
+persist or reload the config, token, or Setup selections. Before it builds or
+starts anything, it fail-closes on the retired `REKORDBOX_EXE_PATH` in Process,
+User, or Machine scope. If it reports a scope, clear that retired override with
+the authority required for that scope, open a fresh PowerShell, and rerun this
+same command; do not bypass the preflight with a second launch route. The source
+path is accepted only after all twelve hardware rows below have recorded evidence.
+Until then the state remains **0/12 hardware acceptance**, not show-ready DJ-Link
+completion.
+
+### DJ-PC wake and HW-4 acceptance sequence (exactly 12 rows)
+
+Before row 1, wake the DJ PC, connect the wired show LAN, start the FOH Syndocal
+listener on its explicitly selected wired NIC, rotate/copy the currently displayed
+one-time token into the external JSON, and confirm its exact `CustomMIDI1` name and
+port in the DJ Agent Setup view. Then launch the source path above. A status label
+such as `connected` does not substitute for HELLO/auth, State Sync, timeline-state,
+and correlated ACK evidence. Record a pass/fail result and raw evidence for each row;
+do not advance a failing row by retrying through an alternate/legacy adapter.
+
+1. Prove wired `/dj-link` HELLO/authentication, session replacement, and old-close protection.
+2. Pre-load a track and prove no trigger; prove a non-Master deck is rejected.
+3. Start actual Master playback and prove exactly one mapped Track Active event.
+4. Switch Master while playback is already running.
+5. In Stage 1, use F14 and prove local LoopHalf plus repeated absolute measured-loop `DJ_LOOP_STATE` reports.
+6. In Stage 1, keep `releaseMacro.enabled:false`; use F13 and prove only direct local Cue/Stop followed by `DJ_RELEASE`.
+7. In Stage 1, prove that direct F13 Release's ACK, rejection, timeout, and retry dispositions are visible and fail closed.
+8. Enter authoritative Stage 2 `running`; prove F13/F15 `-4/+4`, F14 absolute loop-set, and no MIDI output.
+9. Disconnect; prove local Stage 1 operation, reconnect State Sync, and Stage 2 fail-closed behavior.
+10. Prove same-session event dedupe and replay safety.
+11. Restart the app and prove next-show reuse with a new valid session/token configuration.
+12. Prove Art-Net/sACN traffic can share the wired network during the DJ run.
+
 ## Current corrective-release guidance — planned v1.1.4
 
 The intended current wire contract is strict `syndocal-envelope-v2`; explicitly reject
 `generic-json` and `syndocal-envelope-v1` with no fallback, alias, or implicit conversion.
 The immutable published v1.1.3 package is historical and blocked by its internal
-`DJ_MASTER_CHANGED` mismatch. Do not install or use it for current acceptance. The next
-corrected v1.1.4 release is planned but not yet tagged or published; hardware acceptance
-remains **0/12**.
+`DJ_MASTER_CHANGED` mismatch. Do not install or use it for current acceptance. The
+corrected v1.1.4 source checkpoint H is `c6ebb0fd917a82574b9ef61f12ebb41283db357e`
+on branch `beta-v1.1.2`, but its
+tagged/public release is still planned; hardware acceptance remains **0/12**.
 
 The corrected release must use the exact envelope
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}` and the exact control order
@@ -340,25 +442,24 @@ loop-half、release、filter rampの全CC送信に適用され、未指定のdec
 
 ### Pedal handoff modes
 
-The physical bindings are an explicit state machine. In Stage 1, F13 is an
-optional release macro. Its default `sequence:"parallel"` keeps the existing
-behavior: Filter HP 64→127 and the master deck's `ChannelFader` 127→0 run in
-parallel for one second. With `sequence:"filter-then-fade"`, the Filter ramp
-must complete successfully before the ChannelFader ramp sends its first MIDI
-message. Only after both ramps succeed does the agent send the deck Cue/Stop,
-restore Filter 64 and Fader 127, send `DJ_RELEASE`, and enter
-`handoff-pending`. Filter or fade failure never sends Stop/Release; a fade
-failure attempts a safe Filter reset and reports the result. If
-`releaseMacro.enabled:false` is explicitly configured, the direct Stop/Release
-action path is used; this is a deliberate local mode, not an automatic legacy or
-wire fallback. F14 keeps the local LoopHalf mapping. F15 is deliberately inactive in Stage 1 and
-sends neither MIDI nor Syndocal events.
+The physical bindings are an explicit state machine. For the 2026-08-30 source
+acceptance, Stage 1 fixes `releaseMacro.enabled:false`: F13 performs only the
+direct local Cue/Stop then `DJ_RELEASE` path. It is neither a compatibility
+fallback nor an inferred macro mode. F14 keeps the local LoopHalf mapping. F15
+is deliberately inactive in Stage 1 and sends neither MIDI nor Syndocal events.
+Release-macro enablement (Filter/ChannelFader ramp and its sequence) is outside
+this acceptance and may be considered only after all twelve rows pass, in a
+separate documented configuration and acceptance tranche.
 
 Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"`, the current
 `timelineId`/`playSessionId`, `pedalOwner:"timeline"`, and the correlated Release
 event changes the mode to `timeline-control`. Stage 2 maps F13/F15 to
-`DJ_TIMELINE_BEAT_JUMP` with `bars:-4/+4`, and F14 to the absolute
-`DJ_TIMELINE_LOOP_SET {"active":boolean}`. Stage 2 never sends Rekordbox MIDI.
+`DJ_TIMELINE_BEAT_JUMP` with
+`{ "bars": -4|4, "timelineId": "...", "playSessionId": "..." }`, and F14 to the
+absolute `DJ_TIMELINE_LOOP_SET`
+`{ "active": true|false, "timelineId": "...", "playSessionId": "..." }`;
+both commands stamp the snapshot's exact current `timelineId` and
+`playSessionId`. Stage 2 never sends Rekordbox MIDI.
 Disconnects, missing snapshots, invalid state broadcasts, and ACK failures keep
 timeline-control fail-closed; Stage 1 local MIDI remains available while only
 the network side effect is marked failed or pending.
@@ -427,49 +528,16 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 ### 3. v1.1.4未公開期間の公演前source acceptance（現在の暫定正規経路）
 
 検証済みv1.1.4 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
-明示してsourceを起動します。`start-all.bat`は`.env`やSetup画面の選択を保存・読込
-しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定し直して
-ランチャーを再実行してください。
+明示して**唯一の**source launcherを実行します。`start-all.bat`は`.env`やSetup画面の
+選択を保存・読込しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定
+し直して同じランチャーを再実行してください。退役済み`REKORDBOX_EXE_PATH`の
+Process/User/Machine確認とfail-closeは、ここに重複した手順を置かず、必ず
+`start-all.bat`自身が行います。launcherは**引数なし**で実行します。唯一の代替呼び出しは
+完全に小文字のexact `--preflight-only`で、これは同一のfail-closed preflightだけを行い、
+buildや公演側processを何も起動しません。それ以外の引数は一切受理されません。
+現在の公演にinstallerやpackaged exeは不要です。
 
 ```powershell
-# 旧overrideはclean-break済み。まず全scopeを確認します。
-"Process", "User", "Machine" | ForEach-Object {
-  "${_}: $([Environment]::GetEnvironmentVariable('REKORDBOX_EXE_PATH', $_))"
-}
-
-# Machineが非空ならここで停止し、下の管理者専用ブロックを先に実行します。
-$machineValue = [Environment]::GetEnvironmentVariable("REKORDBOX_EXE_PATH", "Machine")
-if (-not [string]::IsNullOrWhiteSpace($machineValue)) {
-  throw "REKORDBOX_EXE_PATH remains in Machine scope. Clear it in an elevated PowerShell first."
-}
-
-# Machineが空であることを確認後、Userと現在のshellを削除します。
-[Environment]::SetEnvironmentVariable("REKORDBOX_EXE_PATH", $null, "User")
-Remove-Item Env:REKORDBOX_EXE_PATH -ErrorAction SilentlyContinue
-```
-
-最初のブロックがMachine scopeで停止した場合だけ、管理者PowerShellで次を実行します。
-
-```powershell
-# 管理者PowerShellのみ
-[Environment]::SetEnvironmentVariable("REKORDBOX_EXE_PATH", $null, "Machine")
-```
-
-その後、管理者PowerShellを閉じ、通常権限の新しいPowerShellで最初の通常権限ブロックを
-もう一度実行します。Machineが空になったことを確認してUser/Processを削除できたら、
-開いているPowerShellをすべて閉じます。最後に通常権限の新しいPowerShellで残存値を
-fail-closed確認してから起動します。
-
-```powershell
-$remaining = "Process", "User", "Machine" | Where-Object {
-  -not [string]::IsNullOrWhiteSpace(
-    [Environment]::GetEnvironmentVariable("REKORDBOX_EXE_PATH", $_)
-  )
-}
-if ($remaining) {
-  throw "REKORDBOX_EXE_PATH remains in: $($remaining -join ', ')"
-}
-
 $env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.4.json"
 .\start-all.bat
 ```
@@ -486,7 +554,10 @@ installer完成を主張するものではありません。
 
 #### Source launcherの動作
 
-プロジェクトルートにあるバッチファイルを実行してください。「DLLの再ビルドと
+プロジェクトルートにある**唯一のsource launcher**を実行してください。引数は付けません。
+唯一の代替はexact小文字の`--preflight-only`（preflight成功のみで終了）で、その他の引数は
+何より先に拒否されます。これはまず
+`REKORDBOX_EXE_PATH`のProcess/User/Machine preflightをfail-closeで行い、「DLLの再ビルドと
 provenance検証」→「このcheckoutが所有するWebサーバーを現在の環境変数で再起動」→
 「Rekordboxへのインジェクト」→「ブラウザ起動」までを処理します。対応版のRekordboxが
 起動していなければ、インストール済みの7.2.18、7.2.14、7.2.13の順で自動起動します。
@@ -502,6 +573,8 @@ Rekordboxを再起動した場合は、`npm run inject:hook` をもう一度実�
 
 ### 4. 個別の手動実行コマンド（開発専用）
 もし各処理を単独で実行したい場合は以下のコマンドを使用します。
+これは開発時の分解診断専用で、2026-08-30公演のsource acceptance導線ではありません。
+公演では上記の`start-all.bat`だけを使用し、この節のコマンドへ置き換えないでください。
 
 ```powershell
 # 1. 注入用DLLのビルド
@@ -524,8 +597,8 @@ literalと`[::1]`のようなURL形式を受け付け、bind前にraw literalへ
 含む非空の不正値は、意図せず全IPv4インターフェイスへ公開しないよう起動時に
 fail-closedで拒否します。全インターフェイス公開が不要な場合は、必ず特定NICまたは
 `127.0.0.1`（IPv6 local-onlyなら`::1`）を明示してください。
-※`REKORDBOX_EXE_PATH`は退役済みです。設定が残っていればインジェクターは明示エラーで
-停止するため、User/System/現在のshellから削除してください。`--launch-path`は任意パス
+※`REKORDBOX_EXE_PATH`は退役済みです。source acceptanceでは唯一の`start-all.bat`が
+Process/User/Machineをfail-closeで確認します。`--launch-path`は任意パス
 overrideではなく、列挙された対応版（7.2.13／7.2.14／7.2.18）のcanonical installと
 完全一致する`rekordbox.exe`だけを受理します。`--launch-installed`は実行中の対応版を
 優先し、なければ対応するインストール済み最新版だけを選びます。未対応版または別install
