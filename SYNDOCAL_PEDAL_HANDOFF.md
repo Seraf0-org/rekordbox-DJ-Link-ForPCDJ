@@ -75,6 +75,14 @@ first-party warning 0です。独立Ox-alpha最終監査はP0/P1なしでPASSし
 build、DJ PCへのinstall、物理LAN、Rekordbox、MIDI、ペダル、Syndocal ACK、切断・再接続、
 両PC restartは未実施であり、hardware acceptance 0/12のままです。
 
+push後の`npm run build:dist`は、HEADにannotated `v1.1.3` tagが存在しないためStep 0/7で
+意図どおりfail-closedし、何もbuild/deleteしませんでした。hardware acceptance 0/12の
+段階でimmutable release tagは作成していません。代わりに
+`scripts\build-dist.ps1 -ValidateAbletonLinkOnly`を実行し、現在のAbleton Link addonが
+Windows x64 PE32+ DLL（DLL characteristics `0x0160`）であることは確認しました。
+DJ PCの実機試験はこのbranch sourceを取得して行い、12項目を閉じた後にannotated tag、
+identity-bound ZIP/installer、release manifestを生成します。
+
 ## v1.1.3 first-run Setup契約 (2026-08-25)
 
 DJ PCのSetup cardはDJ Agentがdisabled・未設定・native device未接続でも常時表示
