@@ -716,7 +716,7 @@ test("stale clean cache verifies the remote tag and refreshes only to the pin", 
   assert.equal(git(fixture.cache, ["status", "--porcelain"]).stdout.trim(), "");
 });
 
-test("source mutation after compile is caught and only the exact DLL output is removed", (t) => {
+test("source mutation during compiler use is caught and only the exact DLL output is removed", (t) => {
   const fixture = makeProjectFixture(t);
   const target = path.join(fixture.cache, "src", "hde", "hde64.h");
   const wrapperRoot = makeNativeCompilerRaceWrapper(t, fixture.root, target, "race-source-change");
@@ -728,8 +728,11 @@ test("source mutation after compile is caught and only the exact DLL output is r
   const result = runBuild(fixture.root, {}, `${wrapperRoot};`, [
     "-AdditionalTrustedCompilerRoots", wrapperRoot,
   ]);
-  assert.notEqual(result.status, 0, "source mutation after compile was accepted");
-  assert.match(`${result.stdout}\n${result.stderr}`, /post-compile verification failed|source\/config changed|raw worktree hash mismatch/i);
+  assert.notEqual(result.status, 0, "source mutation during compiler use was accepted");
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /MinHook checkout is dirty|pre-compile provenance|post-compile verification failed|source\/config changed|raw worktree hash mismatch/i,
+  );
   assert.equal(fs.existsSync(result.output), false, "stale DLL survived source-race rejection");
   assert.equal(fs.existsSync(path.join(fixture.root, "native", "bin", "rb_hook.lib")), false, "unrelated import library was removed or created unexpectedly");
 });
