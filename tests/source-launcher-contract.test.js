@@ -93,7 +93,7 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /fs\.lstatSync\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
-  assert.match(source, /c\.syndocal\.adapter!==['"]syndocal-envelope-v2['"]/);
+  assert.match(source, /c\.syndocal\.adapter!==['"]syndocal-envelope-v3['"]/);
   assert.match(source, /c\.midi\.device!==['"]CustomMIDI1['"]/);
   assert.match(source, /c\.midi\.releaseMacro\.enabled/);
   assert.doesNotMatch(source, /web server already running/i);
@@ -151,7 +151,7 @@ test(
         path: "/dj-link",
         nic: "192.168.50.2",
         token: "0123456789abcdef0123456789abcdef",
-        adapter: "syndocal-envelope-v2",
+        adapter: "syndocal-envelope-v3",
       },
       pedal: { enabled: true },
       midi: {

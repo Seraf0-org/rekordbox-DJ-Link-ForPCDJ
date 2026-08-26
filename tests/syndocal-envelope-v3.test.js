@@ -5,10 +5,10 @@ const dgram = require("node:dgram");
 
 const {
   createSyndocalClient,
-  createSyndocalEnvelopeV2Adapter,
-  decodeV2TimelineState,
+  createSyndocalEnvelopeV3Adapter,
+  decodeV3TimelineState,
   resolveAdapter,
-  validateEnvelopeV2Ack,
+  validateEnvelopeV3Ack,
 } = require("../server/dj-agent/syndocalClient");
 const { createTrackActivityDetector } = require("../server/dj-agent/trackActivityDetector");
 const { createShowEventRouter } = require("../server/dj-agent/showEventRouter");
@@ -18,9 +18,9 @@ const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 const NOW = Date.parse("2026-08-25T00:00:00.000Z");
 const ENVELOPE_FIELDS = ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"];
 
-function assertV2Frame(frame, type) {
+function assertV3Frame(frame, type) {
   assert.deepEqual(Object.keys(frame).sort(), [...ENVELOPE_FIELDS].sort());
-  assert.equal(frame.v, 2);
+  assert.equal(frame.v, 3);
   assert.equal(frame.type, type);
   assert.equal(frame.agentId, "rb-output-dj-agent");
   assert.equal(typeof frame.sessionId, "string");
@@ -55,7 +55,7 @@ function strictTrackPayload(overrides = {}) {
 
 function strictTimelineState(overrides = {}) {
   return {
-    v: 2,
+    v: 3,
     type: "DJ_TIMELINE_STATE",
     agentId: "syndocal",
     sessionId: "syndocal-session",
@@ -74,23 +74,24 @@ function strictTimelineState(overrides = {}) {
   };
 }
 
-test("production adapter is a strict v2 clean break and rejects flat/v1 names", () => {
-  const v2 = resolveAdapter({ adapter: "syndocal-envelope-v2", token: TEST_TOKEN });
-  assert.equal(v2.error, null);
-  assert.equal(v2.adapterObject.name, "syndocal-envelope-v2");
-  for (const retired of ["generic-json", "syndocal-envelope-v1", "", "envelope-v2"]) {
+test("production adapter is a strict v3 clean break and explicitly rejects retired v2", () => {
+  const v3 = resolveAdapter({ adapter: "syndocal-envelope-v3", token: TEST_TOKEN });
+  assert.equal(v3.error, null);
+  assert.equal(v3.adapterObject.name, "syndocal-envelope-v3");
+  for (const retired of ["generic-json", "syndocal-envelope-v1", "syndocal-envelope-v2", "", "envelope-v3"]) {
     const result = resolveAdapter({ adapter: retired, token: TEST_TOKEN });
     assert.equal(result.adapterObject, null);
-    assert.match(result.error, /v2|required|retired/i);
+    assert.match(result.error, /v3|required|retired/i);
   }
 });
 
-test("v2 active/sync payloads require exact identity, master deck, position, BPM, revision, and freshness", () => {
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+test("v3 active/sync payloads require exact identity, master deck, position, BPM, revision, and freshness", () => {
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   const hello = adapter.encodeHello({ eventId: "hello-1", sequence: 1 });
-  assertV2Frame(hello, "DJ_AGENT_HELLO");
-  assert.deepEqual(hello.payload.version, 2);
+  assertV3Frame(hello, "DJ_AGENT_HELLO");
+  assert.deepEqual(hello.payload.version, 3);
   assert.ok(hello.payload.capabilities.includes("DJ_MASTER_TRACK_SYNC"));
+  assert.ok(hello.payload.capabilities.includes("DJ_LOOP_FALLBACK"));
 
   const encoded = adapter.encodeEvent({
     type: "DJ_MASTER_TRACK_ACTIVE",
@@ -98,7 +99,7 @@ test("v2 active/sync payloads require exact identity, master deck, position, BPM
     sequence: 2,
     payload: strictTrackPayload(),
   });
-  assertV2Frame(encoded, "DJ_MASTER_TRACK_ACTIVE");
+  assertV3Frame(encoded, "DJ_MASTER_TRACK_ACTIVE");
   assert.deepEqual(encoded.payload, strictTrackPayload());
 
   const invalid = [
@@ -129,11 +130,11 @@ test("v2 active/sync payloads require exact identity, master deck, position, BPM
     sequence: 30,
     payload: strictTrackPayload({ contentId: null }),
   });
-  assertV2Frame(titleArtistIdentity, "DJ_MASTER_TRACK_SYNC");
+  assertV3Frame(titleArtistIdentity, "DJ_MASTER_TRACK_SYNC");
 });
 
-test("v2 loop and release encoders accept only measured/correlated state", () => {
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+test("v3 loop and release encoders accept only measured/correlated state", () => {
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   adapter.encodeHello({ eventId: "hello", sequence: 1 });
   const loop = {
     deck: 1,
@@ -148,7 +149,33 @@ test("v2 loop and release encoders accept only measured/correlated state", () =>
     sampleAgeMs: 3,
     source: "rekordbox-hook-measured",
   };
-  assertV2Frame(adapter.encodeEvent({ type: "DJ_LOOP_STATE", eventId: "loop-1", sequence: 2, payload: loop }), "DJ_LOOP_STATE");
+  assertV3Frame(adapter.encodeEvent({ type: "DJ_LOOP_STATE", eventId: "loop-1", sequence: 2, payload: loop }), "DJ_LOOP_STATE");
+  const inactiveLoop = {
+    ...loop,
+    active: false,
+    startBeat: null,
+    endBeat: null,
+    lengthBeats: null,
+    revision: 5,
+  };
+  assertV3Frame(adapter.encodeEvent({
+    type: "DJ_LOOP_STATE",
+    eventId: "loop-off",
+    sequence: 3,
+    payload: inactiveLoop,
+  }), "DJ_LOOP_STATE");
+  for (const patch of [
+    { startBeat: 32 },
+    { endBeat: 40 },
+    { lengthBeats: 8 },
+  ]) {
+    assert.equal(adapter.encodeEvent({
+      type: "DJ_LOOP_STATE",
+      eventId: `bad-loop-off-${Object.keys(patch)[0]}`,
+      sequence: 4,
+      payload: { ...inactiveLoop, ...patch },
+    }), null);
+  }
   for (const patch of [
     { active: null },
     { lengthBeats: 4 },
@@ -163,7 +190,7 @@ test("v2 loop and release encoders accept only measured/correlated state", () =>
       payload: { ...loop, ...patch },
     }), null);
   }
-  assertV2Frame(adapter.encodeEvent({
+  assertV3Frame(adapter.encodeEvent({
     type: "DJ_RELEASE",
     eventId: "release-1",
     sequence: 4,
@@ -177,8 +204,8 @@ test("v2 loop and release encoders accept only measured/correlated state", () =>
   }), null);
 });
 
-test("v2 beat jump and loop set encoders require a canonical playSessionId", () => {
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+test("v3 beat jump and loop set encoders require a canonical playSessionId", () => {
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   adapter.encodeHello({ eventId: "hello-actions", sequence: 1 });
   const beatJump = { bars: -4, timelineId: "life-over", playSessionId: "play-session-1" };
   const loopSet = { active: true, timelineId: "life-over", playSessionId: "play-session-1" };
@@ -188,7 +215,7 @@ test("v2 beat jump and loop set encoders require a canonical playSessionId", () 
     sequence: 2,
     payload: beatJump,
   });
-  assertV2Frame(jumpFrame, "DJ_TIMELINE_BEAT_JUMP");
+  assertV3Frame(jumpFrame, "DJ_TIMELINE_BEAT_JUMP");
   assert.deepEqual(jumpFrame.payload, beatJump);
   const loopFrame = adapter.encodeEvent({
     type: "DJ_TIMELINE_LOOP_SET",
@@ -196,7 +223,7 @@ test("v2 beat jump and loop set encoders require a canonical playSessionId", () 
     sequence: 3,
     payload: loopSet,
   });
-  assertV2Frame(loopFrame, "DJ_TIMELINE_LOOP_SET");
+  assertV3Frame(loopFrame, "DJ_TIMELINE_LOOP_SET");
   assert.deepEqual(loopFrame.payload, loopSet);
 
   // The router's exact source="pedal" local-only metadata is accepted on
@@ -207,7 +234,7 @@ test("v2 beat jump and loop set encoders require a canonical playSessionId", () 
     sequence: 4,
     payload: { ...beatJump, source: "pedal" },
   });
-  assertV2Frame(jumpPedal, "DJ_TIMELINE_BEAT_JUMP");
+  assertV3Frame(jumpPedal, "DJ_TIMELINE_BEAT_JUMP");
   assert.deepEqual(jumpPedal.payload, beatJump);
   const loopPedal = adapter.encodeEvent({
     type: "DJ_TIMELINE_LOOP_SET",
@@ -215,7 +242,7 @@ test("v2 beat jump and loop set encoders require a canonical playSessionId", () 
     sequence: 5,
     payload: { ...loopSet, source: "pedal" },
   });
-  assertV2Frame(loopPedal, "DJ_TIMELINE_LOOP_SET");
+  assertV3Frame(loopPedal, "DJ_TIMELINE_LOOP_SET");
   assert.deepEqual(loopPedal.payload, loopSet);
 
   // Hostile inputs are rejected, never silently stripped.
@@ -402,14 +429,14 @@ test("master switch emits one fresh strict ACTIVE then one strictly newer SYNC w
   assert.equal(active.payload.isPlaying, true);
   assert.equal(active.payload.master, true);
   assert.ok(active.payload.playSessionId);
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   const activeFrame = adapter.encodeEvent({
     type: active.type,
     eventId: active.eventId,
     sequence: 1,
     payload: active.payload,
   });
-  assertV2Frame(activeFrame, "DJ_MASTER_TRACK_ACTIVE");
+  assertV3Frame(activeFrame, "DJ_MASTER_TRACK_ACTIVE");
   assert.deepEqual(activeFrame.payload, active.payload);
 
   // Equal revision cannot duplicate either transition; only a strictly newer,
@@ -434,7 +461,7 @@ test("master switch emits one fresh strict ACTIVE then one strictly newer SYNC w
     sequence: 2,
     payload: sync.payload,
   });
-  assertV2Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
+  assertV3Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
   assert.deepEqual(syncFrame.payload, sync.payload);
 });
 
@@ -537,14 +564,14 @@ test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the exp
   assert.equal(sync.payload.playSessionId, activeTwo.payload.playSessionId);
   assert.equal(sync.payload.positionRevision, 11);
 
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   const activeTwoFrame = adapter.encodeEvent({
     type: activeTwo.type,
     eventId: activeTwo.eventId,
     sequence: 1,
     payload: activeTwo.payload,
   });
-  assertV2Frame(activeTwoFrame, "DJ_MASTER_TRACK_ACTIVE");
+  assertV3Frame(activeTwoFrame, "DJ_MASTER_TRACK_ACTIVE");
   assert.deepEqual(activeTwoFrame.payload, activeTwo.payload);
   const syncFrame = adapter.encodeEvent({
     type: sync.type,
@@ -552,7 +579,7 @@ test("conflicting non-explicit snapshot cannot duplicate ACTIVE or steal the exp
     sequence: 2,
     payload: sync.payload,
   });
-  assertV2Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
+  assertV3Frame(syncFrame, "DJ_MASTER_TRACK_SYNC");
   assert.deepEqual(syncFrame.payload, sync.payload);
 });
 
@@ -1163,20 +1190,37 @@ test("real Hook UDP snapshots deliver measured 8/4/2 loops with one fenced play 
     assert.equal(loop.payload.source, "rekordbox-hook-measured");
   }
 
+  const loopOffPromise = waitFor(
+    detector,
+    "event",
+    (event) => event.type === "DJ_LOOP_STATE" && event.payload.active === false,
+    "measured loop-off",
+  );
+  await send({
+    type: "loop_state",
+    deck: 1,
+    active: false,
+    revision: 4,
+  });
+  const loopOff = await loopOffPromise;
+  assert.equal(loopOff.payload.startBeat, null);
+  assert.equal(loopOff.payload.endBeat, null);
+  assert.equal(loopOff.payload.lengthBeats, null);
+
   assert.deepEqual(
     events.filter((event) => event.type === "DJ_LOOP_STATE").map((event) => event.payload.lengthBeats),
-    [8, 4, 2],
+    [8, 4, 2, null],
   );
 });
 
-class V2WebSocket extends EventEmitter {
+class V3WebSocket extends EventEmitter {
   static instances = [];
   constructor(url) {
     super();
     this.url = url;
     this.readyState = 0;
     this.sent = [];
-    V2WebSocket.instances.push(this);
+    V3WebSocket.instances.push(this);
     queueMicrotask(() => {
       this.readyState = 1;
       this.emit("open");
@@ -1210,13 +1254,13 @@ function waitForEvent(emitter, name, predicate, { timeoutMs = 500, label = name 
   });
 }
 
-test("ACK reconnect retry preserves eventId/playSession exactly once and uses a fresh v2 session", async (t) => {
-  V2WebSocket.instances = [];
+test("ACK reconnect retry preserves eventId/playSession exactly once and uses a fresh v3 session", async (t) => {
+  V3WebSocket.instances = [];
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
-    WebSocketImpl: V2WebSocket,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
     reconnectMinMs: 50,
     reconnectMaxMs: 50,
     heartbeatMs: 60_000,
@@ -1226,7 +1270,7 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   t.after(() => client.stop());
   client.start();
   await flush();
-  const first = V2WebSocket.instances[0];
+  const first = V3WebSocket.instances[0];
   const sent = client.sendEvent({
     type: "DJ_MASTER_TRACK_ACTIVE",
     eventId: "active-reconnect",
@@ -1234,7 +1278,7 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   });
   assert.equal(sent.state, "pending");
   const firstFrame = first.sent.find((frame) => frame.eventId === "active-reconnect");
-  assertV2Frame(firstFrame, "DJ_MASTER_TRACK_ACTIVE");
+  assertV3Frame(firstFrame, "DJ_MASTER_TRACK_ACTIVE");
   const reconnect = waitForEvent(
     client,
     "connected",
@@ -1245,16 +1289,16 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   first.emit("close", 1006, "test-reconnect");
   assert.equal(client.getStatus().lastDelivery.state, "retrying");
   await reconnect;
-  const second = V2WebSocket.instances[1];
+  const second = V3WebSocket.instances[1];
   const replay = second.sent.find((frame) => frame.eventId === "active-reconnect");
-  assertV2Frame(replay, "DJ_MASTER_TRACK_ACTIVE");
+  assertV3Frame(replay, "DJ_MASTER_TRACK_ACTIVE");
   assert.notEqual(replay.sessionId, firstFrame.sessionId);
   assert.notEqual(replay.sequence, firstFrame.sequence);
   assert.equal(replay.payload.playSessionId, firstFrame.payload.playSessionId);
   assert.deepEqual(replay.payload, firstFrame.payload);
 
   first.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "ACK",
     eventId: "active-reconnect",
     sequence: firstFrame.sequence,
@@ -1264,7 +1308,7 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
   }));
   assert.equal(client.getStatus().pendingAcks, 1);
   second.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "ACK",
     eventId: "active-reconnect",
     sequence: replay.sequence,
@@ -1277,13 +1321,13 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
 });
 
 test("reconnect replay of a queued timeline command keeps its originally bound playSessionId", async (t) => {
-  V2WebSocket.instances = [];
+  V3WebSocket.instances = [];
   let currentSession = "play-session-a";
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
-    WebSocketImpl: V2WebSocket,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
     reconnectMinMs: 50,
     reconnectMaxMs: 50,
     heartbeatMs: 60_000,
@@ -1293,7 +1337,7 @@ test("reconnect replay of a queued timeline command keeps its originally bound p
   t.after(() => client.stop());
   client.start();
   await flush();
-  const first = V2WebSocket.instances[0];
+  const first = V3WebSocket.instances[0];
   const boundPayload = { bars: -4, timelineId: "life-over", playSessionId: currentSession };
   const queued = client.sendEvent({ type: "DJ_TIMELINE_BEAT_JUMP", payload: boundPayload });
   assert.equal(queued.state, "pending");
@@ -1307,28 +1351,28 @@ test("reconnect replay of a queued timeline command keeps its originally bound p
   first.readyState = 3;
   first.emit("close", 1006, "session-replacement");
   await reconnect;
-  const second = V2WebSocket.instances.at(-1);
+  const second = V3WebSocket.instances.at(-1);
   const replay = second.sent.find((frame) => frame.eventId === queued.eventId);
-  assertV2Frame(replay, "DJ_TIMELINE_BEAT_JUMP");
+  assertV3Frame(replay, "DJ_TIMELINE_BEAT_JUMP");
   assert.deepEqual(replay.payload, boundPayload);
   assert.equal(replay.payload.playSessionId, "play-session-a");
   assert.notEqual(replay.payload.playSessionId, currentSession);
 });
 
 test("durable physical event IDs are single-use and caller sequence reorder fails closed", async (t) => {
-  V2WebSocket.instances = [];
+  V3WebSocket.instances = [];
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
-    WebSocketImpl: V2WebSocket,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
     heartbeatMs: 60_000,
     stateSyncProvider: () => ({ released: false, masterDeck: 1, activePlaySessionId: "play-session-1" }),
   });
   t.after(() => client.stop());
   client.start();
   await flush();
-  const socket = V2WebSocket.instances[0];
+  const socket = V3WebSocket.instances[0];
   const first = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "release-single-use",
@@ -1388,7 +1432,7 @@ test("continuous TRACK_SYNC exceeds the durable ID budget without storage, repla
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: EnduranceWebSocket,
     reconnectMinMs: 50,
     reconnectMaxMs: 50,
@@ -1458,7 +1502,7 @@ test("continuous TRACK_SYNC exceeds the durable ID budget without storage, repla
   assert.equal(second.syncCount, 0);
   assert.equal(first.syncCount, firstCountBeforeReconnect);
   const durableReplay = second.controlFrames.find((frame) => frame.eventId === durable.eventId);
-  assertV2Frame(durableReplay, "DJ_RELEASE");
+  assertV3Frame(durableReplay, "DJ_RELEASE");
   assert.equal(durableReplay.payload.playSessionId, "play-session-1");
 
   payload.positionRevision += 1;
@@ -1476,13 +1520,13 @@ test("continuous TRACK_SYNC exceeds the durable ID budget without storage, repla
   assert.equal(client.getStatus().physicalEventIdRegistrySize, 1);
 });
 
-test("inbound flat/v1 frames are visible protocol failures and v2 timeline state is exact", async (t) => {
-  V2WebSocket.instances = [];
+test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline state is exact", async (t) => {
+  V3WebSocket.instances = [];
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
-    WebSocketImpl: V2WebSocket,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
     heartbeatMs: 60_000,
     stateSyncProvider: () => ({ released: false, masterDeck: null, activePlaySessionId: null }),
   });
@@ -1493,11 +1537,16 @@ test("inbound flat/v1 frames are visible protocol failures and v2 timeline state
   client.on("timeline-state", (state) => states.push(state));
   client.start();
   await flush();
-  const socket = V2WebSocket.instances[0];
+  const socket = V3WebSocket.instances[0];
   socket.emit("message", JSON.stringify({ type: "ACK", eventId: "flat" }));
   socket.emit("message", JSON.stringify({ v: 1, type: "ACK", eventId: "v1" }));
+  socket.emit("message", JSON.stringify({ v: 2, type: "ACK", eventId: "retired-v2" }));
   socket.emit("message", JSON.stringify(strictTimelineState()));
-  assert.deepEqual(failures.map((failure) => failure.reason), ["strict-envelope-v2-required", "retired-protocol-v1"]);
+  assert.deepEqual(failures.map((failure) => failure.reason), [
+    "strict-envelope-v3-required",
+    "retired-protocol-v1-or-v2",
+    "retired-protocol-v1-or-v2",
+  ]);
   assert.equal(states.length, 1);
   assert.equal(states[0].playSessionId, "play-session-1");
   // The decoded state exposes authoritative session identity and the
@@ -1506,7 +1555,7 @@ test("inbound flat/v1 frames are visible protocol failures and v2 timeline state
   assert.equal(states[0].sessionId, "syndocal-session");
   assert.equal(states[0].sequence, 1);
   assert.equal(states[0].eventId, "timeline-state-1");
-  const decoded = decodeV2TimelineState({
+  const decoded = decodeV3TimelineState({
     ...strictTimelineState(),
     sequence: 9,
     eventId: "timeline-state-9",
@@ -1514,12 +1563,12 @@ test("inbound flat/v1 frames are visible protocol failures and v2 timeline state
   assert.equal(decoded.sessionId, "syndocal-session");
   assert.equal(decoded.sequence, 9);
   assert.equal(decoded.eventId, "timeline-state-9");
-  assert.equal(decodeV2TimelineState({ ...strictTimelineState(), bonus: true }), null);
+  assert.equal(decodeV3TimelineState({ ...strictTimelineState(), bonus: true }), null);
 });
 
-test("ACK v2 schema rejects missing, extra, stale, and nonfinite fields", () => {
+test("ACK v3 schema rejects missing, extra, stale, and nonfinite fields", () => {
   const valid = {
-    v: 2,
+    v: 3,
     type: "ACK",
     eventId: "event-1",
     sequence: 3,
@@ -1527,7 +1576,7 @@ test("ACK v2 schema rejects missing, extra, stale, and nonfinite fields", () => 
     code: null,
     stateGeneration: 1,
   };
-  assert.equal(validateEnvelopeV2Ack(valid).valid, true);
+  assert.equal(validateEnvelopeV3Ack(valid).valid, true);
   for (const invalid of [
     { ...valid, v: 1 },
     { ...valid, sequence: Number.NaN },
@@ -1535,12 +1584,17 @@ test("ACK v2 schema rejects missing, extra, stale, and nonfinite fields", () => 
     { ...valid, outcome: "ok" },
     { ...valid, extra: true },
     { ...valid, eventId: " event-1" },
-  ]) assert.equal(validateEnvelopeV2Ack(invalid).valid, false);
+  ]) assert.equal(validateEnvelopeV3Ack(invalid).valid, false);
 });
 
 function createFakeRouter() {
   const detector = new EventEmitter();
-  detector.state = { currentMasterDeck: 1, masterDeckSource: "explicit", decks: { 1: { track: null } } };
+  detector.state = {
+    currentMasterDeck: 1,
+    masterDeckRevision: 1,
+    masterDeckSource: "explicit",
+    decks: { 1: { track: null, playSessionId: "play-session-1" } },
+  };
   detector.getState = () => detector.state;
   detector.onSnapshot = () => detector.state;
   detector.onTrackLoaded = () => null;
@@ -1623,10 +1677,11 @@ test("pedal ownership changes only after correlated release and late sync cannot
   assert.equal(router.getStatus().mode, "timeline-control");
 });
 
-test("strict v2 capabilities and typed encoders exclude DJ_MASTER_CHANGED entirely", () => {
-  const adapter = createSyndocalEnvelopeV2Adapter({ token: TEST_TOKEN });
+test("strict v3 capabilities and typed encoders exclude DJ_MASTER_CHANGED entirely", () => {
+  const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   const hello = adapter.encodeHello({ eventId: "hello-capabilities", sequence: 1 });
   assert.equal(hello.payload.capabilities.includes("DJ_MASTER_CHANGED"), false);
+  assert.equal(hello.payload.capabilities.includes("DJ_LOOP_FALLBACK"), true);
   for (const payload of [
     { deck: 1, deckId: "rekordbox-deck-1" },
     { deck: 2 },
@@ -1644,12 +1699,12 @@ test("strict v2 capabilities and typed encoders exclude DJ_MASTER_CHANGED entire
 });
 
 test("DJ_MASTER_CHANGED cannot be queued, encoded, delivered, retried, or replayed", async (t) => {
-  V2WebSocket.instances = [];
+  V3WebSocket.instances = [];
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
-    WebSocketImpl: V2WebSocket,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 50,
     reconnectMaxMs: 50,
@@ -1662,7 +1717,7 @@ test("DJ_MASTER_CHANGED cannot be queued, encoded, delivered, retried, or replay
   client.on("delivery", (delivery) => deliveries.push(delivery.type));
   client.start();
   await flush();
-  const first = V2WebSocket.instances[0];
+  const first = V3WebSocket.instances[0];
 
   const attempted = client.sendEvent({
     type: "DJ_MASTER_CHANGED",
@@ -1681,7 +1736,7 @@ test("DJ_MASTER_CHANGED cannot be queued, encoded, delivered, retried, or replay
   assert.deepEqual(failures, []);
 
   first.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "ACK",
     eventId: "retired-master-changed",
     sequence: 50,
@@ -1702,7 +1757,7 @@ test("DJ_MASTER_CHANGED cannot be queued, encoded, delivered, retried, or replay
   first.readyState = 3;
   first.emit("close", 1006, "retired-reconnect");
   await reconnect;
-  const second = V2WebSocket.instances.at(-1);
+  const second = V3WebSocket.instances.at(-1);
   assert.equal(second.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
 });
 

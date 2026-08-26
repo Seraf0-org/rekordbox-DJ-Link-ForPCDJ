@@ -218,7 +218,7 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, cwd = process.cwd() 
       // Preserve the token exactly for the client preflight; do not trim,
       // persist, or log credentials here.
       token: typeof syndocalToken === "string" ? syndocalToken : "",
-      adapter: String(env.SYNDOCAL_WS_ADAPTER || syndocalFile.adapter || "syndocal-envelope-v2").trim(),
+      adapter: String(env.SYNDOCAL_WS_ADAPTER || syndocalFile.adapter || "syndocal-envelope-v3").trim(),
       reconnectMinMs: asNumber(syndocalFile.reconnectMinMs, 500, { min: 50, max: 60_000 }),
       reconnectMaxMs: asNumber(syndocalFile.reconnectMaxMs, 10_000, { min: 250, max: 300_000 }),
       heartbeatMs: asNumber(

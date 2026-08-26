@@ -46,13 +46,13 @@ const {
 } = require("../server/dj-agent/httpSecurity");
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
-function assertStrictV2Frame(frame, type = frame?.type) {
+function assertStrictV3Frame(frame, type = frame?.type) {
   assert.ok(frame && typeof frame === "object" && !Array.isArray(frame));
   assert.deepEqual(
     Object.keys(frame).sort(),
     ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"].sort(),
   );
-  assert.equal(frame.v, 2);
+  assert.equal(frame.v, 3);
   assert.equal(frame.type, type);
   assert.equal(frame.agentId, "rb-output-dj-agent");
   assert.equal(typeof frame.sessionId, "string");
@@ -64,7 +64,7 @@ function assertStrictV2Frame(frame, type = frame?.type) {
   return frame;
 }
 
-function strictV2TrackPayload(overrides = {}) {
+function strictV3TrackPayload(overrides = {}) {
   return {
     deck: 1,
     deckId: "rekordbox-deck-1",
@@ -86,7 +86,7 @@ function strictV2TrackPayload(overrides = {}) {
   };
 }
 
-function strictV2LoopPayload(overrides = {}) {
+function strictV3LoopPayload(overrides = {}) {
   return {
     deck: 1,
     deckId: "rekordbox-deck-1",
@@ -103,13 +103,13 @@ function strictV2LoopPayload(overrides = {}) {
   };
 }
 
-function strictV2ReleasePayload(overrides = {}) {
+function strictV3ReleasePayload(overrides = {}) {
   return { state: "released", timelineId: "life-over", playSessionId: "play-session-1", ...overrides };
 }
 
-function strictV2Ack(frame, outcome = "accepted", overrides = {}) {
+function strictV3Ack(frame, outcome = "accepted", overrides = {}) {
   return {
-    v: 2,
+    v: 3,
     type: "ACK",
     eventId: frame.eventId,
     sequence: frame.sequence,
@@ -301,7 +301,7 @@ test("DJ Agent configuration remains off without an explicit gate", () => {
   assert.equal(config.syndocal.enabled, false);
   assert.equal(config.pedal.enabled, false);
   assert.equal(config.midi.enabled, false);
-  assert.equal(config.syndocal.adapter, "syndocal-envelope-v2");
+  assert.equal(config.syndocal.adapter, "syndocal-envelope-v3");
 });
 
 test("release macro is opt-in and keeps the documented Filter and ChannelFader defaults", () => {
@@ -1463,7 +1463,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: FenceWebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 10,
@@ -1495,7 +1495,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
   await new Promise((resolve) => setImmediate(resolve));
   const socket = FenceWebSocket.instances.at(-1);
   const stateMessage = ({ sequence, eventId, sessionId = "syndocal-session", ...overrides }) => JSON.stringify({
-    v: 2,
+    v: 3,
     type: "DJ_TIMELINE_STATE",
     agentId: "syndocal",
     sessionId,
@@ -1616,7 +1616,10 @@ test("Syndocal disconnect does not gate Stage 1 local MIDI actions", () => {
   assert.equal(release.ok, false);
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.midiSent, true);
-  assert.equal(loop.ok, true);
+  // MIDI remains local and is attempted while disconnected. This fixture has
+  // no measured master/session identity, so it cannot also arm a v3 fallback.
+  assert.equal(loop.ok, false);
+  assert.equal(loop.reason, "loop-fallback-identity-unproven");
   assert.equal(router.triggerAction("filter-close").ignored, true);
   assert.deepEqual(midiCalls, ["stop", "loopHalf"]);
 
@@ -1796,7 +1799,7 @@ test("synchronous DJ_RELEASE send failure returns to dj-control and remains retr
   router.stop();
 });
 
-test("legacy release local MIDI failure sends no DJ_RELEASE and does not enter handoff", () => {
+test("Stage 1 release routes physical DJ_RELEASE when local Stop MIDI fails", () => {
   const detector = createTrackActivityDetector({ idFactory: () => "legacy-failure-id" });
   const sent = [];
   const client = new EventEmitter();
@@ -1819,8 +1822,11 @@ test("legacy release local MIDI failure sends no DJ_RELEASE and does not enter h
   client.emit("timeline-state", { state: "idle", loopActive: false });
   const result = router.triggerAction("release");
   assert.equal(result.reason, "local-midi-failed");
-  assert.equal(router.getStatus().mode, "dj-control");
-  assert.deepEqual(sent, []);
+  assert.equal(result.midiSent, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.delivery.state, "acknowledged");
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  assert.deepEqual(sent.map((event) => event.type), ["DJ_RELEASE"]);
   router.stop();
 });
 
@@ -2242,11 +2248,12 @@ test("action security normalizes IPv4, IPv4-mapped IPv6, and IPv6 loopback", () 
 });
 
 test("Syndocal adapter selection is explicit and unknown names are unavailable", () => {
-  assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v2", token: TEST_TOKEN }).adapterObject.name, "syndocal-envelope-v2");
+  assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v3", token: TEST_TOKEN }).adapterObject.name, "syndocal-envelope-v3");
   assert.equal(resolveAdapter({ adapter: "generic-json", token: TEST_TOKEN }).adapterObject, null);
   assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v1", token: TEST_TOKEN }).adapterObject, null);
+  assert.equal(resolveAdapter({ adapter: "syndocal-envelope-v2", token: TEST_TOKEN }).adapterObject, null);
   assert.equal(resolveAdapter({ adapter: "" }).adapterObject, null);
-  assert.match(resolveAdapter({ adapter: "kdmx-private" }).error, /v2|required|retired/);
+  assert.match(resolveAdapter({ adapter: "kdmx-private" }).error, /v3|required|retired/);
   const client = createSyndocalClient({ enabled: true, adapter: "unknown-adapter" });
   assert.equal(client.getStatus().state, "unavailable");
   client.start();
@@ -2254,7 +2261,7 @@ test("Syndocal adapter selection is explicit and unknown names are unavailable",
   client.stop();
 });
 
-test("real router getStateSync is encoded as a strict v2 State Sync frame", async (t) => {
+test("real router getStateSync is encoded as a strict v3 State Sync frame", async (t) => {
   class StateSyncWebSocket extends EventEmitter {
     static instances = [];
 
@@ -2288,7 +2295,7 @@ test("real router getStateSync is encoded as a strict v2 State Sync frame", asyn
   const client = createSyndocalClient({
     enabled: true,
     token: "0123456789abcdef0123456789abcdef",
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: StateSyncWebSocket,
     heartbeatMs: 60_000,
     stateSyncProvider: () => router?.getStateSync() || {},
@@ -2316,9 +2323,9 @@ test("real router getStateSync is encoded as a strict v2 State Sync frame", asyn
   await new Promise((resolve) => setImmediate(resolve));
   const socket = StateSyncWebSocket.instances.at(-1);
   assert.equal(socket.url, "ws://127.0.0.1:9100/dj-link");
-  assertStrictV2Frame(socket.sent[0], "DJ_AGENT_HELLO");
-  assertStrictV2Frame(socket.sent[1], "DJ_STATE_SYNC");
-  assertStrictV2Frame(socket.sent[2], "DJ_TIMELINE_STATE_REQUEST");
+  assertStrictV3Frame(socket.sent[0], "DJ_AGENT_HELLO");
+  assertStrictV3Frame(socket.sent[1], "DJ_STATE_SYNC");
+  assertStrictV3Frame(socket.sent[2], "DJ_TIMELINE_STATE_REQUEST");
   assert.equal(socket.sent[1].type, "DJ_STATE_SYNC");
   assert.deepEqual(socket.sent[1].payload, {
     released: false,
@@ -2327,7 +2334,7 @@ test("real router getStateSync is encoded as a strict v2 State Sync frame", asyn
   });
 
   socket.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "DJ_TIMELINE_STATE",
     agentId: "syndocal",
     sessionId: "syndocal-session",
@@ -2345,7 +2352,7 @@ test("real router getStateSync is encoded as a strict v2 State Sync frame", asyn
   }));
   assert.equal(router.getStatus().mode, "dj-control");
   socket.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "DJ_TIMELINE_STATE",
     agentId: "syndocal",
     sessionId: "syndocal-session",
@@ -2393,7 +2400,7 @@ test("Busy ACK retries the same eventId/sequence/shape and terminal rejection do
   const client = createSyndocalClient({
     enabled: true,
     token: "0123456789abcdef0123456789abcdef",
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: BusyWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 100,
@@ -2410,35 +2417,35 @@ test("Busy ACK retries the same eventId/sequence/shape and terminal rejection do
     type: "DJ_LOOP_STATE",
     eventId: "same-event",
     sequence: 77,
-    payload: strictV2LoopPayload(),
+    payload: strictV3LoopPayload(),
   });
   const firstFrame = socket.sent.at(-1);
   assert.equal(retried.state, "pending");
-  assertStrictV2Frame(firstFrame, "DJ_LOOP_STATE");
-  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame, "busy", { code: "BUSY" })));
+  assertStrictV3Frame(firstFrame, "DJ_LOOP_STATE");
+  socket.emit("message", JSON.stringify(strictV3Ack(firstFrame, "busy", { code: "BUSY" })));
   await new Promise((resolve) => setTimeout(resolve, 12));
   const eventFrames = socket.sent.filter((frame) => frame.type === "DJ_LOOP_STATE");
   assert.equal(eventFrames.length, 2);
   assert.deepEqual(eventFrames[1], firstFrame);
   assert.equal(client.getStatus().lastDelivery.state, "pending");
-  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame)));
+  socket.emit("message", JSON.stringify(strictV3Ack(firstFrame)));
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
 
-  const terminalReject = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
+  const terminalReject = client.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() });
   const terminalFrame = socket.sent.find((frame) => frame.eventId === terminalReject.eventId);
   const rejectCount = socket.sent.filter((frame) => frame.eventId === terminalReject.eventId).length;
-  socket.emit("message", JSON.stringify(strictV2Ack(terminalFrame, "rejected", { code: "REJECTED" })));
+  socket.emit("message", JSON.stringify(strictV3Ack(terminalFrame, "rejected", { code: "REJECTED" })));
   await new Promise((resolve) => setTimeout(resolve, 12));
   assert.equal(socket.sent.filter((frame) => frame.eventId === terminalReject.eventId).length, rejectCount);
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
 });
 
-test("Syndocal defaults use /dj-link, strict v2, five-second heartbeat, ws, and bounded history", async (t) => {
+test("Syndocal defaults use /dj-link, strict v3, five-second heartbeat, ws, and bounded history", async (t) => {
   const config = loadDjAgentConfig({
     env: { DJ_AGENT_ENABLED: "true", SYNDOCAL_ENABLED: "true" },
   });
   assert.equal(config.syndocal.path, "/dj-link");
-  assert.equal(config.syndocal.adapter, "syndocal-envelope-v2");
+  assert.equal(config.syndocal.adapter, "syndocal-envelope-v3");
   assert.equal(config.syndocal.heartbeatMs, 5_000);
   assert.equal(resolveWebSocketImplementation("ws"), require("ws"));
 
@@ -2469,7 +2476,7 @@ test("Syndocal defaults use /dj-link, strict v2, five-second heartbeat, ws, and 
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: HistoryWebSocket,
     heartbeatMs: 60_000,
     deliveryHistoryMax: 3,
@@ -2532,7 +2539,7 @@ test("Syndocal delivery stays pending until ACK and records rejection/timeout", 
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: AckWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 25,
@@ -2543,24 +2550,24 @@ test("Syndocal delivery stays pending until ACK and records rejection/timeout", 
   await new Promise((resolve) => setImmediate(resolve));
   const socket = AckWebSocket.instances.at(-1);
 
-  const rejected = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
+  const rejected = client.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() });
   assert.equal(rejected.sent, true);
   assert.equal(rejected.ok, false);
   assert.equal(rejected.ackState, "pending");
   assert.equal(client.getStatus().lastDelivery.state, "pending");
   const rejectedFrame = socket.sent.find((frame) => frame.eventId === rejected.eventId);
-  socket.emit("message", JSON.stringify(strictV2Ack(rejectedFrame, "rejected", { code: "REJECTED" })));
+  socket.emit("message", JSON.stringify(strictV3Ack(rejectedFrame, "rejected", { code: "REJECTED" })));
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
   assert.equal(client.getStatus().lastAckResult.ok, false);
 
-  const timedOut = client.sendEvent({ type: "DJ_LOOP_STATE", payload: strictV2LoopPayload() });
+  const timedOut = client.sendEvent({ type: "DJ_LOOP_STATE", payload: strictV3LoopPayload() });
   assert.equal(timedOut.ackState, "pending");
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(client.getStatus().lastDelivery.state, "timed-out");
   assert.equal(client.getStatus().lastAckResult.state, "timed-out");
 
   client.stop();
-  const unsent = client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
+  const unsent = client.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() });
   assert.equal(unsent.ok, false);
   assert.equal(unsent.ackState, "send-failed");
 });
@@ -2590,7 +2597,7 @@ test("Syndocal reconnects after error-only sockets without double scheduling", a
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: ErrorOnlyWebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 50,
@@ -2606,7 +2613,7 @@ test("Syndocal reconnects after error-only sockets without double scheduling", a
   assert.equal(client.getStatus().state, "connected");
 });
 
-test("strict v2 token preflight rejects bad credentials before opening a socket", () => {
+test("strict v3 token preflight rejects bad credentials before opening a socket", () => {
   let opens = 0;
   class ShouldNotOpenWebSocket {
     constructor() {
@@ -2616,7 +2623,7 @@ test("strict v2 token preflight rejects bad credentials before opening a socket"
   for (const token of ["", "short", "x".repeat(257), "x".repeat(31), "x".repeat(32) + " ", "x".repeat(32) + "\u2028"]) {
     const client = createSyndocalClient({
       enabled: true,
-      adapter: "syndocal-envelope-v2",
+      adapter: "syndocal-envelope-v3",
       token,
       WebSocketImpl: ShouldNotOpenWebSocket,
     });
@@ -2657,7 +2664,7 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: IdentityWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 1_000,
@@ -2670,49 +2677,49 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   const first = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "single-use",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   assert.equal(first.state, "pending");
   const firstFrame = socket.sent.find((frame) => frame.eventId === first.eventId);
   const beforeWrongAck = client.getStatus().lastDelivery.updatedAt;
-  socket.emit("message", JSON.stringify(strictV2Ack({
+  socket.emit("message", JSON.stringify(strictV3Ack({
     eventId: first.eventId,
     sequence: first.sequence + 1,
   })));
-  socket.emit("message", JSON.stringify(strictV2Ack({
+  socket.emit("message", JSON.stringify(strictV3Ack({
     eventId: "unknown-event",
     sequence: first.sequence,
   })));
   assert.equal(client.getStatus().lastDelivery.state, "pending");
   assert.equal(client.getStatus().lastDelivery.updatedAt, beforeWrongAck);
   assert.equal(client.getStatus().lastAckAt, null);
-  socket.emit("message", JSON.stringify(strictV2Ack(firstFrame)));
+  socket.emit("message", JSON.stringify(strictV3Ack(firstFrame)));
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
   const reused = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: first.eventId,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   assert.equal(reused.reason, "event-id-reused");
 
   const terminal = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "terminal-single-use",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   const terminalFrame = socket.sent.find((frame) => frame.eventId === terminal.eventId);
-  socket.emit("message", JSON.stringify(strictV2Ack(terminalFrame, "rejected", { code: "NO_MAPPING" })));
+  socket.emit("message", JSON.stringify(strictV3Ack(terminalFrame, "rejected", { code: "NO_MAPPING" })));
   assert.equal(client.getStatus().lastDelivery.state, "rejected");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: terminal.eventId,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "event-id-reused");
 
   const saturated = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "saturated",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   const rejectedByCapacity = client.sendEvent({
     type: "DJ_LOOP_STATE",
@@ -2723,12 +2730,12 @@ test("Syndocal ACK identity is single-use, sequence-fenced, typed, and capacity-
   assert.equal(rejectedByCapacity.reason, "pending-ack-limit");
   assert.equal(client.getStatus().pendingAcks, 1);
   socket.emit("message", JSON.stringify({
-    ...strictV2Ack(socket.sent.find((frame) => frame.eventId === saturated.eventId)),
+    ...strictV3Ack(socket.sent.find((frame) => frame.eventId === saturated.eventId)),
   }));
   const recovered = client.sendEvent({
     type: "DJ_LOOP_STATE",
     eventId: "capacity-recovered",
-    payload: strictV2LoopPayload({ revision: 2, lengthBeats: 4, endBeat: 36 }),
+    payload: strictV3LoopPayload({ revision: 2, lengthBeats: 4, endBeat: 36 }),
   });
   assert.equal(recovered.sent, true);
   assert.equal(client.getStatus().pendingAcks, 1);
@@ -2761,7 +2768,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: PhysicalAckWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 25,
@@ -2775,7 +2782,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
   const socket = PhysicalAckWebSocket.instances.at(-1);
   const ack = (result, outcome) => {
     const frame = socket.sent.find((candidate) => candidate.eventId === result.eventId);
-    socket.emit("message", JSON.stringify(strictV2Ack(
+    socket.emit("message", JSON.stringify(strictV3Ack(
       frame,
       outcome,
       { code: ["accepted", "duplicate"].includes(outcome) ? null : outcome.toUpperCase() },
@@ -2798,7 +2805,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const rejectedTrack = client.sendEvent({
     type: "DJ_MASTER_TRACK_ACTIVE",
-    payload: strictV2TrackPayload({
+    payload: strictV3TrackPayload({
       deck: 2,
       deckId: "rekordbox-deck-2",
       playSessionId: "session-1",
@@ -2810,7 +2817,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const noMappingLoop = client.sendEvent({
     type: "DJ_LOOP_STATE",
-    payload: strictV2LoopPayload(),
+    payload: strictV3LoopPayload(),
   });
   assert.equal(noMappingLoop.state, "pending");
   ack(noMappingLoop, "no_mapping");
@@ -2818,7 +2825,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const busyRelease = client.sendEvent({
     type: "DJ_RELEASE",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   const firstReleaseFrame = socket.sent.at(-1);
   ack(busyRelease, "busy");
@@ -2875,7 +2882,7 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: StateRecoveryWebSocket,
     heartbeatMs: 60_000,
     reconnectMinMs: 50,
@@ -2990,7 +2997,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: heartbeatClock.intervalApi,
     heartbeatMs: 60_000,
@@ -3002,7 +3009,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   client.start();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(client.getStatus().eventIdRegistrySize, 0);
-  assert.equal(client.sendEvent({ type: " DJ_RELEASE ", payload: strictV2ReleasePayload() }).reason, "unsupported-type");
+  assert.equal(client.sendEvent({ type: " DJ_RELEASE ", payload: strictV3ReleasePayload() }).reason, "unsupported-type");
   assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: null }).reason, "invalid-payload");
   assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: { state: {} } }).reason, "invalid-payload");
   assert.equal(client.getStatus().eventIdRegistrySize, 0);
@@ -3011,47 +3018,47 @@ test("physical IDs and sequences fail closed before reservation while controls o
     type: "DJ_RELEASE",
     eventId: "physical-first",
     sequence: 4,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   assert.equal(first.state, "pending");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-equal",
     sequence: 4,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "sequence-rollback");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-lower",
     sequence: 3,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "sequence-rollback");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "rollback-fraction",
     sequence: 4.5,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "invalid-sequence");
   assert.equal(client.getStatus().eventIdRegistrySize, 1);
 
   const second = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-second",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   assert.equal(second.sequence, 5);
   const high = client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-high",
     sequence: Number.MAX_SAFE_INTEGER,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   });
   assert.equal(high.state, "pending");
-  assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() }).reason, "sequence-overflow");
+  assert.equal(client.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() }).reason, "sequence-overflow");
   assert.equal(client.sendEvent({
     type: "DJ_RELEASE",
     eventId: "physical-first",
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "event-id-reused");
   assert.equal(client.getStatus().eventIdRegistrySize, 3);
 
@@ -3059,7 +3066,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   const capClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: capClock.intervalApi,
     heartbeatMs: 1,
@@ -3083,15 +3090,15 @@ test("physical IDs and sequences fail closed before reservation while controls o
   assert.equal(callerControl.reason, "control-event-id-not-accepted");
   assert.equal(capClient.getStatus().wireSequence, controlSequenceBeforeCallerId);
   assert.equal(capSocket.sent.some((frame) => frame.type === "DJ_TIMELINE_STATE_REQUEST" && frame.eventId === "caller-supplied-control"), false);
-  const capped = capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() });
+  const capped = capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() });
   assert.equal(capped.state, "pending");
   assert.equal(capClient.sendEvent({
     type: "DJ_RELEASE",
     eventId: controlId,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "event-id-conflicts-with-control");
   assert.equal(capClient.getStatus().physicalEventIdLatched, true);
-  assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV2ReleasePayload() }).reason, "event-id-admission-limit");
+  assert.equal(capClient.sendEvent({ type: "DJ_RELEASE", payload: strictV3ReleasePayload() }).reason, "event-id-admission-limit");
   capClock.tick(4_097);
   const controlFrames = capSocket.sent.filter((frame) => [
     "DJ_AGENT_HELLO",
@@ -3112,15 +3119,15 @@ test("physical IDs and sequences fail closed before reservation while controls o
   assert.ok(reconnectHello.eventId.startsWith("control-"));
   assert.equal(oldControlIds.has(reconnectHello.eventId), false);
   const cappedReplay = reconnectSocket.sent.find((frame) => frame.eventId === capped.eventId);
-  assertStrictV2Frame(cappedReplay, "DJ_RELEASE");
+  assertStrictV3Frame(cappedReplay, "DJ_RELEASE");
   assert.notEqual(cappedReplay.sessionId, capSocket.sent.find((frame) => frame.eventId === capped.eventId).sessionId);
-  assert.deepEqual(cappedReplay.payload, strictV2ReleasePayload());
+  assert.deepEqual(cappedReplay.payload, strictV3ReleasePayload());
 
   const recreatedClock = createManualIntervalClock();
   const recreatedClient = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: IdentityCapWebSocket,
     intervalApi: recreatedClock.intervalApi,
     heartbeatMs: 60_000,
@@ -3135,7 +3142,7 @@ test("physical IDs and sequences fail closed before reservation while controls o
   assert.equal(recreatedClient.sendEvent({
     type: "DJ_RELEASE",
     eventId: controlId,
-    payload: strictV2ReleasePayload(),
+    payload: strictV3ReleasePayload(),
   }).reason, "event-id-conflicts-with-control");
 
   client.stop();
@@ -3215,7 +3222,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: HeartbeatProbeWebSocket,
     intervalApi: clock,
     heartbeatMs: 250,
@@ -3250,7 +3257,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
     () => createSyndocalClient({
       enabled: true,
       token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
       intervalApi: new MethodlessClock(),
     }),
     TypeError,
@@ -3259,7 +3266,7 @@ test("Syndocal interval seam accepts class-instance clocks and keeps invalid ada
     () => createSyndocalClient({
       enabled: true,
       token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
       intervalApi: "setInterval-string",
     }),
     TypeError,
@@ -3318,7 +3325,7 @@ test("Syndocal heartbeat seam treats numeric 0 as a valid opaque interval handle
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: ZeroHandleProbeWebSocket,
     intervalApi: clock,
     heartbeatMs: 60_000,
@@ -3493,7 +3500,7 @@ test("MIDI and pedal adapters stay safe when optional hardware is absent", () =>
   pedal.stop();
 });
 
-test("router keeps local loop action off the disconnected network", () => {
+test("router keeps identity-unproven local loop action off the disconnected network", () => {
   const sent = [];
   const detector = createTrackActivityDetector({ idFactory: () => "id" });
   const client = {
@@ -3528,7 +3535,8 @@ test("router keeps local loop action off the disconnected network", () => {
   router.on("event", (event) => routedEvents.push(event));
   const result = router.triggerAction("loop-half");
   assert.equal(result.midiSent, true);
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "loop-fallback-identity-unproven");
   assert.equal(result.delivery, null);
   assert.deepEqual(midiCalls, ["loopHalf"]);
   assert.deepEqual(sent, []);
@@ -3564,7 +3572,7 @@ test("router correlates release timeout back to the same action event", async (t
   const client = createSyndocalClient({
     enabled: true,
     token: TEST_TOKEN,
-    adapter: "syndocal-envelope-v2",
+    adapter: "syndocal-envelope-v3",
     WebSocketImpl: ActionWebSocket,
     heartbeatMs: 60_000,
     ackTimeoutMs: 20,
@@ -3613,7 +3621,7 @@ test("router correlates release timeout back to the same action event", async (t
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
   socket.emit("message", JSON.stringify({
-    v: 2,
+    v: 3,
     type: "DJ_TIMELINE_STATE",
     agentId: "syndocal",
     sessionId: "syndocal-session",

@@ -307,7 +307,7 @@ test("setup readiness is pure, token-free, and allows only validated active gate
     mapping: { ready: true },
     pedal: { enabled: true, ready: true },
     midi: { enabled: true, ready: true, selected: true, nameVerified: true },
-    syndocal: { enabled: true, adapter: "syndocal-envelope-v2", connected: true },
+    syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true },
     macro: { enabled: true, sequence: "parallel", ready: true },
     token: secret,
     syndocalToken: secret,
@@ -435,7 +435,7 @@ test("malformed or contradictory gate records never become disabled or ready", (
     mapping: null,
     pedal: { enabled: true, ready: true, available: false },
     midi: { enabled: true, ready: true, available: false, selected: true },
-    syndocal: { enabled: true, adapter: "syndocal-envelope-v2", connected: true, available: false },
+    syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true, available: false },
     macro: { enabled: true, sequence: "parallel", ready: true, valid: false },
   });
 
@@ -455,7 +455,7 @@ test("a disabled root denies every gate without inspecting child readiness", () 
     mapping: { ready: true },
     pedal: { enabled: true, ready: true },
     midi: { enabled: true, ready: true, selected: true },
-    syndocal: { enabled: true, adapter: "syndocal-envelope-v2", connected: true },
+    syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true },
     macro: { enabled: true, sequence: "parallel", ready: true },
   });
 

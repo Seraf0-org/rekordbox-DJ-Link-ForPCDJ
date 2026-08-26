@@ -71,6 +71,12 @@ test("setup does not seed implicit MIDI or adapter choices", () => {
   assert.match(app, /function parseSetupMidiPortText\(value\)\s*\{[\s\S]*typeof value !== "string"/);
 });
 
+test("DJ Link setup offers only the v3 adapter", () => {
+  assert.match(html, /<option value="syndocal-envelope-v3">syndocal-envelope-v3<\/option>/);
+  assert.doesNotMatch(html, /syndocal-envelope-v2/);
+  assert.match(app, /const SETUP_ADAPTERS = \["syndocal-envelope-v3"\];/);
+});
+
 test("setup reflects only an exact enumerated MIDI name+port pair and fails closed after refresh", () => {
   const controlsBlock = app.slice(app.indexOf("function renderDjAgentSetupControls"), app.indexOf("function updateDjAgentConfigPreviewFromDraft"));
   assert.match(controlsBlock, /placeholder\.value\s*=\s*""/);

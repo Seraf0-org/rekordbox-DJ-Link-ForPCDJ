@@ -78,10 +78,10 @@ test("build-dist pins the exact Inno Setup compiler provenance order and rejects
   const packageLock = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package-lock.json"), "utf8"));
   const installerSource = fs.readFileSync(INSTALLER_SOURCE, "utf8");
 
-  assert.equal(packageJson.version, "1.1.4", "product package version must be the corrective release version");
+  assert.equal(packageJson.version, "1.1.5", "product package version must be the corrective release version");
   assert.equal(packageLock.version, packageJson.version, "root package-lock version must match package.json");
   assert.equal(packageLock.packages[""].version, packageJson.version, "root package-lock identity must match package.json");
-  assert.match(installerSource, /^AppVersion=1\.1\.4$/m, "installer AppVersion must match the corrective product version");
+  assert.match(installerSource, /^AppVersion=1\.1\.5$/m, "installer AppVersion must match the corrective product version");
 
   assert.equal(
     packageJson.scripts["build:dist"],
@@ -338,7 +338,7 @@ function releaseWriterFixture(t) {
   const installManifest = {
     schemaVersion: 1,
     kind: "rb-output-install-manifest/v1",
-    productVersion: "1.1.4",
+    productVersion: "1.1.5",
     identityHash: "a".repeat(64),
     payloads: [],
   };

@@ -1,5 +1,6 @@
 const { EventEmitter } = require("node:events");
 const { normalizeReleaseMacroSequence } = require("./config");
+const { createStage1LoopFallback } = require("./stage1LoopFallback");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
@@ -11,7 +12,7 @@ function createShowEventRouter({
   pedal,
   releaseReset = { enabled: false, steps: [] },
   releaseMacro = { enabled: false },
-  loopDivisionMax = null,
+  loopFallback = {},
   now = () => Date.now(),
 } = {}) {
   if (!detector || !syndocalClient || !midi || !pedal) {
@@ -54,8 +55,37 @@ function createShowEventRouter({
   // Same-session staleness fence for authoritative DJ_TIMELINE_STATE frames.
   // connectionGeneration comes from the client's status events and resets the
   // fence on connection replacement; sessionId+sequence come from the decoded
-  // v2 envelope and fence stale/equal replays within one session.
+  // v3 envelope and fence stale/equal replays within one session.
   let timelineStateFence = null;
+  const stage1LoopFallback = createStage1LoopFallback({
+    responseWindowMs: loopFallback?.responseWindowMs,
+    timerApi: loopFallback?.timerApi,
+    now,
+    onFallback(payload, context) {
+      const routedEvent = routeEvent({
+        type: "DJ_LOOP_FALLBACK",
+        source: "action",
+        payload,
+      });
+      // One action result carries two independent facts: the physical MIDI
+      // send made at F14 time and the later Syndocal delivery of the bounded,
+      // explicitly predicted fallback.  Never collapse either into the other.
+      if (lastAction?.action === "loop-half" && lastAction.loopFallbackIntentId === context.intentId) {
+        lastAction = {
+          ...lastAction,
+          fallback: { payload, delivery: routedEvent.delivery },
+          delivery: routedEvent.delivery,
+          syndocalSent: routedEvent.delivery?.sent === true,
+          ok: lastAction.midiSent === true && routedEvent.delivery?.ok === true,
+          reason: routedEvent.delivery?.ok === true
+            ? null
+            : routedEvent.delivery?.reason || routedEvent.delivery?.state || "loop-fallback-delivery-failed",
+        };
+        emitter.emit("action", lastAction);
+      }
+      emitState();
+    },
+  });
 
   function fenceReleasedSession(playSessionId) {
     if (!playSessionId) return;
@@ -280,6 +310,7 @@ function createShowEventRouter({
       const nextSession = event.payload?.playSessionId || null;
       if (!nextSession) return null;
       if (nextSession !== activePlaySessionId) {
+        stage1LoopFallback.resetForSession();
         timelineSnapshotReady = false;
         timelinePlaySessionId = null;
         timelineReleaseEventId = null;
@@ -295,6 +326,12 @@ function createShowEventRouter({
     if (event.type === "DJ_MASTER_TRACK_SYNC" || event.type === "DJ_LOOP_STATE") {
       const session = event.payload?.playSessionId || null;
       if (!session || session !== activePlaySessionId || releasedPlaySessions.has(session)) return null;
+      if (event.type === "DJ_LOOP_STATE") {
+        const outcome = stage1LoopFallback.observeMeasured(event);
+        if (outcome.accepted && outcome.state === "contradictory") {
+          emitWarning("Stage 1 loop measurement contradicted the pending prediction; fallback suppressed", "rekordbox-hook");
+        }
+      }
       return routeEvent(event);
     }
     return null;
@@ -746,9 +783,31 @@ function createShowEventRouter({
         return;
       }
       setReleaseMacroPhase("stopping");
-      const stopSent = midi.sendMapping("stop", { targetDeck: target.targetDeck });
+      let stopSent = false;
+      try {
+        stopSent = midi.sendMapping("stop", { targetDeck: target.targetDeck }) === true;
+      } catch {
+        stopSent = false;
+      }
       if (stopSent !== true) {
-        fail("local-midi-stop-failed", { midiSent: false });
+        // The F13 physical intent remains reportable even when the macro's
+        // final Stop mapping fails. Do not make Syndocal delivery disappear
+        // behind that local failure; the action result carries both truths.
+        fenceReleasedSession(activePlaySessionId);
+        const routedEvent = routeEvent({
+          type: "DJ_RELEASE",
+          source: "action",
+          payload: {
+            state: "released",
+            timelineId,
+            playSessionId: activePlaySessionId,
+          },
+        });
+        applyReleaseDeliveryLifecycle(routedEvent.delivery, routedEvent.eventId);
+        fail("local-midi-stop-failed", {
+          midiSent: false,
+          delivery: routedEvent.delivery,
+        });
         return;
       }
       if (releaseMacro.resetAfterStop !== true) {
@@ -874,23 +933,17 @@ function createShowEventRouter({
   }
 
   function sendLegacyRelease(target) {
-    const midiSent = midi.sendMapping("stop", { targetDeck: target.targetDeck });
-    released = midiSent === true;
-    if (midiSent !== true) {
-      return emitAction({
-        action: "release",
-        mode,
-        sequence: releaseMacroSequence,
-        phase: releaseMacroPhase,
-        target,
-        targetDeck: target.targetDeck,
-        targetChannel: target.targetChannel,
-        midiSent: false,
-        delivery: null,
-        ok: false,
-        reason: "local-midi-failed",
-      });
+    let midiSent = false;
+    let midiError = null;
+    try {
+      midiSent = midi.sendMapping("stop", { targetDeck: target.targetDeck }) === true;
+    } catch (error) {
+      midiError = error?.message || String(error);
     }
+    released = midiSent === true;
+    // F13 is a physical release intent independently of whether the local
+    // Stop mapping reports success. Route that intent exactly once so MIDI and
+    // Syndocal delivery retain separate, truthful outcomes.
     fenceReleasedSession(activePlaySessionId);
     const routedEvent = routeEvent({
       type: "DJ_RELEASE",
@@ -916,7 +969,7 @@ function createShowEventRouter({
       delivery,
       ok: midiSent === true && delivery?.ok === true,
       reason: midiSent !== true
-        ? "local-midi-failed"
+        ? midiError || "local-midi-failed"
         : releaseMacroPhase === "failed"
           ? releaseMacroReason
           : delivery?.state || null,
@@ -943,24 +996,48 @@ function createShowEventRouter({
       return blockedAction(normalized, "handoff-pending");
     }
     if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
-      loopDivision =
-        loopDivisionMax != null &&
-        Number.isFinite(Number(loopDivisionMax)) &&
-        loopDivision >= Number(loopDivisionMax)
-          ? 0
-          : loopDivision + 1;
       const target = midiTarget("loopHalf", currentMasterDeck());
-      const midiSent = midi.sendMapping("loopHalf", { targetDeck: target.targetDeck });
+      const detectorState = detector.getState?.() || {};
+      const master = target.targetDeck ? detectorState.decks?.[target.targetDeck] : null;
+      // Arm before attempting MIDI. A device/module failure is not evidence
+      // that the physical F14 intent did not happen, so it cannot suppress the
+      // independent response window.
+      const fallbackIntent = stage1LoopFallback.begin({
+        deck: target.targetDeck,
+        deckId: `rekordbox-deck-${target.targetDeck}`,
+        masterDeckRevision: detectorState.masterDeckRevision,
+        playSessionId: master?.playSessionId,
+      });
+      let midiSent = false;
+      let midiError = null;
+      try {
+        midiSent = midi.sendMapping("loopHalf", { targetDeck: target.targetDeck }) === true;
+      } catch (error) {
+        midiError = error?.message || String(error);
+      }
+      if (fallbackIntent) {
+        loopDivision = fallbackIntent.targetLengthBeats;
+      }
       return emitAction({
         action: "loop-half",
         mode,
         loopDivision,
+        loopFallbackIntentId: fallbackIntent?.intentId || null,
+        targetLengthBeats: fallbackIntent?.targetLengthBeats || null,
+        responseWindowMs: fallbackIntent?.responseWindowMs || null,
+        fallback: fallbackIntent
+          ? { state: "awaiting-measured-loop" }
+          : { state: "identity-unproven" },
         midiSent,
         targetDeck: target.targetDeck,
         targetChannel: target.targetChannel,
         delivery: null,
-        ok: midiSent === true,
-        reason: midiSent !== true ? "local-midi-failed" : null,
+        ok: midiSent === true && Boolean(fallbackIntent),
+        reason: !fallbackIntent
+          ? "loop-fallback-identity-unproven"
+          : midiSent !== true
+            ? midiError || "local-midi-failed"
+            : null,
       });
     }
     if (normalized === "filter-close" || normalized === "filter_close" || normalized === "filter") {
@@ -976,6 +1053,9 @@ function createShowEventRouter({
       });
     }
     if (normalized === "release") {
+      // Release is a distinct physical intent. It cancels only the pending
+      // Stage 1 prediction and never reuses its timer or payload shape.
+      stage1LoopFallback.clear("release");
       const target = releaseTarget(currentMasterDeck());
       if (releaseMacro?.enabled === true) {
         return startReleaseMacro(target.targetDeck);
@@ -1017,6 +1097,7 @@ function createShowEventRouter({
       timelineStateUpdatedAt,
       lastTimelineAction,
       lastTimelineWarning,
+      stage1LoopFallback: stage1LoopFallback.getState(),
       releaseMacroSequence,
       releaseMacroPhase,
       releaseMacroReason,
@@ -1056,6 +1137,7 @@ function createShowEventRouter({
       releaseMacroActive,
       lastAction,
       loopDivision,
+      stage1LoopFallback: stage1LoopFallback.getState(),
       released,
       snapshotUpdatedAt: currentSnapshot?.updatedAt || null,
       syndocal: syndocalClient.getStatus(),
@@ -1073,6 +1155,7 @@ function createShowEventRouter({
   function stop() {
     releaseMacroGeneration += 1;
     releaseMacroActive = false;
+    stage1LoopFallback.clear("router-stopped");
     for (const timer of resetTimers) {
       clearTimeout(timer);
     }

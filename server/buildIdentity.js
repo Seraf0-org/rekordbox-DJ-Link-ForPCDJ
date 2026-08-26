@@ -72,8 +72,8 @@ function validateEmbeddedReleaseCommitment(value) {
 const WIRE_CONTRACT_ADVISORY = Object.freeze({
   adapters: Object.freeze([
     Object.freeze({
-      adapter: "syndocal-envelope-v2",
-      wireProtocol: "syndocal-envelope-v2",
+      adapter: "syndocal-envelope-v3",
+      wireProtocol: "syndocal-envelope-v3",
     }),
   ]),
 });

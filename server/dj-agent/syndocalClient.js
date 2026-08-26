@@ -1,5 +1,6 @@
 const { EventEmitter } = require("node:events");
 const crypto = require("node:crypto");
+const { exactFallbackPayload } = require("./stage1LoopFallback");
 
 function makeId() {
   return typeof crypto.randomUUID === "function"
@@ -12,6 +13,7 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "DJ_MASTER_TRACK_ACTIVE",
   "DJ_MASTER_TRACK_SYNC",
   "DJ_LOOP_STATE",
+  "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
   "DJ_TIMELINE_STATE_REQUEST",
   "DJ_TIMELINE_BEAT_JUMP",
@@ -20,6 +22,7 @@ const SUPPORTED_EVENT_TYPES = new Set([
 const PHYSICAL_EVENT_TYPES = new Set([
   "DJ_MASTER_TRACK_ACTIVE",
   "DJ_LOOP_STATE",
+  "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
@@ -214,7 +217,7 @@ function socketIsOpen(socket) {
 // surfaces (/api/state, /api/status). Any other value - including a
 // configured-but-unrecognized SYNDOCAL_WS_ADAPTER string - stays internal
 // and is reported as null so hostile configuration is never echoed back.
-const RECOGNIZED_ADAPTER_NAMES = new Set(["syndocal-envelope-v2"]);
+const RECOGNIZED_ADAPTER_NAMES = new Set(["syndocal-envelope-v3"]);
 
 function publicAdapterName(adapterObject) {
   const name = adapterObject && typeof adapterObject === "object" ? adapterObject.name : null;
@@ -225,7 +228,7 @@ function publicAdapterName(adapterObject) {
 // must never embed the configured value, its length, or any derived
 // fingerprint, because status.message/lastError are LAN-readable.
 const UNRECOGNIZED_ADAPTER_ERROR =
-  "Syndocal adapter must be syndocal-envelope-v2; flat and v1 protocols are retired and rejected";
+  "Syndocal adapter must be syndocal-envelope-v3; flat and v1/v2 protocols are retired and rejected";
 
 function resolveAdapter({ adapter, adapterFactory, token }) {
   if (adapter && typeof adapter === "object") {
@@ -243,9 +246,9 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
     }
   }
   const name = String(adapter || "").trim().toLocaleLowerCase();
-  if (name === "syndocal-envelope-v2") {
+  if (name === "syndocal-envelope-v3") {
     try {
-      return { adapterObject: createSyndocalEnvelopeV2Adapter({ token }), error: null };
+      return { adapterObject: createSyndocalEnvelopeV3Adapter({ token }), error: null };
     } catch (error) {
       return { adapterObject: null, error: error?.message || String(error) };
     }
@@ -253,7 +256,7 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
   if (!name) {
     return {
       adapterObject: null,
-      error: "Syndocal adapter is not configured; syndocal-envelope-v2 is required",
+      error: "Syndocal adapter is not configured; syndocal-envelope-v3 is required",
     };
   }
   return {
@@ -276,14 +279,14 @@ function validToken(value) {
   return byteLength >= MIN_TOKEN_UTF8_BYTES && byteLength <= MAX_STRING_UTF8_BYTES;
 }
 
-const ENVELOPE_V2_PROTOCOL_VERSION = 2;
-const ENVELOPE_V2_MAX_SAMPLE_AGE_MS = 1_500;
-const ENVELOPE_V2_MAX_FRAME_BYTES = 64 * 1024;
-const ENVELOPE_V2_AGENT_ID = "rb-output-dj-agent";
-const ENVELOPE_V2_PEDAL_OWNERS = new Set(["dj", "timeline"]);
-const ENVELOPE_V2_ACK_FIELDS = ["v", "type", "eventId", "sequence", "outcome", "code", "stateGeneration"];
+const ENVELOPE_V3_PROTOCOL_VERSION = 3;
+const ENVELOPE_V3_MAX_SAMPLE_AGE_MS = 1_500;
+const ENVELOPE_V3_MAX_FRAME_BYTES = 64 * 1024;
+const ENVELOPE_V3_AGENT_ID = "rb-output-dj-agent";
+const ENVELOPE_V3_PEDAL_OWNERS = new Set(["dj", "timeline"]);
+const ENVELOPE_V3_ACK_FIELDS = ["v", "type", "eventId", "sequence", "outcome", "code", "stateGeneration"];
 
-function v2EnvelopeStringOk(value) {
+function v3EnvelopeStringOk(value) {
   return (
     typeof value === "string" &&
     value.length > 0 &&
@@ -292,12 +295,12 @@ function v2EnvelopeStringOk(value) {
   );
 }
 
-function validateEnvelopeV2Ack(message) {
+function validateEnvelopeV3Ack(message) {
   if (!isPlainRecord(message)) return { valid: false, reason: "ack-not-object" };
-  if (!hasExactFields(message, ENVELOPE_V2_ACK_FIELDS)) {
+  if (!hasExactFields(message, ENVELOPE_V3_ACK_FIELDS)) {
     return { valid: false, reason: "ack-fields-invalid" };
   }
-  if (message.v !== ENVELOPE_V2_PROTOCOL_VERSION) {
+  if (message.v !== ENVELOPE_V3_PROTOCOL_VERSION) {
     return { valid: false, reason: "ack-version-invalid" };
   }
   if (message.type !== "ACK") return { valid: false, reason: "ack-type-mismatch" };
@@ -314,7 +317,7 @@ function validateEnvelopeV2Ack(message) {
   if (typeof message.outcome !== "string" || !ACK_OUTCOMES.has(message.outcome)) {
     return { valid: false, reason: "ack-outcome-invalid" };
   }
-  if (message.code !== null && !v2EnvelopeStringOk(message.code)) {
+  if (message.code !== null && !v3EnvelopeStringOk(message.code)) {
     return { valid: false, reason: "ack-code-invalid" };
   }
   return { valid: true, eventId, outcome: message.outcome };
@@ -332,7 +335,7 @@ function strictFinite(payload, name, { min = -Infinity, max = Infinity, integer 
   return value;
 }
 
-function encodeV2Loop(loop) {
+function encodeV3Loop(loop) {
   if (loop === null) return null;
   if (!isPlainRecord(loop)) return undefined;
   const required = ["active", "startBeat", "endBeat", "lengthBeats", "revision", "sampleAgeMs", "source"];
@@ -340,7 +343,7 @@ function encodeV2Loop(loop) {
   const revision = strictFinite(loop, "revision", { min: 1, integer: true });
   const sampleAgeMs = strictFinite(loop, "sampleAgeMs", {
     min: 0,
-    max: ENVELOPE_V2_MAX_SAMPLE_AGE_MS,
+    max: ENVELOPE_V3_MAX_SAMPLE_AGE_MS,
   });
   const source = requiredString(loop, "source");
   if (revision == null || sampleAgeMs == null || source !== "rekordbox-hook-measured") return undefined;
@@ -364,6 +367,12 @@ function encodeV2Loop(loop) {
   ) {
     return undefined;
   }
+  if (
+    !loop.active &&
+    (values.startBeat !== null || values.endBeat !== null || values.lengthBeats !== null)
+  ) {
+    return undefined;
+  }
   return {
     active: loop.active,
     startBeat: values.startBeat,
@@ -375,7 +384,7 @@ function encodeV2Loop(loop) {
   };
 }
 
-function encodeV2TrackSample(payload) {
+function encodeV3TrackSample(payload) {
   if (!isPlainRecord(payload)) return null;
   const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
   const deckId = requiredString(payload, "deckId");
@@ -386,7 +395,7 @@ function encodeV2TrackSample(payload) {
   const positionRevision = strictFinite(payload, "positionRevision", { min: 1, integer: true });
   const sampleAgeMs = strictFinite(payload, "sampleAgeMs", {
     min: 0,
-    max: ENVELOPE_V2_MAX_SAMPLE_AGE_MS,
+    max: ENVELOPE_V3_MAX_SAMPLE_AGE_MS,
   });
   if (
     deck == null ||
@@ -415,7 +424,7 @@ function encodeV2TrackSample(payload) {
   if (payload.trackBpm !== null && trackBpm == null) return null;
   const startedAt = requiredString(payload, "startedAt");
   if (!startedAt || !Number.isFinite(Date.parse(startedAt))) return null;
-  const loop = encodeV2Loop(payload.loop);
+  const loop = encodeV3Loop(payload.loop);
   if (loop === undefined) return null;
   return {
     deck,
@@ -437,13 +446,13 @@ function encodeV2TrackSample(payload) {
   };
 }
 
-function encodeV2MeasuredLoop(payload) {
+function encodeV3MeasuredLoop(payload) {
   if (!isPlainRecord(payload)) return null;
   const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
   const deckId = requiredString(payload, "deckId");
   const masterDeckRevision = strictFinite(payload, "masterDeckRevision", { min: 1, integer: true });
   const playSessionId = requiredString(payload, "playSessionId");
-  const loop = encodeV2Loop({
+  const loop = encodeV3Loop({
     active: payload.active,
     startBeat: payload.startBeat,
     endBeat: payload.endBeat,
@@ -462,7 +471,7 @@ function encodeV2MeasuredLoop(payload) {
   return { deck, deckId, masterDeckRevision, playSessionId, ...loop };
 }
 
-function encodeV2Release(payload) {
+function encodeV3Release(payload) {
   if (!isPlainRecord(payload) || payload.state !== "released") return null;
   const timelineId = requiredString(payload, "timelineId");
   const playSessionId = requiredString(payload, "playSessionId");
@@ -470,14 +479,18 @@ function encodeV2Release(payload) {
   return { state: "released", timelineId, playSessionId };
 }
 
+function encodeV3LoopFallback(payload) {
+  return exactFallbackPayload(payload);
+}
+
 // Timeline command payloads accept exactly the canonical wire fields plus,
 // optionally, the single intentional local-only metadata field the router
 // supplies: source must be the exact string "pedal". Any other own key
 // (including symbols), a missing wire field, or wrong metadata rejects the
 // payload; only canonical wire fields are ever emitted onto the wire.
-const V2_TIMELINE_COMMAND_LOCAL_SOURCE = "pedal";
+const V3_TIMELINE_COMMAND_LOCAL_SOURCE = "pedal";
 
-function v2TimelineCommandShapeOk(payload, wireFields) {
+function v3TimelineCommandShapeOk(payload, wireFields) {
   if (!isPlainRecord(payload)) return false;
   const keys = Reflect.ownKeys(payload);
   if (
@@ -490,14 +503,14 @@ function v2TimelineCommandShapeOk(payload, wireFields) {
     return false;
   }
   if (!wireFields.every((field) => Object.hasOwn(payload, field))) return false;
-  if (Object.hasOwn(payload, "source") && requiredString(payload, "source") !== V2_TIMELINE_COMMAND_LOCAL_SOURCE) {
+  if (Object.hasOwn(payload, "source") && requiredString(payload, "source") !== V3_TIMELINE_COMMAND_LOCAL_SOURCE) {
     return false;
   }
   return true;
 }
 
-function encodeV2BeatJump(payload) {
-  if (!v2TimelineCommandShapeOk(payload, ["bars", "timelineId", "playSessionId"])) return null;
+function encodeV3BeatJump(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["bars", "timelineId", "playSessionId"])) return null;
   const bars = strictFinite(payload, "bars", { integer: true });
   const timelineId = requiredString(payload, "timelineId");
   const playSessionId = requiredString(payload, "playSessionId");
@@ -506,8 +519,8 @@ function encodeV2BeatJump(payload) {
     : null;
 }
 
-function encodeV2LoopSet(payload) {
-  if (!v2TimelineCommandShapeOk(payload, ["active", "timelineId", "playSessionId"])) return null;
+function encodeV3LoopSet(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["active", "timelineId", "playSessionId"])) return null;
   if (typeof payload.active !== "boolean") return null;
   const timelineId = requiredString(payload, "timelineId");
   const playSessionId = requiredString(payload, "playSessionId");
@@ -516,32 +529,34 @@ function encodeV2LoopSet(payload) {
     : null;
 }
 
-function encodeV2TypedEvent(type, payload) {
+function encodeV3TypedEvent(type, payload) {
   switch (type) {
     case "DJ_MASTER_TRACK_ACTIVE":
     case "DJ_MASTER_TRACK_SYNC":
-      return encodeV2TrackSample(payload);
+      return encodeV3TrackSample(payload);
     case "DJ_LOOP_STATE":
-      return encodeV2MeasuredLoop(payload);
+      return encodeV3MeasuredLoop(payload);
+    case "DJ_LOOP_FALLBACK":
+      return encodeV3LoopFallback(payload);
     case "DJ_RELEASE":
-      return encodeV2Release(payload);
+      return encodeV3Release(payload);
     case "DJ_TIMELINE_BEAT_JUMP":
-      return encodeV2BeatJump(payload);
+      return encodeV3BeatJump(payload);
     case "DJ_TIMELINE_LOOP_SET":
-      return encodeV2LoopSet(payload);
+      return encodeV3LoopSet(payload);
     default:
       return null;
   }
 }
 
-function decodeV2TimelineState(message) {
+function decodeV3TimelineState(message) {
   if (
     !isPlainRecord(message) ||
-    message.v !== ENVELOPE_V2_PROTOCOL_VERSION ||
+    message.v !== ENVELOPE_V3_PROTOCOL_VERSION ||
     message.type !== "DJ_TIMELINE_STATE" ||
     !hasExactFields(message, ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"])
   ) return null;
-  if (!v2EnvelopeStringOk(message.agentId) || !v2EnvelopeStringOk(message.sessionId)) return null;
+  if (!v3EnvelopeStringOk(message.agentId) || !v3EnvelopeStringOk(message.sessionId)) return null;
   if (!Number.isSafeInteger(message.sequence) || message.sequence < 1) return null;
   if (!requiredString(message, "eventId")) return null;
   const payload = message.payload;
@@ -566,7 +581,7 @@ function decodeV2TimelineState(message) {
     (payload.playSessionId !== null && !playSessionId) ||
     (payload.releaseEventId !== null && !releaseEventId) ||
     positionBars == null ||
-    !ENVELOPE_V2_PEDAL_OWNERS.has(payload.pedalOwner)
+    !ENVELOPE_V3_PEDAL_OWNERS.has(payload.pedalOwner)
   ) return null;
   if (payload.state === "running" && (!timelineId || !playSessionId)) return null;
   if (payload.pedalOwner === "timeline" && (!playSessionId || !releaseEventId)) return null;
@@ -587,36 +602,37 @@ function decodeV2TimelineState(message) {
   };
 }
 
-function createSyndocalEnvelopeV2Adapter({ token = "" } = {}) {
+function createSyndocalEnvelopeV3Adapter({ token = "" } = {}) {
   if (!validToken(token)) {
-    throw new Error("Syndocal syndocal-envelope-v2 token is required and must be 32..256 UTF-8 bytes");
+    throw new Error("Syndocal syndocal-envelope-v3 token is required and must be 32..256 UTF-8 bytes");
   }
   let sessionId = null;
   const sessionIdFor = () => {
-    if (!sessionId) sessionId = `rb-output-v2-${Date.now().toString(36)}-${makeId()}`;
+    if (!sessionId) sessionId = `rb-output-v3-${Date.now().toString(36)}-${makeId()}`;
     return sessionId;
   };
   const frame = ({ type, eventId, sequence }, payload) => ({
-    v: ENVELOPE_V2_PROTOCOL_VERSION,
+    v: ENVELOPE_V3_PROTOCOL_VERSION,
     type,
-    agentId: ENVELOPE_V2_AGENT_ID,
+    agentId: ENVELOPE_V3_AGENT_ID,
     sessionId: sessionIdFor(),
     sequence,
     eventId,
     payload,
   });
   return {
-    name: "syndocal-envelope-v2",
-    validateAck: validateEnvelopeV2Ack,
+    name: "syndocal-envelope-v3",
+    validateAck: validateEnvelopeV3Ack,
     encodeHello({ eventId, sequence }) {
       sessionId = null;
       return frame({ type: "DJ_AGENT_HELLO", eventId, sequence }, {
         authToken: token,
-        version: ENVELOPE_V2_PROTOCOL_VERSION,
+        version: ENVELOPE_V3_PROTOCOL_VERSION,
         capabilities: [
           "DJ_MASTER_TRACK_ACTIVE",
           "DJ_MASTER_TRACK_SYNC",
           "DJ_LOOP_STATE",
+          "DJ_LOOP_FALLBACK",
           "DJ_RELEASE",
           "DJ_TIMELINE_BEAT_JUMP",
           "DJ_TIMELINE_LOOP_SET",
@@ -632,7 +648,7 @@ function createSyndocalEnvelopeV2Adapter({ token = "" } = {}) {
       if (!eventId || eventId !== event.eventId) return null;
       const payload = event.type === "DJ_TIMELINE_STATE_REQUEST"
         ? {}
-        : encodeV2TypedEvent(event.type, event.payload);
+        : encodeV3TypedEvent(event.type, event.payload);
       return payload ? frame({ type: event.type, eventId, sequence: event.sequence }, payload) : null;
     },
     encodeStateSync({ eventId, sequence, state }) {
@@ -661,7 +677,7 @@ function createSyndocalEnvelopeV2Adapter({ token = "" } = {}) {
       let text = data;
       if (data && typeof data === "object" && Object.hasOwn(data, "data")) text = data.data;
       if (Buffer.isBuffer(text)) text = text.toString("utf8");
-      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > ENVELOPE_V2_MAX_FRAME_BYTES) return null;
+      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > ENVELOPE_V3_MAX_FRAME_BYTES) return null;
       try {
         const parsed = JSON.parse(text);
         return isPlainRecord(parsed) ? parsed : null;
@@ -670,15 +686,15 @@ function createSyndocalEnvelopeV2Adapter({ token = "" } = {}) {
       }
     },
     isAck(message) {
-      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V2_PROTOCOL_VERSION && message.type === "ACK");
+      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V3_PROTOCOL_VERSION && message.type === "ACK");
     },
     isStateSyncRequest() {
       return false;
     },
     isTimelineState(message) {
-      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V2_PROTOCOL_VERSION && message.type === "DJ_TIMELINE_STATE");
+      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V3_PROTOCOL_VERSION && message.type === "DJ_TIMELINE_STATE");
     },
-    decodeTimelineState: decodeV2TimelineState,
+    decodeTimelineState: decodeV3TimelineState,
   };
 }
 
@@ -714,7 +730,7 @@ function createSyndocalClient({
   path = "/dj-link",
   nic = "",
   token = "",
-  adapter = "syndocal-envelope-v2",
+  adapter = "syndocal-envelope-v3",
   adapterFactory = null,
   WebSocketImpl = null,
   wsModule = "ws",
@@ -741,7 +757,7 @@ function createSyndocalClient({
   if (
     enabled &&
     adapterObject &&
-    adapterObject.name === "syndocal-envelope-v2" &&
+    adapterObject.name === "syndocal-envelope-v3" &&
     !validToken(token)
   ) {
     adapterError = "Syndocal token is required and must be 32..256 UTF-8 bytes";
@@ -1137,9 +1153,11 @@ function createSyndocalClient({
       return;
     }
     emitter.emit("message", message);
-    if (adapterObject.name === "syndocal-envelope-v2" && message.v !== ENVELOPE_V2_PROTOCOL_VERSION) {
+    if (adapterObject.name === "syndocal-envelope-v3" && message.v !== ENVELOPE_V3_PROTOCOL_VERSION) {
       const failure = {
-        reason: message.v === 1 ? "retired-protocol-v1" : "strict-envelope-v2-required",
+        reason: message.v === 1 || message.v === 2
+          ? "retired-protocol-v1-or-v2"
+          : "strict-envelope-v3-required",
         message,
       };
       updateStatus({ lastError: failure.reason });
@@ -2134,12 +2152,13 @@ function createSyndocalClient({
 
 module.exports = {
   createSyndocalClient,
-  createSyndocalEnvelopeV2Adapter,
-  decodeV2TimelineState,
-  encodeV2MeasuredLoop,
-  encodeV2Release,
-  encodeV2TrackSample,
+  createSyndocalEnvelopeV3Adapter,
+  decodeV3TimelineState,
+  encodeV3LoopFallback,
+  encodeV3MeasuredLoop,
+  encodeV3Release,
+  encodeV3TrackSample,
   resolveAdapter,
   resolveWebSocketImplementation,
-  validateEnvelopeV2Ack,
+  validateEnvelopeV3Ack,
 };

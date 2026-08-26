@@ -153,10 +153,10 @@ test("wire contract advisory pins the exact Syndocal adapter names", (t) => {
   // Changing this list is a deliberate DJ wire-contract change; it must be
   // updated together with server/dj-agent/config.js and syndocalClient.js.
   assert.deepEqual(WIRE_CONTRACT_ADVISORY.adapters.map((entry) => entry.adapter), [
-    "syndocal-envelope-v2",
+    "syndocal-envelope-v3",
   ]);
   assertMalformed(
-    (i) => { i.wireContracts = { adapters: [{ adapter: "syndocal-envelope-v1", wireProtocol: "syndocal-envelope-v1" }] }; },
+    (i) => { i.wireContracts = { adapters: [{ adapter: "syndocal-envelope-v2", wireProtocol: "syndocal-envelope-v2" }] }; },
     "wireContracts",
   );
 });

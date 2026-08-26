@@ -199,9 +199,12 @@ function normalizeMeasuredLoop(entry, { nowMs, maxSampleAgeMs }) {
   }
   return {
     active: entry.active,
-    startBeat: Number.isFinite(startBeat) ? startBeat : null,
-    endBeat: Number.isFinite(endBeat) ? endBeat : null,
-    lengthBeats: Number.isFinite(lengthBeats) ? lengthBeats : null,
+    // The general rb-output snapshot intentionally retains the last visible
+    // boundaries after loop-off. The strict v3 peer contract does not: an
+    // authoritative inactive measurement must carry three exact nulls.
+    startBeat: entry.active ? startBeat : null,
+    endBeat: entry.active ? endBeat : null,
+    lengthBeats: entry.active ? lengthBeats : null,
     revision: entry.revision,
     sampleAgeMs,
     observedAtMs: observedMs,

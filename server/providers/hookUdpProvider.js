@@ -1,6 +1,7 @@
 const dgram = require("node:dgram");
 const { EventEmitter } = require("node:events");
 const { normalizeLoopState, upsertLoopState } = require("../loopState");
+const { projectMeasuredLoopBeats } = require("./loopBeatProjection");
 
 function normalizePlaybackSeconds(rawValue) {
   if (!Number.isFinite(rawValue)) {
@@ -95,6 +96,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
   function initDeckState() {
     return {
       bpm: null,
+      bpmUpdatedAt: 0,
       currentTime: null,
       currentTimeUpdatedAt: 0,
       totalTime: null,
@@ -822,7 +824,13 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       let measuredLoop = null;
       updateDeckState(deck, (data) => {
         data.loopRevision += 1;
-        measuredLoop = { ...logicalLoop, revision: data.loopRevision };
+        const projectedBeats = projectMeasuredLoopBeats({
+          packet,
+          loop: logicalLoop,
+          bpm: bpmFromRaw(data.bpm),
+          bpmObservedAt: data.bpmUpdatedAt,
+        });
+        measuredLoop = { ...logicalLoop, ...projectedBeats, revision: data.loopRevision };
         data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], measuredLoop)[0] || measuredLoop;
       });
       emitter.emit("loop-state", measuredLoop);
@@ -863,11 +871,13 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       if (name === "@BPM") {
         if (Number.isFinite(value) && value > 0) {
           data.bpm = value;
+          data.bpmUpdatedAt = Date.now();
         }
         markDeckSignal(deck, "playback");
       } else if (name === "@SyncSlaveBPM") {
         if (Number.isFinite(value) && value > 0 && (!Number.isFinite(data.bpm) || data.bpm === 0)) {
           data.bpm = value;
+          data.bpmUpdatedAt = Date.now();
         }
         markDeckSignal(deck, "playback");
       } else if (name === "@OriginalBPM") {
