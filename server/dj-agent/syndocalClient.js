@@ -468,7 +468,7 @@ function encodeV3MeasuredLoop(payload) {
     !playSessionId ||
     !loop
   ) return null;
-  return { deck, deckId, masterDeckRevision, playSessionId, ...loop };
+  return { deck, deckId, masterDeckRevision, playSessionId, loop };
 }
 
 function encodeV3Release(payload) {

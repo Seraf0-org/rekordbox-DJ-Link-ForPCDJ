@@ -149,7 +149,23 @@ test("v3 loop and release encoders accept only measured/correlated state", () =>
     sampleAgeMs: 3,
     source: "rekordbox-hook-measured",
   };
-  assertV3Frame(adapter.encodeEvent({ type: "DJ_LOOP_STATE", eventId: "loop-1", sequence: 2, payload: loop }), "DJ_LOOP_STATE");
+  const encodedLoop = adapter.encodeEvent({ type: "DJ_LOOP_STATE", eventId: "loop-1", sequence: 2, payload: loop });
+  assertV3Frame(encodedLoop, "DJ_LOOP_STATE");
+  assert.deepEqual(encodedLoop.payload, {
+    deck: 1,
+    deckId: "rekordbox-deck-1",
+    masterDeckRevision: 3,
+    playSessionId: "play-session-1",
+    loop: {
+      active: true,
+      startBeat: 32,
+      endBeat: 40,
+      lengthBeats: 8,
+      revision: 4,
+      sampleAgeMs: 3,
+      source: "rekordbox-hook-measured",
+    },
+  });
   const inactiveLoop = {
     ...loop,
     active: false,

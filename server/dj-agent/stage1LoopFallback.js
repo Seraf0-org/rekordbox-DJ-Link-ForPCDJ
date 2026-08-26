@@ -26,6 +26,7 @@ const MIN_RESPONSE_WINDOW_MS = 50;
 const MAX_RESPONSE_WINDOW_MS = 1_500;
 const MAX_MEASURED_SAMPLE_AGE_MS = 1_500;
 const LOOP_SPAN_TOLERANCE_BEATS = 0.001;
+const MAX_LOOP_DIVISION = STAGE1_LOOP_LENGTH_PROFILE.length - 1;
 
 const DEFAULT_TIMER_API = Object.freeze({
   setTimeout(callback, delayMs) {
@@ -68,6 +69,9 @@ function exactFallbackPayload(payload) {
     "deckId",
     "masterDeckRevision",
     "playSessionId",
+    "pedalIntentId",
+    "baseMeasuredLoopRevision",
+    "baseLoopDivision",
     "targetLengthBeats",
     "responseWindowMs",
     "source",
@@ -83,13 +87,27 @@ function exactFallbackPayload(payload) {
   }
   const deck = strictInteger(payload.deck, { min: 1, max: 4 });
   const masterDeckRevision = strictInteger(payload.masterDeckRevision, { min: 1 });
+  const pedalIntentId = strictInteger(payload.pedalIntentId, { min: 1 });
+  const baseMeasuredLoopRevision = payload.baseMeasuredLoopRevision === null
+    ? null
+    : strictInteger(payload.baseMeasuredLoopRevision, { min: 1 });
+  const baseLoopDivision = payload.baseLoopDivision === null
+    ? null
+    : strictInteger(payload.baseLoopDivision, { min: 0, max: MAX_LOOP_DIVISION });
   const responseWindowMs = boundedResponseWindowMs(payload.responseWindowMs);
+  const expectedTargetLengthBeats = STAGE1_LOOP_LENGTH_PROFILE[
+    baseLoopDivision == null ? 0 : Math.min(baseLoopDivision + 1, MAX_LOOP_DIVISION)
+  ];
   if (
     deck == null ||
     payload.deckId !== `rekordbox-deck-${deck}` ||
     masterDeckRevision == null ||
+    pedalIntentId == null ||
+    (payload.baseMeasuredLoopRevision !== null && baseMeasuredLoopRevision == null) ||
+    (payload.baseLoopDivision !== null && baseLoopDivision == null) ||
     !isIdentity(payload.playSessionId) ||
     !isProfileLength(payload.targetLengthBeats) ||
+    payload.targetLengthBeats !== expectedTargetLengthBeats ||
     responseWindowMs == null ||
     payload.source !== FALLBACK_SOURCE
   ) {
@@ -100,6 +118,9 @@ function exactFallbackPayload(payload) {
     deckId: payload.deckId,
     masterDeckRevision,
     playSessionId: payload.playSessionId,
+    pedalIntentId,
+    baseMeasuredLoopRevision,
+    baseLoopDivision,
     targetLengthBeats: payload.targetLengthBeats,
     responseWindowMs,
     source: FALLBACK_SOURCE,
@@ -243,7 +264,10 @@ function createStage1LoopFallback({
     throw new TypeError("stage1LoopFallback requires now and onFallback functions");
   }
   const timers = resolveTimerApi(timerApi);
-  const seenRevisionByLineage = new Map();
+  // This is the exact measured authority we have already accepted from the
+  // hook. A null revision is materially different from revision zero: it
+  // means Rekordbox supplied no accepted loop sample for this lineage.
+  const measuredAuthorityByLineage = new Map();
   let pending = null;
   let lastFallback = null;
   let nextProfileIndex = 0;
@@ -269,6 +293,28 @@ function createStage1LoopFallback({
     return false;
   }
 
+  function divisionForMeasured(measured) {
+    if (!measured.active) return null;
+    const division = STAGE1_LOOP_LENGTH_PROFILE.indexOf(measured.lengthBeats);
+    return division >= 0 ? division : null;
+  }
+
+  function baseAuthorityFor(identity) {
+    const measured = measuredAuthorityByLineage.get(lineageKey(identity));
+    // A prior no-response prediction has no measured revision, but it is the
+    // exact current Syndocal division when this same lineage has not yet been
+    // rebased by a fresh hook sample. Keep a measured revision when one exists:
+    // predictions change the runtime division but never advance measured truth.
+    if (lastFallback && sameLineage(lastFallback, identity)) {
+      return {
+        revision: measured?.revision ?? null,
+        division: STAGE1_LOOP_LENGTH_PROFILE.indexOf(lastFallback.targetLengthBeats),
+      };
+    }
+    if (measured) return measured;
+    return { revision: null, division: null };
+  }
+
   function clearPending(reason = "cleared") {
     if (!pending) return null;
     const previous = pending;
@@ -283,24 +329,53 @@ function createStage1LoopFallback({
     if (!pending || pending.intentId !== intentId) return;
     const intent = pending;
     pending = null;
-    const payload = exactFallbackPayload({
-      deck: intent.deck,
-      deckId: intent.deckId,
-      masterDeckRevision: intent.masterDeckRevision,
-      playSessionId: intent.playSessionId,
-      targetLengthBeats: intent.targetLengthBeats,
-      responseWindowMs: intent.responseWindowMs,
-      source: FALLBACK_SOURCE,
-    });
-    // This is internal construction from validated fields.  Keep a fail-closed
-    // guard anyway so a future edit cannot emit an invalid wire candidate.
-    if (!payload) return;
-    lastFallback = { ...intent, emittedAtMs: now(), payload };
-    onFallback(payload, {
-      intentId: intent.intentId,
-      baselineRevision: intent.baselineRevision,
-      emittedAtMs: lastFallback.emittedAtMs,
-    });
+    // Rapid F14 presses still represent separate physical intents. If no
+    // measured response arrived for any of them, publish their unresolved
+    // predictions in physical order so each wire frame remains exactly one
+    // downward step from the preceding accepted/predicted base.
+    const lastEmittedIntentId = lastFallback?.intentId ?? 0;
+    const unresolved = [
+      ...intent.partialTargets,
+      { intentId: intent.intentId, targetLengthBeats: intent.targetLengthBeats },
+    ]
+      .filter((candidate) => candidate.intentId > lastEmittedIntentId)
+      .sort((left, right) => left.intentId - right.intentId);
+    let base = baseAuthorityFor(intent);
+    for (const candidate of unresolved) {
+      const payload = exactFallbackPayload({
+        deck: intent.deck,
+        deckId: intent.deckId,
+        masterDeckRevision: intent.masterDeckRevision,
+        playSessionId: intent.playSessionId,
+        pedalIntentId: candidate.intentId,
+        baseMeasuredLoopRevision: base.revision,
+        baseLoopDivision: base.division,
+        targetLengthBeats: candidate.targetLengthBeats,
+        responseWindowMs: intent.responseWindowMs,
+        source: FALLBACK_SOURCE,
+      });
+      // This is internal construction from validated fields. Keep a
+      // fail-closed guard so malformed/intentionally skipped causal batches
+      // cannot emit a later candidate out of order.
+      if (!payload) return;
+      lastFallback = {
+        ...intent,
+        intentId: candidate.intentId,
+        targetLengthBeats: candidate.targetLengthBeats,
+        emittedAtMs: now(),
+        payload,
+      };
+      onFallback(payload, {
+        intentId: candidate.intentId,
+        baseMeasuredLoopRevision: base.revision,
+        baseLoopDivision: base.division,
+        emittedAtMs: lastFallback.emittedAtMs,
+      });
+      base = {
+        revision: base.revision,
+        division: STAGE1_LOOP_LENGTH_PROFILE.indexOf(candidate.targetLengthBeats),
+      };
+    }
   }
 
   function begin(intent) {
@@ -323,14 +398,15 @@ function createStage1LoopFallback({
     );
     intentCounter += 1;
     const targetLengthBeats = targetAt(nextProfileIndex);
-    const key = lineageKey(identity);
+    const baseAuthority = baseAuthorityFor(identity);
     const candidate = {
       ...identity,
       intentId: intentCounter,
       profileIndex: nextProfileIndex,
       targetLengthBeats,
       startedAtMs: now(),
-      baselineRevision: seenRevisionByLineage.get(key) || 0,
+      baseMeasuredLoopRevision: baseAuthority.revision,
+      baseLoopDivision: baseAuthority.division,
       // A rapid second press owns the only live timer, but an intermediate
       // measured result may still prove the prior physical press.  Preserve
       // those exact prior targets so that result is partial satisfaction, not
@@ -347,7 +423,8 @@ function createStage1LoopFallback({
       intentId: candidate.intentId,
       targetLengthBeats,
       responseWindowMs: windowMs,
-      baselineRevision: candidate.baselineRevision,
+      baseMeasuredLoopRevision: candidate.baseMeasuredLoopRevision,
+      baseLoopDivision: candidate.baseLoopDivision,
     };
   }
 
@@ -372,7 +449,8 @@ function createStage1LoopFallback({
       };
     }
     const key = lineageKey(measured);
-    const seenRevision = seenRevisionByLineage.get(key) || 0;
+    const previousAuthority = measuredAuthorityByLineage.get(key);
+    const seenRevision = previousAuthority?.revision || 0;
     if (measured.revision <= seenRevision) {
       const suppressed = pending && sameLineage(pending, measured)
         ? clearPending("stale-measured-response")
@@ -383,7 +461,10 @@ function createStage1LoopFallback({
         fallbackSuppressed: Boolean(suppressed),
       };
     }
-    seenRevisionByLineage.set(key, measured.revision);
+    measuredAuthorityByLineage.set(key, {
+      revision: measured.revision,
+      division: divisionForMeasured(measured),
+    });
 
     if (pending && sameLineage(pending, measured)) {
       const fallback = lastFallback && sameLineage(lastFallback, measured)
@@ -408,6 +489,12 @@ function createStage1LoopFallback({
       if (partialIndex >= 0) {
         const partial = pending.partialTargets.splice(partialIndex, 1)[0];
         if (fallback) lastFallback = null;
+        // The fresh sample is now the only authoritative base. Superseded
+        // targets before that physical intent must not replay, while later
+        // unresolved F14 intents still need sequential prediction.
+        pending.partialTargets = pending.partialTargets.filter(
+          (candidate) => candidate.intentId > partial.intentId,
+        );
         const rebased = rebaseFromMeasured(measured);
         // The newest F14 still owns the live timer. A delayed response for any
         // exact superseded target is only partial satisfaction, even when it
@@ -459,7 +546,7 @@ function createStage1LoopFallback({
       };
     }
 
-    return { accepted: true, state: "observed" };
+    return { accepted: true, state: "observed", rebased: rebaseFromMeasured(measured) };
   }
 
   function clear(reason = "cleared", { resetProfile = false } = {}) {
@@ -488,6 +575,8 @@ function createStage1LoopFallback({
             targetLengthBeats: pending.targetLengthBeats,
             responseWindowMs: pending.responseWindowMs,
             intentId: pending.intentId,
+            baseMeasuredLoopRevision: pending.baseMeasuredLoopRevision,
+            baseLoopDivision: pending.baseLoopDivision,
           }
         : null,
       lastFallback: lastFallback

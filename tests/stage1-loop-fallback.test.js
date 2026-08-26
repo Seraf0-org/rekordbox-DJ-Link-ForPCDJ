@@ -9,6 +9,7 @@ const {
   MIN_RESPONSE_WINDOW_MS,
   STAGE1_LOOP_LENGTH_PROFILE,
   createStage1LoopFallback,
+  exactFallbackPayload,
 } = require("../server/dj-agent/stage1LoopFallback");
 const { createShowEventRouter } = require("../server/dj-agent/showEventRouter");
 const {
@@ -83,7 +84,7 @@ test("Stage 1 fallback profile is bounded only at 1/64 and handles measured race
   for (let index = 0; index < STAGE1_LOOP_LENGTH_PROFILE.length; index += 1) {
     const intent = fallback.begin(identity());
     targets.push(intent.targetLengthBeats);
-    fallback.clear("profile-test");
+    assert.equal(fallback.observeMeasured(measured(index + 1, intent.targetLengthBeats)).accepted, true);
   }
   assert.deepEqual(targets, STAGE1_LOOP_LENGTH_PROFILE);
   assert.equal(targets.includes(2), true);
@@ -190,6 +191,9 @@ test("Stage 1 fallback profile is bounded only at 1/64 and handles measured race
   rapidTimers.runAll();
   assert.deepEqual(rapidEmitted, [{
     ...identity(),
+    pedalIntentId: 2,
+    baseMeasuredLoopRevision: 1,
+    baseLoopDivision: 0,
     targetLengthBeats: 4,
     responseWindowMs: 250,
     source: "pedal-no-response-predicted",
@@ -209,7 +213,7 @@ test("Stage 1 fallback profile is bounded only at 1/64 and handles measured race
   assert.equal(threePress.observeMeasured(measured(1, 8)).state, "late-partial-match");
   assert.equal(threePress.getState().pending.targetLengthBeats, 2);
   threePressTimers.runAll();
-  assert.deepEqual(threePressEmitted.map((payload) => payload.targetLengthBeats), [8, 2]);
+  assert.deepEqual(threePressEmitted.map((payload) => payload.targetLengthBeats), [8, 4, 2]);
 
   const intermediateTimers = createTimers();
   const intermediateEmitted = [];
@@ -251,6 +255,84 @@ test("Stage 1 fallback profile is bounded only at 1/64 and handles measured race
   assert.equal(late.begin(identity()).targetLengthBeats, 1, "late measurement rebases the next intent");
 });
 
+test("Stage 1 fallback carries causal bases across no-measurement and measured authority", () => {
+  const timers = createTimers();
+  const emitted = [];
+  const fallback = createStage1LoopFallback({
+    responseWindowMs: 250,
+    timerApi: timers,
+    onFallback: (payload) => emitted.push(payload),
+  });
+
+  // Null is the explicit wire representation for an as-yet unmeasured loop.
+  assert.equal(fallback.begin(identity()).targetLengthBeats, 8);
+  timers.runAll();
+  assert.deepEqual(emitted[0], {
+    ...identity(),
+    pedalIntentId: 1,
+    baseMeasuredLoopRevision: null,
+    baseLoopDivision: null,
+    targetLengthBeats: 8,
+    responseWindowMs: 250,
+    source: "pedal-no-response-predicted",
+  });
+
+  // A subsequent no-response press is based on the committed predicted 8,
+  // not on a fictional measured revision.
+  assert.equal(fallback.begin(identity()).targetLengthBeats, 4);
+  timers.runAll();
+  assert.deepEqual(emitted[1], {
+    ...identity(),
+    pedalIntentId: 2,
+    baseMeasuredLoopRevision: null,
+    baseLoopDivision: 0,
+    targetLengthBeats: 4,
+    responseWindowMs: 250,
+    source: "pedal-no-response-predicted",
+  });
+
+  // A late fresh hook report rebases both the next physical target and its
+  // causal base; an old fallback can no longer claim this newer measurement.
+  assert.equal(fallback.observeMeasured(measured(3, 2)).state, "late-measured");
+  assert.equal(fallback.begin(identity()).targetLengthBeats, 1);
+  timers.runAll();
+  assert.deepEqual(emitted[2], {
+    ...identity(),
+    pedalIntentId: 3,
+    baseMeasuredLoopRevision: 3,
+    baseLoopDivision: 2,
+    targetLengthBeats: 1,
+    responseWindowMs: 250,
+    source: "pedal-no-response-predicted",
+  });
+});
+
+test("an inactive measured loop clears the active causal base and restarts fallback at 8", () => {
+  const timers = createTimers();
+  const emitted = [];
+  const fallback = createStage1LoopFallback({
+    responseWindowMs: 250,
+    timerApi: timers,
+    onFallback: (payload) => emitted.push(payload),
+  });
+
+  assert.equal(fallback.observeMeasured(measured(1, 4)).state, "observed");
+  assert.equal(fallback.begin(identity()).targetLengthBeats, 2);
+  timers.runAll();
+  assert.equal(fallback.observeMeasured(measured(2, null, { active: false })).state, "late-measured");
+  assert.equal(fallback.begin(identity()).targetLengthBeats, 8);
+  timers.runAll();
+  assert.deepEqual(emitted.at(-1), {
+    ...identity(),
+    pedalIntentId: 2,
+    baseMeasuredLoopRevision: 2,
+    baseLoopDivision: null,
+    targetLengthBeats: 8,
+    responseWindowMs: 250,
+    source: "pedal-no-response-predicted",
+  });
+});
+
 test("v3 fallback wire payload is exact and v2 has no adapter shim", () => {
   assert.throws(
     () => createStage1LoopFallback({ responseWindowMs: MIN_RESPONSE_WINDOW_MS - 1 }),
@@ -266,6 +348,9 @@ test("v3 fallback wire payload is exact and v2 has no adapter shim", () => {
   const adapter = createSyndocalEnvelopeV3Adapter({ token: TOKEN });
   const payload = {
     ...identity(),
+    pedalIntentId: 9,
+    baseMeasuredLoopRevision: 7,
+    baseLoopDivision: 4,
     targetLengthBeats: 1 / 4,
     responseWindowMs: 250,
     source: "pedal-no-response-predicted",
@@ -279,6 +364,23 @@ test("v3 fallback wire payload is exact and v2 has no adapter shim", () => {
   assert.equal(frame.v, 3);
   assert.equal(frame.type, "DJ_LOOP_FALLBACK");
   assert.deepEqual(frame.payload, payload);
+  assert.equal(exactFallbackPayload({ ...payload, baseMeasuredLoopRevision: 1, baseLoopDivision: null }), null);
+  assert.deepEqual(
+    exactFallbackPayload({
+      ...payload,
+      baseMeasuredLoopRevision: 1,
+      baseLoopDivision: null,
+      targetLengthBeats: 8,
+    }),
+    {
+      ...payload,
+      baseMeasuredLoopRevision: 1,
+      baseLoopDivision: null,
+      targetLengthBeats: 8,
+    },
+  );
+  assert.equal(exactFallbackPayload({ ...payload, baseLoopDivision: 10 }), null);
+  assert.equal(exactFallbackPayload({ ...payload, pedalIntentId: 0 }), null);
   assert.equal(adapter.encodeEvent({
     type: "DJ_LOOP_FALLBACK",
     eventId: "fallback-extra",
@@ -336,6 +438,9 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
   timers.runAll();
   assert.deepEqual(sent.find((event) => event.type === "DJ_LOOP_FALLBACK").payload, {
     ...identity(),
+    pedalIntentId: 1,
+    baseMeasuredLoopRevision: null,
+    baseLoopDivision: null,
     targetLengthBeats: 8,
     responseWindowMs: 250,
     source: "pedal-no-response-predicted",
