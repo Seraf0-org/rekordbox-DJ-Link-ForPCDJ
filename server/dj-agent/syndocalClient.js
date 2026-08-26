@@ -581,7 +581,7 @@ function decodeV3TimelineState(message) {
     (payload.playSessionId !== null && !playSessionId) ||
     (payload.releaseEventId !== null && !releaseEventId) ||
     positionBars == null ||
-    !ENVELOPE_V3_PEDAL_OWNERS.has(payload.pedalOwner)
+    (payload.pedalOwner !== null && !ENVELOPE_V3_PEDAL_OWNERS.has(payload.pedalOwner))
   ) return null;
   if (payload.state === "running" && (!timelineId || !playSessionId)) return null;
   if (payload.pedalOwner === "timeline" && (!playSessionId || !releaseEventId)) return null;

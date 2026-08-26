@@ -1582,6 +1582,45 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   assert.equal(decodeV3TimelineState({ ...strictTimelineState(), bonus: true }), null);
 });
 
+test("v3 timeline state accepts idle pedalOwner null and rejects unknown ownership", () => {
+  const idle = decodeV3TimelineState(strictTimelineState({
+    state: "idle",
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: null,
+    pedalOwner: null,
+    releaseEventId: null,
+  }));
+  assert.ok(idle);
+  assert.equal(idle.state, "idle");
+  assert.equal(idle.pedalOwner, null);
+
+  const timeline = decodeV3TimelineState(strictTimelineState({
+    pedalOwner: "timeline",
+    releaseEventId: "release-1",
+  }));
+  assert.ok(timeline);
+  assert.equal(timeline.pedalOwner, "timeline");
+
+  assert.equal(decodeV3TimelineState(strictTimelineState({
+    state: "idle",
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: null,
+    pedalOwner: "timeline",
+    releaseEventId: "release-1",
+  })), null);
+  assert.equal(decodeV3TimelineState(strictTimelineState({
+    state: "idle",
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: "play-session-1",
+    pedalOwner: "timeline",
+    releaseEventId: null,
+  })), null);
+  assert.equal(decodeV3TimelineState(strictTimelineState({ pedalOwner: "rekordbox" })), null);
+});
+
 test("ACK v3 schema rejects missing, extra, stale, and nonfinite fields", () => {
   const valid = {
     v: 3,
