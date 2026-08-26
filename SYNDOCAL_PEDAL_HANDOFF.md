@@ -10,7 +10,10 @@ flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒�
 product source versionは`1.1.5`、branchは`beta-v1.1.2`です。current runtime-source
 checkpointはpushed commit
 `862cf8035dfb365a7d799f820936585882d0a1e7`です。この後のdocs-only branch tipは
-runtime identityを変更しません。
+runtime identityを変更しません。controlled-source acceptanceは
+branch `beta-v1.1.2`、clean、upstream-equal、HがHEADのancestor、かつ
+`H..HEAD`が正確に`API.md`、`README.md`、`SYNDOCAL_PEDAL_HANDOFF.md`だけであることを
+毎回証明します。これは`HEAD == H`を要求しません。
 
 F14の物理意図はRekordbox MIDI送信より先にresponse windowを開始します。freshな
 同一session測定が権威で、actual no-responseだけが別型の`DJ_LOOP_FALLBACK`を送ります。
@@ -34,72 +37,53 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 strict show-sync v2 clean break
 
-出荷・現行・productionの唯一のadapterは`syndocal-envelope-v2`です。旧flat
-`generic-json`と`syndocal-envelope-v1`は設定、Setup、build identity、runtimeから
-退役し、指定されても明示的に拒否します。fallback、legacy shim、暗黙変換はありません。
-全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定です。
+この節は過去のv2設計記録であり、**実行・設定コピー禁止**です。2026-08-25時点では
+`syndocal-envelope-v2`を唯一のadapterとしていました。旧flat `generic-json`と
+`syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
+指定時に拒否していました。全frameは当時
+`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
+現行authorityは本書冒頭のv1.1.5/v3だけです。
 
-このclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
-任意の`running`によるペダル所有権移行を廃止します。ACTIVEはexact master deck、
+この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
+任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
 playSessionId、exact track identity、positionAtSendSec、effectiveBpm、単調増加
-positionRevision、1500ms以下のsampleAgeMsが揃うまで送信しません。同一sessionは
-completeになった時点で一度だけACTIVEを出し、その後はTRACK_SYNCを連続送信します。
-nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artistで同一視しません。
-物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの受入れは別途必要で、mockから完了とは
-主張しません。
+positionRevision、1500ms以下のsampleAgeMsが揃うまで送信しませんでした。同一sessionは
+completeになった時点で一度だけACTIVEを出し、その後はTRACK_SYNCを連続送信していました。
+この記録から現行の物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACK受入れを主張してはいけません。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-30 v1.1.4 source operation
 
-The only current show path is the target DJ PC's controlled source-acceptance
-exception. Runtime checkpoint H is the exact full commit
+This is archived v1.1.4 evidence, not a launch or configuration procedure. The
+then-current show path was the target DJ PC's controlled source-acceptance
+exception. H **(historical v1.1.4)** was the exact full commit
 `c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2`, product
-source version `1.1.4`; it does not claim that the present DJ-PC branch tip is
+source version `1.1.4`; it did not claim that the present DJ-PC branch tip was
 clean or upstream-equal, and a docs-only commit touching exactly
 `README.md`/`SYNDOCAL_PEDAL_HANDOFF.md`/`API.md` may legitimately sit above H.
-Before use, run the canonical runtime checkout proof (branch `beta-v1.1.2`,
-clean, upstream-equal, `git merge-base --is-ancestor H HEAD`, docs-only diff
-against the exact three-file allowlist) and require its documented expected result in
-[README's current show-first source position](README.md#current-show-first-source-position--2026-08-30).
-The immutable `v1.1.3` tag and installer are blocked from current operator use;
-they remain historical evidence only. There is no `v1.1.4` tag, identity-bound
-installer, or GitHub Release. General-public distribution is therefore incomplete.
-
-For the 2026-08-30 show, configure the checkout-external JSON with the current
-Syndocal one-time token, exact selected NIC and `CustomMIDI1` name+port, then use
-only [README's source-launch command](README.md#3-v114未公開期間の公演前source-acceptance現在の暫定正規経路).
-That sole route makes the `REKORDBOX_EXE_PATH` Process/User/Machine preflight
-fail closed before it starts a process. `start-all.bat` runs with no arguments;
-its only other accepted invocation is exactly the lowercase `--preflight-only`
-preflight, and no installer or packaged exe substitutes for it on the current
-show. This is a narrow DJ-PC pre-release
-source-acceptance path. `start-all.bat` does not persist configuration or turn a
-connected socket into an authenticated/accepted session. The matrix is **0/12**
-until the following exact rows have recorded physical evidence. See README's
-**DJ-PC wake and HW-4 acceptance sequence (exactly 12 rows)**; that sequence is
-the single executable operator order for this handoff.
+Its archived proof conditions and launcher notes are retired and must not be run
+or copied. The immutable `v1.1.3` tag, installer, and all v1.1.4 guidance remain
+historical evidence only. Current authority exists only at the beginning of this
+document; this historical section contains no executable v2 adapter/configuration
+instruction or current operator link.
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 corrective release preparation: v1.1.4
 
-公開済み`v1.1.3`はwire mismatchを含むimmutable historical artifactとして保持し、tagや
-assetを移動・差し替えません。次のcorrective product versionは`1.1.4`です。`package.json`、
+この節は過去のrelease preparation記録であり、**実行・設定コピー禁止**です。公開済み
+`v1.1.3`はwire mismatchを含むimmutable historical artifactとして保持し、tagや
+assetを移動・差し替えませんでした。当時の次のcorrective product versionは`1.1.4`でした。`package.json`、
 root `package-lock.json` identity、`installer.iss`、Setup HTTP/UIのversioned mapping URL、
 serverのstatic mapping filename、`CustomMIDI1-Syndocal-v1.1.4.csv`、packaging focused
-fixtureはこのversionだけを参照します。依存packageのversion、schema、adapter、runtime event
-contractはこのproduct bumpで変更しません。新しいtag、identity-bound artifact、GitHub Release、
-hardware acceptanceは後続のrelease supervisor gateでのみ作成・主張できます。
+fixtureはそのversionだけを参照していました。ここに記録されたadapter、JSON、artifact、
+runtime event contractを現行環境へ設定してはいけません。
 
-検証済みv1.1.4 installerの公開後は、スタートメニュー／デスクトップの
-`DJLinkForPCDJ` shortcutから起動し、インストール先`start-rb.bat`のpayload検証を
-必ず通します。公開済みv1.1.3 shortcutは現行受入れに使用しません。
+検証済みv1.1.4 installer公開後の起動案は、スタートメニュー／デスクトップの
+`DJLinkForPCDJ` shortcutとインストール先`start-rb.bat`のpayload検証を想定していました。
+これは現行受入れの手順ではありません。
 
-v1.1.4 installerが未公開の現在は、2026-08-30公演の対象DJ PCに限り
-[READMEの唯一のsource-acceptance導線](README.md#3-v114未公開期間の公演前source-acceptance現在の暫定正規経路)
-を暫定正規経路とします。checkout外のJSONへhost `192.168.50.1`、NIC
-`192.168.50.2`、one-time token、adapter `syndocal-envelope-v2`、Setup列挙に完全一致する
-`CustomMIDI1` name+portを設定します。`REKORDBOX_EXE_PATH`は退役済みで、source
-launcherがProcess/User/Machine全scopeを明示的にfail-closeします。source launcherは
-既存DLLを成功扱いせず、毎回Hookを再ビルド・provenance検証します。この例外は対象DJ PCの
-pre-release acceptanceだけで、一般配布完成の主張ではありません。
+当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
+`syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.5/v3 authorityと、
+READMEの独立したcurrent controlled-source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
 `refs/tags/v*`の削除とnon-fast-forward更新を禁止します。workflowも
@@ -112,22 +96,20 @@ tests 19/19、対象source/testの`node --check`で確認済みです。`v1.1.3`
 READMEのimmutable historical evidenceだけであり、current product source、Setup URL、mapping
 artifactには残っていません。
 
-2026-08-26のcertified runtime-source checkpoint Hはbranch `beta-v1.1.2`、product
-source version `1.1.4`の`c6ebb0fd917a82574b9ef61f12ebb41283db357e`です。branch tipの
-clean/upstream-equalは固定記述ではなく、実行時にREADMEのproof commandと期待値で確認します。
-proofはH直後にdocs-only commit（`README.md`、`SYNDOCAL_PEDAL_HANDOFF.md`、`API.md`の3file
-のみ）が続き得ることを前提に設計されており、HEAD==Hを要求せず、ancestor成立とdocs-only差分で
-検証します。未対応Rekordboxへの暗黙注入と退役済み
+2026-08-26のcertified runtime-source H **(historical v1.1.4)** はbranch
+`beta-v1.1.2`、product source version `1.1.4`の
+`c6ebb0fd917a82574b9ef61f12ebb41283db357e`でした。ここに残るbranch/proofの説明は
+履歴証拠であり、現行のproof commandまたは運用手順ではありません。未対応Rekordboxへの暗黙注入と退役済み
 `REKORDBOX_EXE_PATH`経路をfail-closeした`ab643e6`、追随テスト修正`5110b2c`／`590115a`、
 公演用source runbook`f3da76f`、およびその直前のregression gate checkpoint
 `600ec0fd46729ed6c7bf5501ad70da8350141ec7`（履歴: full `npm test` 368 total /
 366 pass / 0 fail / 2 skip / 371652.9948ms）は、いずれも履歴として
 `origin/beta-v1.1.2`に存在します。
 
-checkpoint Hの最終gateは次のとおりです。focused smoke+envelope 89/89、launcher/config
+H **(historical v1.1.4)** の最終gateは次のとおりでした。focused smoke+envelope 89/89、launcher/config
 focused 12/12、full `npm test` 377 total / 375 pass / 0 fail / 2 intentional pkg skip、
 所要379134.5901ms、独立OxレビューAPPROVE。skipは`RB_OUTPUT_PKG_SMOKE=1`を必要とする
-real/adversary pkg exe smokeだけです。これらはsource regression gateであり、v1.1.4 tag、
+real/adversary pkg exe smokeだけでした。これらはsource regression gateの履歴であり、v1.1.4 tag、
 identity-bound build、installer、`dist`、GitHub Release、DJ-PC実機、Rekordbox、LAN、MIDI、
 Pedal、Syndocal ACKの完了を主張しません。
 
@@ -360,6 +342,11 @@ branch/commitは削除していない。
 このsupport laneではcommit/pushを行いません。
 
 ## SUPERSEDED / HISTORICAL — strict-v2 wire契約(2026-08-25)
+
+この節以下のstrict-v2 runbookは過去の設計証拠であり、**実行・設定コピー禁止**です。
+現在形・命令形で残る記述も当時の契約を正確に保存するための引用範囲で、現行DJ PC、
+launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用してはいけません。現行authorityは
+本書冒頭のv1.1.5 strict-v3節だけです。この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
 全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定、

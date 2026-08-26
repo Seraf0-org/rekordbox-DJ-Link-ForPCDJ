@@ -163,19 +163,19 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
 相互運用は、対象環境での実機受入試験が別途必要です。
 
-## SUPERSEDED / DO NOT EXECUTE — v1.1.4 show-first source position
+## Current controlled-source acceptance — v1.1.5 strict v3 (2026-08-26)
 
 The current show path is deliberately **source only**, not a public distribution.
 Runtime checkpoint H is the exact full commit
-`c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2` (product
-source version `1.1.4`). A docs-only commit changing exactly `README.md`,
+`862cf8035dfb365a7d799f820936585882d0a1e7` on branch `beta-v1.1.2` (product
+source version `1.1.5`). Docs-only commits changing exactly `README.md`,
 `SYNDOCAL_PEDAL_HANDOFF.md`, and `API.md` may follow H, so the proof must
 never require `HEAD == H`; it verifies ancestry plus an all-docs diff instead.
 Before each controlled source acceptance, prove the checkout at runtime:
 
 ```powershell
 git fetch origin
-$checkpointH = "c6ebb0fd917a82574b9ef61f12ebb41283db357e"
+$checkpointH = "862cf8035dfb365a7d799f820936585882d0a1e7"
 $docsAllowlist = @("README.md", "SYNDOCAL_PEDAL_HANDOFF.md", "API.md")
 if (([string](git branch --show-current)).Trim() -ne "beta-v1.1.2") { throw "wrong source branch" }
 $dirty = @(git status --porcelain)
@@ -203,16 +203,16 @@ is clean, `HEAD` equals `origin/beta-v1.1.2`,
 Any other result is a failed source acceptance; do not launch or substitute a
 different checkout.
 
-Checkpoint H's recorded software gates are: focused smoke+envelope suite
-89/89 pass, launcher/config focused suite 12/12 pass, full `npm test`
-377 total / 375 pass / 0 fail / 2 intentional package-smoke skips
-(`RB_OUTPUT_PKG_SMOKE=1`) in 379134.5901 ms, and an independent Ox adversarial
-review verdict APPROVE. These are source-level gates only; hardware acceptance
+Checkpoint H's recorded software gates are: Stage 1 + strict-v3 focused suite
+33/33 pass, full `npm test` 389 total / 387 pass / 0 fail / 2 intentional
+package-smoke skips, and first-party warnings 0. The Stage 1 contract covers
+the full `8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64` profile;
+`1/64` is the only floor. These are source-level gates only; hardware acceptance
 remains **0/12** and is not closed by them.
 
 The immutable `v1.1.3` tag and installer are blocked for current acceptance because
 of the `DJ_MASTER_CHANGED` wire mismatch. Do not install, launch, or use their
-shortcuts as a substitute. `v1.1.4` has no tag, identity-bound installer, or GitHub
+shortcuts as a substitute. `v1.1.5` has no tag, identity-bound installer, or GitHub
 Release yet; general-public distribution is explicitly incomplete. The current
 show therefore requires neither an installer nor a packaged exe; only the
 proven source checkout below is used.
@@ -266,30 +266,29 @@ do not advance a failing row by retrying through an alternate/legacy adapter.
 
 ## SUPERSEDED / HISTORICAL — planned v1.1.4 strict-v2 guidance
 
-The intended current wire contract is strict `syndocal-envelope-v2`; explicitly reject
-`generic-json` and `syndocal-envelope-v1` with no fallback, alias, or implicit conversion.
-The immutable published v1.1.3 package is historical and blocked by its internal
-`DJ_MASTER_CHANGED` mismatch. Do not install or use it for current acceptance. The
-corrected v1.1.4 source checkpoint H is `c6ebb0fd917a82574b9ef61f12ebb41283db357e`
-on branch `beta-v1.1.2`, but its
-tagged/public release is still planned; hardware acceptance remains **0/12**.
+This archived v1.1.4 plan is **not executable operator guidance**. Do not copy its
+v2 frame, configuration, or release instructions into a current show setup. Current
+authority is the v1.1.5/v3 section above. The immutable published v1.1.3 package
+remains historical and blocked by its internal `DJ_MASTER_CHANGED` mismatch. The
+v1.1.4 checkpoint H **(historical v1.1.4)** was
+`c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2`; its tagged/public
+release was never the current acceptance path, and hardware acceptance was **0/12**.
 
-The corrected release must use the exact envelope
+The archived plan specified the exact envelope
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}` and the exact control order
 `DJ_AGENT_HELLO` → `DJ_STATE_SYNC` → `DJ_TIMELINE_STATE_REQUEST`. Syndocal's returned
-`DJ_TIMELINE_STATE` is authoritative; timeline actions are fail-closed until its snapshot
-is valid. The accepted event set is `DJ_MASTER_TRACK_ACTIVE`, `DJ_LOOP_STATE`,
+`DJ_TIMELINE_STATE` was authoritative; timeline actions were fail-closed until its snapshot
+was valid. Its accepted event set was `DJ_MASTER_TRACK_ACTIVE`, `DJ_LOOP_STATE`,
 `DJ_RELEASE`, `DJ_TIMELINE_BEAT_JUMP`, and `DJ_TIMELINE_LOOP_SET`; `DJ_MASTER_TRACK_SYNC`
-is non-ACK telemetry. `DJ_MASTER_CHANGED` is retired/unreachable, not a capability or
-accepted wire event, and the v1.1.4 source must carry a passing negative proof for every
-encoder/router path before release.
+was non-ACK telemetry. This retained description is provenance only, not a v2 setup
+or wire instruction for operators.
 
-Track frames carry `deck`, `deckId`, `masterDeckRevision`, exactly one identity form,
+Its track frames carried `deck`, `deckId`, `masterDeckRevision`, exactly one identity form,
 optional `trackBpm`, `positionAtSendSec`, `effectiveBpm`, `positionRevision`,
 `sampleAgeMs`, `isPlaying:true`, `master:true`, `startedAt`, `playSessionId`, and an
 optional measured-loop object. That object carries `active`, optional
 `startBeat`/`endBeat`/`lengthBeats`, `revision`, `sampleAgeMs`, and source
-`rekordbox-hook-measured`; no root-level loop-division counter is a v2 wire field.
+`rekordbox-hook-measured`; no root-level loop-division counter was a v2 wire field.
 
 The immutable v1.1.3 software/package evidence remains recorded for provenance:
 source commit `5eaf1994e1bf4456857fefd36cc0ce827145b603`, annotated tag `v1.1.3` at
