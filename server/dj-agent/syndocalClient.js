@@ -10,8 +10,8 @@ function makeId() {
 
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
 const SUPPORTED_EVENT_TYPES = new Set([
-  "DJ_MASTER_TRACK_ACTIVE",
-  "DJ_MASTER_TRACK_SYNC",
+  "DJ_TRACK_ACTIVE",
+  "DJ_TRACK_SYNC",
   "DJ_LOOP_STATE",
   "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
@@ -20,14 +20,14 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "DJ_TIMELINE_LOOP_SET",
 ]);
 const PHYSICAL_EVENT_TYPES = new Set([
-  "DJ_MASTER_TRACK_ACTIVE",
+  "DJ_TRACK_ACTIVE",
   "DJ_LOOP_STATE",
   "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
 ]);
-const TRANSIENT_TELEMETRY_TYPES = new Set(["DJ_MASTER_TRACK_SYNC"]);
+const TRANSIENT_TELEMETRY_TYPES = new Set(["DJ_TRACK_SYNC"]);
 const ACK_OUTCOMES = new Set(["accepted", "duplicate", "no_mapping", "rejected", "busy"]);
 const DEFAULT_DELIVERY_HISTORY_MAX = 256;
 const DEFAULT_MAX_PENDING_ACKS = 256;
@@ -384,11 +384,10 @@ function encodeV3Loop(loop) {
   };
 }
 
-function encodeV3TrackSample(payload) {
+function encodeV3TrackCandidate(payload) {
   if (!isPlainRecord(payload)) return null;
   const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
   const deckId = requiredString(payload, "deckId");
-  const masterDeckRevision = strictFinite(payload, "masterDeckRevision", { min: 1, integer: true });
   const playSessionId = requiredString(payload, "playSessionId");
   const positionAtSendSec = strictFinite(payload, "positionAtSendSec", { min: 0, max: 7_200 });
   const effectiveBpm = strictFinite(payload, "effectiveBpm", { min: Number.MIN_VALUE, max: 1_000 });
@@ -397,60 +396,115 @@ function encodeV3TrackSample(payload) {
     min: 0,
     max: ENVELOPE_V3_MAX_SAMPLE_AGE_MS,
   });
+  const startedAt = requiredString(payload, "startedAt");
   if (
     deck == null ||
     deckId !== `rekordbox-deck-${deck}` ||
-    masterDeckRevision == null ||
     !playSessionId ||
     positionAtSendSec == null ||
     effectiveBpm == null ||
     positionRevision == null ||
     sampleAgeMs == null ||
     payload.isPlaying !== true ||
-    payload.master !== true
+    !startedAt ||
+    !Number.isFinite(Date.parse(startedAt))
   ) {
     return null;
   }
-  const contentId = payload.contentId === null ? null : normalizeIdentity(payload.contentId);
-  const title = payload.title === null ? null : normalizeOptionalString(payload.title);
-  const artist = payload.artist === null ? null : normalizeOptionalString(payload.artist);
-  if ((payload.contentId !== null && !contentId) || (payload.title !== null && !title) || (payload.artist !== null && !artist)) {
-    return null;
+  const commonFields = [
+    "deck",
+    "deckId",
+    "positionAtSendSec",
+    "effectiveBpm",
+    "positionRevision",
+    "sampleAgeMs",
+    "isPlaying",
+    "startedAt",
+    "playSessionId",
+  ];
+  const hasTrackBpm = Object.hasOwn(payload, "trackBpm");
+  const hasLoop = Object.hasOwn(payload, "loop");
+  const optionalFields = [
+    ...(hasTrackBpm ? ["trackBpm"] : []),
+    ...(hasLoop ? ["loop"] : []),
+  ];
+  const identity = hasExactFields(payload, [
+    ...commonFields,
+    ...optionalFields,
+    "contentId",
+  ])
+    ? "content"
+    : hasExactFields(payload, [
+        ...commonFields,
+        ...optionalFields,
+        "title",
+        "artist",
+      ])
+      ? "text"
+      : null;
+  if (!identity) return null;
+  const trackBpm = hasTrackBpm
+    ? strictFinite(payload, "trackBpm", { min: Number.MIN_VALUE, max: 1_000 })
+    : null;
+  if (hasTrackBpm && payload.trackBpm !== null && trackBpm == null) return null;
+  const loop = hasLoop
+    ? (payload.loop === null ? null : encodeV3Loop(payload.loop))
+    : undefined;
+  if (loop === undefined && hasLoop) return null;
+  if (identity === "content") {
+    const contentId = requiredString(payload, "contentId");
+    if (!contentId) return null;
+    return {
+      deck,
+      deckId,
+      contentId,
+      ...(hasTrackBpm ? { trackBpm } : {}),
+      positionAtSendSec,
+      effectiveBpm,
+      positionRevision,
+      sampleAgeMs,
+      isPlaying: true,
+      startedAt,
+      playSessionId,
+      ...(hasLoop ? { loop } : {}),
+    };
   }
-  if (!contentId && (!title || !artist)) return null;
-  const trackBpm = payload.trackBpm === null
-    ? null
-    : strictFinite(payload, "trackBpm", { min: Number.MIN_VALUE, max: 1_000 });
-  if (payload.trackBpm !== null && trackBpm == null) return null;
-  const startedAt = requiredString(payload, "startedAt");
-  if (!startedAt || !Number.isFinite(Date.parse(startedAt))) return null;
-  const loop = encodeV3Loop(payload.loop);
-  if (loop === undefined) return null;
+  const title = requiredString(payload, "title");
+  const artist = requiredString(payload, "artist");
+  if (!title || !artist) return null;
   return {
     deck,
     deckId,
-    masterDeckRevision,
-    contentId,
     title,
     artist,
-    trackBpm,
+    ...(hasTrackBpm ? { trackBpm } : {}),
     positionAtSendSec,
     effectiveBpm,
     positionRevision,
     sampleAgeMs,
     isPlaying: true,
-    master: true,
     startedAt,
     playSessionId,
-    loop,
+    ...(hasLoop ? { loop } : {}),
   };
 }
 
 function encodeV3MeasuredLoop(payload) {
-  if (!isPlainRecord(payload)) return null;
+  const outerFields = [
+    "deck",
+    "deckId",
+    "playSessionId",
+    "active",
+    "startBeat",
+    "endBeat",
+    "lengthBeats",
+    "revision",
+    "sampleAgeMs",
+    "source",
+  ];
+  if (!hasExactFields(payload, outerFields)) return null;
   const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
   const deckId = requiredString(payload, "deckId");
-  const masterDeckRevision = strictFinite(payload, "masterDeckRevision", { min: 1, integer: true });
   const playSessionId = requiredString(payload, "playSessionId");
   const loop = encodeV3Loop({
     active: payload.active,
@@ -464,11 +518,10 @@ function encodeV3MeasuredLoop(payload) {
   if (
     deck == null ||
     deckId !== `rekordbox-deck-${deck}` ||
-    masterDeckRevision == null ||
     !playSessionId ||
     !loop
   ) return null;
-  return { deck, deckId, masterDeckRevision, playSessionId, loop };
+  return { deck, deckId, playSessionId, loop };
 }
 
 function encodeV3Release(payload) {
@@ -531,9 +584,9 @@ function encodeV3LoopSet(payload) {
 
 function encodeV3TypedEvent(type, payload) {
   switch (type) {
-    case "DJ_MASTER_TRACK_ACTIVE":
-    case "DJ_MASTER_TRACK_SYNC":
-      return encodeV3TrackSample(payload);
+    case "DJ_TRACK_ACTIVE":
+    case "DJ_TRACK_SYNC":
+      return encodeV3TrackCandidate(payload);
     case "DJ_LOOP_STATE":
       return encodeV3MeasuredLoop(payload);
     case "DJ_LOOP_FALLBACK":
@@ -629,8 +682,8 @@ function createSyndocalEnvelopeV3Adapter({ token = "" } = {}) {
         authToken: token,
         version: ENVELOPE_V3_PROTOCOL_VERSION,
         capabilities: [
-          "DJ_MASTER_TRACK_ACTIVE",
-          "DJ_MASTER_TRACK_SYNC",
+          "DJ_TRACK_ACTIVE",
+          "DJ_TRACK_SYNC",
           "DJ_LOOP_STATE",
           "DJ_LOOP_FALLBACK",
           "DJ_RELEASE",
@@ -654,18 +707,35 @@ function createSyndocalEnvelopeV3Adapter({ token = "" } = {}) {
     encodeStateSync({ eventId, sequence, state }) {
       if (!Number.isSafeInteger(sequence) || sequence < 1 || !normalizeIdentity(eventId)) return null;
       if (!isPlainRecord(state) || typeof state.released !== "boolean") return null;
-      const masterDeck = state.masterDeck == null ? null : normalizeDeck(state.masterDeck);
+      const normalizedOwnerDeck = state.ownerDeck == null ? null : normalizeDeck(state.ownerDeck);
+      const ownerDeck = normalizedOwnerDeck == null ? null : Number(normalizedOwnerDeck);
+      const ownerDeckId = state.ownerDeckId == null ? null : normalizeIdentity(state.ownerDeckId);
       const activePlaySessionId = state.activePlaySessionId == null
         ? null
         : normalizeIdentity(state.activePlaySessionId);
-      if ((state.masterDeck != null && !masterDeck) || (state.activePlaySessionId != null && !activePlaySessionId)) {
+      const hasOwnerDeck = state.ownerDeck != null;
+      const hasOwnerDeckId = state.ownerDeckId != null;
+      const hasActivePlaySessionId = state.activePlaySessionId != null;
+      if (
+        (hasOwnerDeck && (!Number.isInteger(ownerDeck) || ownerDeck < 1 || ownerDeck > 4)) ||
+        (hasOwnerDeckId && !ownerDeckId) ||
+        (hasActivePlaySessionId && !activePlaySessionId) ||
+        hasOwnerDeck !== hasOwnerDeckId ||
+        hasOwnerDeck !== hasActivePlaySessionId ||
+        (ownerDeckId && ownerDeckId !== `rekordbox-deck-${ownerDeck}`) ||
+        (hasOwnerDeck && (!ownerDeck || !ownerDeckId || !activePlaySessionId))
+      ) {
         return null;
       }
-      return frame({ type: "DJ_STATE_SYNC", eventId, sequence }, {
+      const payload = {
         released: state.released,
-        masterDeck,
-        activePlaySessionId,
-      });
+      };
+      if (hasOwnerDeck) {
+        payload.ownerDeck = ownerDeck;
+        payload.ownerDeckId = ownerDeckId;
+        payload.activePlaySessionId = activePlaySessionId;
+      }
+      return frame({ type: "DJ_STATE_SYNC", eventId, sequence }, payload);
     },
     encodeHeartbeat({ eventId, sequence }) {
       return frame({ type: "DJ_HEARTBEAT", eventId, sequence }, {});
@@ -2157,7 +2227,7 @@ module.exports = {
   encodeV3LoopFallback,
   encodeV3MeasuredLoop,
   encodeV3Release,
-  encodeV3TrackSample,
+  encodeV3TrackCandidate,
   resolveAdapter,
   resolveWebSocketImplementation,
   validateEnvelopeV3Ack,

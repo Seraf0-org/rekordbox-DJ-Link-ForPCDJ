@@ -51,7 +51,12 @@ function createShowEventRouter({
   let lastAction = null;
   let releaseMacroGeneration = 0;
   let activePlaySessionId = null;
+  let admittedTrack = null;
   const releasedPlaySessions = new Set();
+  // The first WS connection can arrive after Rekordbox has already emitted a
+  // candidate. Reannounce only after the peer's fresh timeline snapshot, for
+  // the initial connection as well as every replacement connection.
+  let reannounceCandidatesAfterTimelineState = syndocalEnabled() && syndocalState() === "connected";
   // Same-session staleness fence for authoritative DJ_TIMELINE_STATE frames.
   // connectionGeneration comes from the client's status events and resets the
   // fence on connection replacement; sessionId+sequence come from the decoded
@@ -62,6 +67,9 @@ function createShowEventRouter({
     timerApi: loopFallback?.timerApi,
     now,
     onFallback(payload, context) {
+      if (!sameTrackLineage(admittedTrack, payload)) {
+        return;
+      }
       const routedEvent = routeEvent({
         type: "DJ_LOOP_FALLBACK",
         source: "action",
@@ -103,10 +111,105 @@ function createShowEventRouter({
     return syndocalClient.getStatus?.().state || "unknown";
   }
 
-  function currentMasterDeck() {
-    const detectorState = detector.getState?.() || {};
-    const deck = Number(detectorState.currentMasterDeck);
-    return Number.isInteger(deck) && deck >= 1 ? deck : null;
+  function trackLineage(payload) {
+    const deck = Number(payload?.deck);
+    const deckId = typeof payload?.deckId === "string" ? payload.deckId : null;
+    const playSessionId = typeof payload?.playSessionId === "string" ? payload.playSessionId : null;
+    if (
+      !Number.isInteger(deck) ||
+      deck < 1 ||
+      deck > 4 ||
+      deckId !== `rekordbox-deck-${deck}` ||
+      !playSessionId ||
+      playSessionId.trim() !== playSessionId
+    ) {
+      return null;
+    }
+    return { deck, deckId, playSessionId };
+  }
+
+  function normalizedTrackIdentity(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    const exactString = (value) => (
+      typeof value === "string" && value.length > 0 && value.trim() === value ? value : null
+    );
+    const hasContentId = Object.hasOwn(payload, "contentId");
+    const hasTitle = Object.hasOwn(payload, "title");
+    const hasArtist = Object.hasOwn(payload, "artist");
+    if (hasContentId && !hasTitle && !hasArtist) {
+      const contentId = exactString(payload.contentId);
+      return contentId ? `content:${contentId}` : null;
+    }
+    if (!hasContentId && hasTitle && hasArtist) {
+      const title = exactString(payload.title);
+      const artist = exactString(payload.artist);
+      return title && artist ? `text:${title.toLocaleLowerCase()}\u0000${artist.toLocaleLowerCase()}` : null;
+    }
+    return null;
+  }
+
+  function trackCandidate(payload) {
+    const lineage = trackLineage(payload);
+    const identity = normalizedTrackIdentity(payload);
+    return lineage && identity ? { ...lineage, identity } : null;
+  }
+
+  function sameTrackLineage(left, right) {
+    return Boolean(
+      left &&
+      right &&
+      left.deck === right.deck &&
+      left.deckId === right.deckId &&
+      left.playSessionId === right.playSessionId,
+    );
+  }
+
+  function sameTrackCandidate(left, right) {
+    return sameTrackLineage(left, right) && left.identity === right.identity;
+  }
+
+  function admittedTrackTarget() {
+    return admittedTrack
+      ? {
+          deck: admittedTrack.deck,
+          deckId: admittedTrack.deckId,
+          playSessionId: admittedTrack.playSessionId,
+        }
+      : null;
+  }
+
+  function admitTrack(event, delivery) {
+    const candidate = trackCandidate(event?.payload);
+    const accepted = delivery?.state === "acknowledged" &&
+      ["accepted", "duplicate"].includes(delivery?.ack?.outcome);
+    if (!candidate || !accepted || releasedPlaySessions.has(candidate.playSessionId)) {
+      return false;
+    }
+    if (sameTrackCandidate(admittedTrack, candidate)) {
+      return true;
+    }
+    if (admittedTrack && !releasedPlaySessions.has(admittedTrack.playSessionId)) {
+      // A concurrent candidate may be observable and even mapped by the peer,
+      // but it cannot steal Stage 1 ownership from the admitted live session.
+      return false;
+    }
+    stage1LoopFallback.resetForSession();
+    admittedTrack = candidate;
+    activePlaySessionId = candidate.playSessionId;
+    released = false;
+    timelineSnapshotReady = false;
+    timelinePlaySessionId = null;
+    timelineReleaseEventId = null;
+    pendingHandoffEventId = null;
+    timelinePedalOwner = "dj";
+    // A measured loop can be present in the same snapshot as the candidate
+    // ACTIVE frame. It was intentionally held back until this terminal ACK
+    // established ownership, so flush that exact measured state now rather
+    // than waiting for Rekordbox to change its loop revision again.
+    detector.requestMeasuredLoopForSession?.(admittedTrackTarget());
+    return true;
   }
 
   function midiTarget(mapping, targetDeck) {
@@ -306,31 +409,25 @@ function createShowEventRouter({
 
   function onDetectorEvent(event) {
     if (!event || typeof event.type !== "string") return null;
-    if (event.type === "DJ_MASTER_TRACK_ACTIVE") {
-      const nextSession = event.payload?.playSessionId || null;
-      if (!nextSession) return null;
-      if (nextSession !== activePlaySessionId) {
-        stage1LoopFallback.resetForSession();
-        timelineSnapshotReady = false;
-        timelinePlaySessionId = null;
-        timelineReleaseEventId = null;
-        pendingHandoffEventId = null;
+    if (event.type === "DJ_TRACK_ACTIVE") {
+      const candidate = trackCandidate(event.payload);
+      if (!candidate || releasedPlaySessions.has(candidate.playSessionId)) return null;
+      if (sameTrackLineage(admittedTrack, candidate) && !sameTrackCandidate(admittedTrack, candidate)) {
+        return null;
       }
-      activePlaySessionId = nextSession;
-      if (!releasedPlaySessions.has(nextSession)) {
-        timelinePedalOwner = "dj";
-        return routeEvent(event);
-      }
-      return null;
+      return routeEvent(event);
     }
-    if (event.type === "DJ_MASTER_TRACK_SYNC" || event.type === "DJ_LOOP_STATE") {
-      const session = event.payload?.playSessionId || null;
-      if (!session || session !== activePlaySessionId || releasedPlaySessions.has(session)) return null;
-      if (event.type === "DJ_LOOP_STATE") {
-        const outcome = stage1LoopFallback.observeMeasured(event);
-        if (outcome.accepted && outcome.state === "contradictory") {
-          emitWarning("Stage 1 loop measurement contradicted the pending prediction; fallback suppressed", "rekordbox-hook");
-        }
+    if (event.type === "DJ_TRACK_SYNC") {
+      const candidate = trackCandidate(event.payload);
+      if (!candidate || !sameTrackCandidate(admittedTrack, candidate) || releasedPlaySessions.has(candidate.playSessionId)) return null;
+      return routeEvent(event);
+    }
+    if (event.type === "DJ_LOOP_STATE") {
+      const lineage = trackLineage(event.payload);
+      if (!lineage || !sameTrackLineage(admittedTrack, lineage) || releasedPlaySessions.has(lineage.playSessionId)) return null;
+      const outcome = stage1LoopFallback.observeMeasured(event);
+      if (outcome.accepted && outcome.state === "contradictory") {
+        emitWarning("Stage 1 loop measurement contradicted the pending prediction; fallback suppressed", "rekordbox-hook");
       }
       return routeEvent(event);
     }
@@ -413,6 +510,10 @@ function createShowEventRouter({
     timelineStateUpdatedAt = new Date(now()).toISOString();
     timelineSnapshotReady = true;
     pendingLoopDesired = null;
+    if (reannounceCandidatesAfterTimelineState && syndocalEnabled() && syndocalState() === "connected") {
+      reannounceCandidatesAfterTimelineState = false;
+      detector.requestCurrentTrackCandidates?.();
+    }
     const correlatedTimelineOwnership =
       timelineState === "running" &&
       timelinePedalOwner === "timeline" &&
@@ -457,6 +558,7 @@ function createShowEventRouter({
       // handleOpen sends an explicit state request. Do not permit timeline
       // actions until the authoritative snapshot answers that request.
       timelineSnapshotReady = false;
+      reannounceCandidatesAfterTimelineState = true;
     } else if (syndocalEnabled() && changed && nextState !== "connected") {
       timelineSnapshotReady = false;
       // A timeline-control session never falls back to Rekordbox MIDI merely
@@ -498,6 +600,9 @@ function createShowEventRouter({
             lastAction.reason = releaseMacroReason || lastAction.reason;
           }
         }
+        if (updated.type === "DJ_TRACK_ACTIVE") {
+          admitTrack(updated, delivery);
+        }
         emitter.emit("event", updated);
         if (
           updated.type === "DJ_RELEASE" &&
@@ -535,9 +640,6 @@ function createShowEventRouter({
   function onSnapshot(snapshot) {
     currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
     const result = detector.onSnapshot(currentSnapshot);
-    if (currentSnapshot.playback?.isPlaying === true) {
-      released = false;
-    }
     emitState();
     return result;
   }
@@ -996,17 +1098,16 @@ function createShowEventRouter({
       return blockedAction(normalized, "handoff-pending");
     }
     if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
-      const target = midiTarget("loopHalf", currentMasterDeck());
-      const detectorState = detector.getState?.() || {};
-      const master = target.targetDeck ? detectorState.decks?.[target.targetDeck] : null;
+      const owner = admittedTrackTarget();
+      if (!owner) {
+        return blockedAction("loop-half", "no-admitted-track-candidate");
+      }
+      const target = midiTarget("loopHalf", owner.deck);
       // Arm before attempting MIDI. A device/module failure is not evidence
       // that the physical F14 intent did not happen, so it cannot suppress the
       // independent response window.
       const fallbackIntent = stage1LoopFallback.begin({
-        deck: target.targetDeck,
-        deckId: `rekordbox-deck-${target.targetDeck}`,
-        masterDeckRevision: detectorState.masterDeckRevision,
-        playSessionId: master?.playSessionId,
+        ...owner,
       });
       let midiSent = false;
       let midiError = null;
@@ -1056,25 +1157,24 @@ function createShowEventRouter({
       // Release is a distinct physical intent. It cancels only the pending
       // Stage 1 prediction and never reuses its timer or payload shape.
       stage1LoopFallback.clear("release");
-      const target = releaseTarget(currentMasterDeck());
+      const owner = admittedTrackTarget();
+      if (!owner) {
+        return blockedAction("release", "no-admitted-track-candidate");
+      }
+      const target = releaseTarget(owner.deck);
       if (releaseMacro?.enabled === true) {
         return startReleaseMacro(target.targetDeck);
       }
       return sendLegacyRelease(target);
     }
     if (normalized === "track-active" || normalized === "track_active" || normalized === "test-track-active") {
-      const detectorEvent = detector.requestCurrentMasterActive();
-      const routedEvent = detectorEvent && lastRoutedEvent?.eventId === detectorEvent.eventId
-        ? lastRoutedEvent
-        : null;
-      const delivery = routedEvent?.delivery || null;
       return emitAction({
         action: "track-active",
         mode,
-        ok: Boolean(detectorEvent && delivery?.ok !== false),
-        reason: detectorEvent ? (delivery?.reason || null) : "no-active-master-track",
-        detectorEvent,
-        delivery,
+        ok: false,
+        ignored: true,
+        reason: "candidate-active-is-automatic",
+        delivery: null,
       });
     }
     return { action: normalized, mode, ok: false, reason: "unknown-action" };
@@ -1082,9 +1182,9 @@ function createShowEventRouter({
 
   function getStateSync() {
     const detectorState = detector.getState();
-    const masterDeck = detectorState.currentMasterDeck;
-    const master = masterDeck ? detectorState.decks?.[masterDeck] : null;
-    const track = master?.track || null;
+    const owner = admittedTrackTarget();
+    const ownerState = owner ? detectorState.decks?.[owner.deck] : null;
+    const track = ownerState?.track || null;
     return {
       loopDivision,
       released,
@@ -1102,18 +1202,24 @@ function createShowEventRouter({
       releaseMacroPhase,
       releaseMacroReason,
       lastAction,
-      masterDeck: masterDeck || null,
-      activePlaySessionId,
-      masterTrack: track
+      // `masterDeck` is deliberately not repurposed: under the generic v3
+      // capability contract these explicit fields describe show-control
+      // ownership, while Rekordbox MASTER remains diagnostic only.
+      ownerDeck: owner?.deck || null,
+      ownerDeckId: owner?.deckId || null,
+      activePlaySessionId: owner ? activePlaySessionId : null,
+      ownerWireIdentity: admittedTrack?.identity || null,
+      ownerTrack: track
         ? {
             contentId: track.contentId || null,
             title: track.title || null,
             artist: track.artist || null,
             trackBpm: Number.isFinite(track.trackBpm) ? track.trackBpm : null,
-            isPlaying: master?.playback?.isPlaying === true,
+            isPlaying: ownerState?.playback?.isPlaying === true,
           }
         : null,
-      masterDeckSource: detectorState.masterDeckSource,
+      ownerSource: owner ? "acknowledged-track-candidate" : "none",
+      admittedTrack: owner,
       updatedAt: new Date(now()).toISOString(),
     };
   }
@@ -1139,6 +1245,15 @@ function createShowEventRouter({
       loopDivision,
       stage1LoopFallback: stage1LoopFallback.getState(),
       released,
+      ownerDeck: admittedTrack?.deck || null,
+      ownerDeckId: admittedTrack?.deckId || null,
+      activePlaySessionId: admittedTrack ? activePlaySessionId : null,
+      ownerWireIdentity: admittedTrack?.identity || null,
+      ownerTrack: (() => {
+        const owner = admittedTrackTarget();
+        const state = owner ? detector.getState().decks?.[owner.deck] : null;
+        return state?.track ? { ...state.track } : null;
+      })(),
       snapshotUpdatedAt: currentSnapshot?.updatedAt || null,
       syndocal: syndocalClient.getStatus(),
       midi: midi.getStatus(),

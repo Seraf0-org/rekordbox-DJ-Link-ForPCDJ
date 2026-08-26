@@ -13,7 +13,7 @@ const {
   parseAndValidateTemplate,
 } = require("../scripts/init-show-config");
 
-test("bundled v1.1.5 template is token-free and matches the strict show contract", () => {
+test("bundled v1.1.6 template is token-free and matches the strict show contract", () => {
   const raw = fs.readFileSync(TEMPLATE_PATH, "utf8");
   const config = parseAndValidateTemplate(raw);
 
@@ -24,13 +24,13 @@ test("bundled v1.1.5 template is token-free and matches the strict show contract
   assert.equal(config.syndocal.nic, "192.168.50.2");
   assert.equal(config.midi.device, "CustomMIDI1");
   assert.equal(config.midi.releaseMacro.enabled, false);
-  assert.equal(TARGET_PATH, String.raw`C:\SyndocalShow\dj-agent-v1.1.5.json`);
+  assert.equal(TARGET_PATH, String.raw`C:\SyndocalShow\dj-agent-v1.1.6.json`);
 });
 
 test("initializer creates the external file exactly once without mutating the template", (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-show-config-"));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
-  const targetPath = path.join(tempRoot, "external", "dj-agent-v1.1.5.json");
+  const targetPath = path.join(tempRoot, "external", "dj-agent-v1.1.6.json");
   const templateBefore = fs.readFileSync(TEMPLATE_PATH);
 
   const result = initializeShowConfig({ targetPath });
@@ -43,7 +43,7 @@ test("initializer creates the external file exactly once without mutating the te
 test("initializer refuses to overwrite any existing target, including invalid JSON", (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-show-config-existing-"));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
-  const targetPath = path.join(tempRoot, "dj-agent-v1.1.5.json");
+  const targetPath = path.join(tempRoot, "dj-agent-v1.1.6.json");
   const existing = "not-json-and-must-remain-byte-identical\n";
   fs.writeFileSync(targetPath, existing, "utf8");
 
@@ -58,7 +58,7 @@ test("initializer rejects a template containing a substituted token before creat
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-show-config-hostile-"));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
   const templatePath = path.join(tempRoot, "hostile.json");
-  const targetPath = path.join(tempRoot, "external", "dj-agent-v1.1.5.json");
+  const targetPath = path.join(tempRoot, "external", "dj-agent-v1.1.6.json");
   const hostile = fs.readFileSync(TEMPLATE_PATH, "utf8").replace(
     TOKEN_PLACEHOLDER,
     "0123456789abcdef0123456789abcdef",

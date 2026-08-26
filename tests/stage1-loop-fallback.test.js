@@ -47,8 +47,22 @@ function identity() {
   return {
     deck: 1,
     deckId: "rekordbox-deck-1",
-    masterDeckRevision: 3,
     playSessionId: "play-session-3",
+  };
+}
+
+function candidateTrack() {
+  return {
+    ...identity(),
+    contentId: "loop-fixture-track",
+    trackBpm: 120,
+    positionAtSendSec: 12.5,
+    effectiveBpm: 120,
+    positionRevision: 1,
+    sampleAgeMs: 0,
+    isPlaying: true,
+    startedAt: "2026-08-26T00:00:00.000Z",
+    loop: null,
   };
 }
 
@@ -396,7 +410,6 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
   const detector = new EventEmitter();
   detector.getState = () => ({
     currentMasterDeck: 1,
-    masterDeckRevision: 3,
     decks: { 1: { playSessionId: "play-session-3" } },
   });
   const client = new EventEmitter();
@@ -424,9 +437,15 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
     loopFallback: { responseWindowMs: 250, timerApi: timers },
   });
   detector.emit("event", {
-    type: "DJ_MASTER_TRACK_ACTIVE",
+    type: "DJ_TRACK_ACTIVE",
     eventId: "active-1",
-    payload: identity(),
+    payload: candidateTrack(),
+  });
+  client.emit("delivery", {
+    eventId: "active-1",
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
   });
 
   const loop = router.triggerAction("loop-half");
@@ -461,7 +480,6 @@ test("stopping the router clears an armed F14 fallback before transport shutdown
   const detector = new EventEmitter();
   detector.getState = () => ({
     currentMasterDeck: 1,
-    masterDeckRevision: 3,
     decks: { 1: { playSessionId: "play-session-3" } },
   });
   const client = new EventEmitter();
@@ -486,6 +504,13 @@ test("stopping the router clears an armed F14 fallback before transport shutdown
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
     loopFallback: { responseWindowMs: 250, timerApi: timers },
   });
+  detector.emit("event", { type: "DJ_TRACK_ACTIVE", eventId: "active-1", payload: candidateTrack() });
+  client.emit("delivery", {
+    eventId: "active-1",
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
   router.triggerAction("loop-half");
   assert.equal(timers.size(), 1);
   router.stop();
@@ -497,7 +522,6 @@ test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fa
   const detector = new EventEmitter();
   detector.getState = () => ({
     currentMasterDeck: 1,
-    masterDeckRevision: 3,
     decks: { 1: { playSessionId: "play-session-3" } },
   });
   const client = new EventEmitter();
@@ -531,7 +555,13 @@ test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fa
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
     releaseMacro: { enabled: true, sequence: "parallel", filter: {} },
   });
-  detector.emit("event", { type: "DJ_MASTER_TRACK_ACTIVE", eventId: "active-1", payload: identity() });
+  detector.emit("event", { type: "DJ_TRACK_ACTIVE", eventId: "active-1", payload: candidateTrack() });
+  client.emit("delivery", {
+    eventId: "active-1",
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
   router.triggerAction("release");
   await new Promise((resolve) => setImmediate(resolve));
   const release = sent.find((event) => event.type === "DJ_RELEASE");

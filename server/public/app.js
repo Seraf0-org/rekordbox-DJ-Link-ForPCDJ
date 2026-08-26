@@ -54,6 +54,8 @@ const djAgentPanelEl = document.getElementById("djAgentPanel");
 const djAgentSyndocalStatusEl = document.getElementById("djAgentSyndocalStatus");
 const djAgentMidiStatusEl = document.getElementById("djAgentMidiStatus");
 const djAgentModeEl = document.getElementById("djAgentMode");
+const djAgentOwnerRowEl = document.getElementById("djAgentOwnerRow");
+const djAgentOwnerEl = document.getElementById("djAgentOwner");
 const djAgentTimelineStateEl = document.getElementById("djAgentTimelineState");
 const djAgentTimelineLoopEl = document.getElementById("djAgentTimelineLoop");
 const djAgentReleaseMacroEl = document.getElementById("djAgentReleaseMacro");
@@ -119,8 +121,8 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.5.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.5.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.6.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.6.csv",
   valid: null,
 };
 const djAgentSetupDraft = {
@@ -328,6 +330,13 @@ function renderDjAgentStatus(status) {
     djAgentModeEl.textContent = String(agent.mode || "dj-control").toUpperCase();
     djAgentModeEl.classList.toggle("connected", agent.mode === "timeline-control");
   }
+  const admittedOwner = formatAdmittedOwner(agent);
+  if (djAgentOwnerRowEl) {
+    djAgentOwnerRowEl.hidden = admittedOwner === null;
+  }
+  if (djAgentOwnerEl && admittedOwner !== null) {
+    djAgentOwnerEl.textContent = admittedOwner;
+  }
   if (djAgentTimelineStateEl) {
     const state = agent.timelineState || "unknown";
     djAgentTimelineStateEl.textContent = String(state).toUpperCase();
@@ -381,6 +390,41 @@ function renderDjAgentStatus(status) {
     djAgentActionResultEl.textContent = text;
     djAgentActionResultEl.classList.toggle("error", failure);
   }
+}
+
+function formatAdmittedOwner(agent) {
+  if (agent?.released === true) {
+    return null;
+  }
+  const deck = Number(agent?.ownerDeck);
+  const deckId = typeof agent?.ownerDeckId === "string" ? agent.ownerDeckId : null;
+  const sessionId = typeof agent?.activePlaySessionId === "string" ? agent.activePlaySessionId : null;
+  const wireIdentity = typeof agent?.ownerWireIdentity === "string" ? agent.ownerWireIdentity : null;
+  if (
+    !Number.isSafeInteger(deck) ||
+    deck < 1 ||
+    deck > 4 ||
+    deckId !== `rekordbox-deck-${deck}` ||
+    !sessionId ||
+    sessionId.trim() !== sessionId ||
+    !wireIdentity
+  ) {
+    return null;
+  }
+  let identity = null;
+  if (wireIdentity.startsWith("content:") && wireIdentity.length > "content:".length) {
+    identity = wireIdentity;
+  } else if (wireIdentity.startsWith("text:")) {
+    const parts = wireIdentity.slice("text:".length).split("\u0000");
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      identity = `text:${parts[0]} / ${parts[1]}`;
+    }
+  }
+  if (!identity) {
+    return null;
+  }
+  const shortSessionId = sessionId.length > 12 ? `${sessionId.slice(0, 12)}…` : sessionId;
+  return `Deck ${deck} (${deckId}) · session ${shortSessionId} · ${identity}`;
 }
 
 function isLocalDjAgentHost() {

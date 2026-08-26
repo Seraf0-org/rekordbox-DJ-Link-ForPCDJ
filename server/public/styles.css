@@ -815,6 +815,13 @@ button:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.dj-agent-owner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dj-agent-status.connected {
   color: var(--accent-color);
   font-weight: 700;

@@ -68,17 +68,13 @@ function strictV3TrackPayload(overrides = {}) {
   return {
     deck: 1,
     deckId: "rekordbox-deck-1",
-    masterDeckRevision: 1,
     contentId: "42",
-    title: "Life Over",
-    artist: "DSF",
     trackBpm: 120,
     positionAtSendSec: 12.5,
     effectiveBpm: 120,
     positionRevision: 1,
     sampleAgeMs: 0,
     isPlaying: true,
-    master: true,
     startedAt: "2026-08-25T00:00:00.000Z",
     playSessionId: "play-session-1",
     loop: null,
@@ -90,7 +86,6 @@ function strictV3LoopPayload(overrides = {}) {
   return {
     deck: 1,
     deckId: "rekordbox-deck-1",
-    masterDeckRevision: 1,
     playSessionId: "play-session-1",
     active: true,
     startBeat: 32,
@@ -130,6 +125,55 @@ function strictDetectorPlayback(deck, positionRevision, overrides = {}) {
     positionObservedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+let admittedCandidateCounter = 0;
+function admitCandidate(detector, client, { deck = 1 } = {}) {
+  assert.equal(typeof detector.onSnapshot, "function");
+  assert.equal(typeof detector.on, "function");
+  assert.equal(typeof detector.off, "function");
+  assert.equal(typeof client.emit, "function");
+  const sequence = ++admittedCandidateCounter;
+  let candidate = null;
+  const observe = (event) => {
+    if (event.type === "DJ_TRACK_ACTIVE" && event.payload.deck === deck) candidate = event;
+  };
+  detector.on("event", observe);
+  const snapshot = (isPlaying, positionRevision) => ({
+    deckNowPlaying: [{
+      deck,
+      contentId: `admitted-content-${sequence}`,
+      title: `Admitted ${sequence}`,
+      artist: "Test",
+      trackBpm: 120,
+    }],
+    deckPlaybacks: [{
+      deck,
+      isPlaying,
+      bpm: 120,
+      positionSec: positionRevision,
+      positionRevision,
+      positionObservedAt: new Date().toISOString(),
+    }],
+  });
+  detector.onSnapshot(snapshot(false, sequence * 10 + 1));
+  detector.onSnapshot(snapshot(true, sequence * 10 + 2));
+  detector.off("event", observe);
+  assert.ok(candidate, "a fresh false-to-true sample must emit a candidate");
+  client.emit("delivery", {
+    eventId: candidate.eventId,
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
+  return candidate.payload;
+}
+
+function asEventedClient(client) {
+  client.on = EventEmitter.prototype.on;
+  client.off = EventEmitter.prototype.off;
+  client.emit = EventEmitter.prototype.emit;
+  return client;
 }
 
 test("python bridge factory returns lifecycle methods", () => {
@@ -506,7 +550,7 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
   midi.stop();
 });
 
-test("router sends pedal MIDI to the detector current master deck", () => {
+test("router sends Stage 1 MIDI to the acknowledged candidate deck", () => {
   const detector = createTrackActivityDetector({ idFactory: () => "master-midi-id" });
   detector.onSnapshot({
     masterDeck: 2,
@@ -531,16 +575,19 @@ test("router sends pedal MIDI to the detector current master deck", () => {
     stop() {},
   };
   let eventId = 0;
-  const client = {
-    sendEvent(event) {
-      return { sent: true, ok: true, state: "acknowledged", eventId: event.eventId || `midi-event-${++eventId}` };
-    },
-    getStatus: () => ({ state: "connected" }),
-    start() {},
-    stop() {},
-  };
+  const client = new EventEmitter();
+  client.sendEvent = (event) => ({
+    sent: true,
+    ok: true,
+    state: "acknowledged",
+    eventId: event.eventId || `midi-event-${++eventId}`,
+  });
+  client.getStatus = () => ({ enabled: true, state: "connected" });
+  client.start = () => {};
+  client.stop = () => {};
   const pedal = { start() {}, stop() {}, getStatus: () => ({ ok: true }) };
   const router = createShowEventRouter({ detector, syndocalClient: client, midi, pedal });
+  admitCandidate(detector, client, { deck: 2 });
 
   const loop = router.triggerAction("loop-half");
   assert.deepEqual(midiCalls[0], { name: "loopHalf", options: { targetDeck: 2 } });
@@ -613,6 +660,7 @@ test("stage 1 release macro runs filter and channel fader in parallel before sto
     stop() {},
   };
   const pedal = { start() {}, stop() {}, getStatus: () => ({ ok: true }) };
+  asEventedClient(client);
   const router = createShowEventRouter({
     detector,
     syndocalClient: client,
@@ -625,6 +673,7 @@ test("stage 1 release macro runs filter and channel fader in parallel before sto
       resetDelayMs: 0,
     },
   });
+  admitCandidate(detector, client);
   t.after(() => router.stop());
 
   const inactive = router.triggerAction("filter-close");
@@ -693,6 +742,7 @@ test("filter-then-fade release macro waits for Filter completion before any fade
     stop() {},
   };
   const actions = [];
+  asEventedClient(client);
   const router = createShowEventRouter({
     detector,
     syndocalClient: client,
@@ -706,6 +756,7 @@ test("filter-then-fade release macro waits for Filter completion before any fade
       resetDelayMs: 0,
     },
   });
+  admitCandidate(detector, client);
   router.on("action", (action) => actions.push(action));
   t.after(() => router.stop());
 
@@ -772,6 +823,7 @@ test("filter-then-fade failures never start the next phase or Stop/Release", () 
       start() {},
       stop() {},
     };
+    asEventedClient(client);
     const router = createShowEventRouter({
       detector,
       syndocalClient: client,
@@ -784,6 +836,7 @@ test("filter-then-fade failures never start the next phase or Stop/Release", () 
         resetAfterStop: true,
       },
     });
+    admitCandidate(detector, client);
     return { router, calls, filterOptions, fadeOptions, client, sent, getFilter: () => filterOptions, getFade: () => fadeOptions };
   };
 
@@ -791,7 +844,7 @@ test("filter-then-fade failures never start the next phase or Stop/Release", () 
   filterCase.router.triggerAction("release");
   filterCase.getFilter().onError({ reason: "filter-failed" });
   assert.deepEqual(filterCase.calls, ["filter-start"]);
-  assert.deepEqual(filterCase.sent, []);
+  assert.deepEqual(filterCase.sent.filter((event) => event.type === "DJ_RELEASE"), []);
   filterCase.router.stop();
 
   const fadeCase = makeRouter();
@@ -799,7 +852,7 @@ test("filter-then-fade failures never start the next phase or Stop/Release", () 
   fadeCase.getFilter().onComplete({ targetChannel: 1 });
   fadeCase.getFade().onError({ reason: "fade-failed" });
   assert.deepEqual(fadeCase.calls, ["filter-start", "fade-start", "filter"]);
-  assert.deepEqual(fadeCase.sent, []);
+  assert.deepEqual(fadeCase.sent.filter((event) => event.type === "DJ_RELEASE"), []);
   assert.equal(fadeCase.router.getStatus().releaseMacroPhase, "failed");
   fadeCase.router.stop();
 });
@@ -843,6 +896,7 @@ test("serial fade synchronous first-CC failure resets Filter exactly once", () =
     start() {},
     stop() {},
   };
+  asEventedClient(client);
   const router = createShowEventRouter({
     detector,
     syndocalClient: client,
@@ -854,6 +908,7 @@ test("serial fade synchronous first-CC failure resets Filter exactly once", () =
       filter: { startValue: 64, endValue: 127, resetValue: 64 },
     },
   });
+  admitCandidate(detector, client);
   const pending = router.triggerAction("release");
   assert.equal(pending.pending, true);
   filterOptions.onComplete({ targetChannel: 1 });
@@ -864,7 +919,7 @@ test("serial fade synchronous first-CC failure resets Filter exactly once", () =
   assert.equal(status.lastAction.phase, "failed");
   assert.equal(midiCalls.filter((call) => call.name === "filter" && call.value === 64).length, 1);
   assert.equal(midiCalls.some((call) => call.name === "stop"), false);
-  assert.deepEqual(sent, []);
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_RELEASE"), []);
   router.stop();
 });
 
@@ -895,6 +950,7 @@ test("release macro failure is truthful and never advances to stop or DJ_RELEASE
     start() {},
     stop() {},
   };
+  asEventedClient(client);
   const router = createShowEventRouter({
     detector,
     syndocalClient: client,
@@ -902,11 +958,12 @@ test("release macro failure is truthful and never advances to stop or DJ_RELEASE
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
     releaseMacro: { enabled: true, filter: { startValue: 64, endValue: 127 } },
   });
+  admitCandidate(detector, client);
   const result = router.triggerAction("release");
   assert.equal(result.ok, false);
   assert.match(result.reason, /release-fade|midi-not-connected/);
   assert.deepEqual(midiCalls, ["filter"]);
-  assert.deepEqual(sent, []);
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_RELEASE"), []);
   router.stop();
 });
 
@@ -952,7 +1009,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
-  const timelineSession = detector.getState().decks[1].playSessionId;
+  const timelineSession = admitCandidate(detector, client).playSessionId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
@@ -1092,7 +1149,7 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
-  const sessionA = detector.getState().decks[1].playSessionId;
+  const sessionA = admitCandidate(detector, client).playSessionId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
@@ -1122,13 +1179,13 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
       explicitMasterDeck: 1,
       explicitMasterUpdatedAt: new Date().toISOString(),
       deckNowPlaying: [{ deck: 1, contentId, title: "Next Track", artist: "DSF", trackBpm: 120 }],
-      deckPlaybacks: [strictDetectorPlayback(1, 2, { isPlaying: false })],
+      deckPlaybacks: [strictDetectorPlayback(1, 1_000, { isPlaying: false })],
     });
     detector.onSnapshot({
       explicitMasterDeck: 1,
       explicitMasterUpdatedAt: new Date().toISOString(),
       deckNowPlaying: [{ deck: 1, contentId, title: "Next Track", artist: "DSF", trackBpm: 120 }],
-      deckPlaybacks: [strictDetectorPlayback(1, 3)],
+      deckPlaybacks: [strictDetectorPlayback(1, 1_001)],
     });
     return detector.getState().decks[1].playSessionId;
   };
@@ -1170,19 +1227,15 @@ test("stage2 timeline actions stamp the exact current authoritative playSessionI
   router.stop();
 });
 
-test("absent or replaced stage2 session authority rejects locally without sending", () => {
+test("an unacknowledged replacement cannot take a released Stage 2 owner", () => {
   const { router, client, sent, midiCalls, sessionA, replaceSession } = createStage2TimelineFixture();
   const sessionB = replaceSession("next-b");
   assert.notEqual(sessionB, sessionA);
-  const replacement = sent.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").at(-1);
+  const replacement = sent.filter((event) => event.type === "DJ_TRACK_ACTIVE").at(-1);
   assert.equal(replacement.payload.playSessionId, sessionB);
-  for (const action of ["release", "loop-half", "filter-close"]) {
-    const blocked = router.triggerAction(action);
-    assert.equal(blocked.ok, false);
-    assert.equal(blocked.reason, "timeline-state-pending");
-    assert.equal(blocked.delivery, null);
-    assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
-  }
+  const stillOwnedByA = router.triggerAction("release");
+  assert.equal(stillOwnedByA.ok, true);
+  assert.equal(sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").payload.playSessionId, sessionA);
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
@@ -1193,11 +1246,11 @@ test("absent or replaced stage2 session authority rejects locally without sendin
     pedalOwner: "dj",
     releaseEventId: null,
   });
-  assert.equal(router.getStatus().mode, "dj-control");
-  const stage1Loop = router.triggerAction("loop-half");
-  assert.equal(stage1Loop.midiSent, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf"]);
-  assert.equal(sent.some((event) => event.type.startsWith("DJ_TIMELINE_")), false);
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  const blocked = router.triggerAction("loop-half");
+  assert.equal(blocked.reason, "handoff-pending");
+  assert.equal(blocked.midiSent, false);
+  assert.deepEqual(midiCalls, ["stop"]);
   router.stop();
 });
 
@@ -1227,15 +1280,16 @@ test("a queued stage2 command keeps its original playSessionId when the session 
   });
   assert.equal(router.getStatus().lastTimelineAction.ok, true);
   assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 1);
-  const blocked = router.triggerAction("release");
-  assert.equal(blocked.reason, "timeline-state-pending");
+  const nextCommand = router.triggerAction("release");
+  assert.equal(nextCommand.delivery.state, "pending");
+  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").at(-1).payload.playSessionId, sessionA);
   assert.deepEqual(queuedEvent.payload, {
     bars: 4,
     timelineId: "show-1",
     playSessionId: sessionA,
     source: "pedal",
   });
-  assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 1);
+  assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 2);
   router.stop();
 });
 
@@ -1318,7 +1372,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
-  const session = detector.getState().decks[1].playSessionId;
+  const session = admitCandidate(detector, client).playSessionId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
@@ -1468,7 +1522,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
     heartbeatMs: 60_000,
     reconnectMinMs: 10,
     reconnectMaxMs: 20,
-    stateSyncProvider: () => ({ released: false, masterDeck: 1, activePlaySessionId: "play-session-1" }),
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
   });
   t.after(() => client.stop());
   const detector = createTrackActivityDetector({ idFactory: (() => {
@@ -1574,7 +1628,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
   assert.equal(warnings.filter((message) => message === "Stale duplicate DJ_TIMELINE_STATE ignored").length, 3);
 });
 
-test("Syndocal disconnect does not gate Stage 1 local MIDI actions", () => {
+test("Stage 1 actions fail closed without an acknowledged candidate", () => {
   const detector = createTrackActivityDetector({ idFactory: () => "snapshot-gate-id" });
   const client = new EventEmitter();
   let connection = { enabled: true, state: "disconnected" };
@@ -1612,39 +1666,40 @@ test("Syndocal disconnect does not gate Stage 1 local MIDI actions", () => {
   });
 
   const release = router.triggerAction("release");
-  assert.equal(release.midiSent, true);
+  assert.equal(release.midiSent, false);
   assert.equal(release.ok, false);
+  assert.equal(release.reason, "no-admitted-track-candidate");
   const loop = router.triggerAction("loop-half");
-  assert.equal(loop.midiSent, true);
-  // MIDI remains local and is attempted while disconnected. This fixture has
-  // no measured master/session identity, so it cannot also arm a v3 fallback.
+  assert.equal(loop.midiSent, false);
+  // This fixture has no acknowledged identity/session, so local Stage 1 MIDI
+  // must not be emitted and no v3 fallback can be armed.
   assert.equal(loop.ok, false);
-  assert.equal(loop.reason, "loop-fallback-identity-unproven");
+  assert.equal(loop.reason, "no-admitted-track-candidate");
   assert.equal(router.triggerAction("filter-close").ignored, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf"]);
+  assert.deepEqual(midiCalls, []);
 
   connection = { enabled: true, state: "connected" };
   client.emit("status", connection);
-  assert.equal(router.triggerAction("loop-half").midiSent, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf", "loopHalf"]);
+  assert.equal(router.triggerAction("loop-half").midiSent, false);
+  assert.deepEqual(midiCalls, []);
 
   client.emit("timeline-state", { state: "idle", loopActive: false });
   assert.equal(router.getStatus().mode, "dj-control");
-  assert.equal(router.triggerAction("loop-half").midiSent, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf", "loopHalf", "loopHalf"]);
+  assert.equal(router.triggerAction("loop-half").midiSent, false);
+  assert.deepEqual(midiCalls, []);
 
   connection = { enabled: true, state: "disconnected" };
   client.emit("status", connection);
-  assert.equal(router.triggerAction("release").midiSent, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf", "loopHalf", "loopHalf", "stop"]);
+  assert.equal(router.triggerAction("release").midiSent, false);
+  assert.deepEqual(midiCalls, []);
   connection = { enabled: true, state: "connected" };
   client.emit("status", connection);
-  assert.equal(router.triggerAction("loop-half").midiSent, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf", "loopHalf", "loopHalf", "stop", "loopHalf"]);
+  assert.equal(router.triggerAction("loop-half").midiSent, false);
+  assert.deepEqual(midiCalls, []);
 
   client.emit("timeline-state", { state: "stopped", loopActive: false });
   assert.equal(router.triggerAction("filter-close").ignored, true);
-  assert.deepEqual(midiCalls, ["stop", "loopHalf", "loopHalf", "loopHalf", "stop", "loopHalf"]);
+  assert.deepEqual(midiCalls, []);
   router.stop();
 });
 
@@ -1682,7 +1737,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
-  const handoffSession = detector.getState().decks[1].playSessionId;
+  const handoffSession = admitCandidate(detector, client).playSessionId;
   client.emit("timeline-state", {
     state: "running",
     loopActive: false,
@@ -1784,6 +1839,7 @@ test("synchronous DJ_RELEASE send failure returns to dj-control and remains retr
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
   });
+  admitCandidate(detector, client);
   client.emit("timeline-state", { state: "idle", loopActive: false });
   const first = router.triggerAction("release");
   assert.equal(first.delivery.state, "send-failed");
@@ -1819,6 +1875,7 @@ test("Stage 1 release routes physical DJ_RELEASE when local Stop MIDI fails", ()
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
   });
+  admitCandidate(detector, client);
   client.emit("timeline-state", { state: "idle", loopActive: false });
   const result = router.triggerAction("release");
   assert.equal(result.reason, "local-midi-failed");
@@ -1826,7 +1883,7 @@ test("Stage 1 release routes physical DJ_RELEASE when local Stop MIDI fails", ()
   assert.equal(result.ok, false);
   assert.equal(result.delivery.state, "acknowledged");
   assert.equal(router.getStatus().mode, "handoff-pending");
-  assert.deepEqual(sent.map((event) => event.type), ["DJ_RELEASE"]);
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_RELEASE").map((event) => event.type), ["DJ_RELEASE"]);
   router.stop();
 });
 
@@ -1854,7 +1911,7 @@ test("track activity does not make a track load a master timeline event", () => 
   assert.deepEqual(events.map((event) => event.type), [
     "DJ_TRACK_LOADED",
     "DJ_TRACK_PLAY_STARTED",
-    "DJ_MASTER_TRACK_ACTIVE",
+    "DJ_TRACK_ACTIVE",
   ]);
   detector.onSnapshot({
     explicitMasterDeck: 1,
@@ -1862,7 +1919,7 @@ test("track activity does not make a track load a master timeline event", () => 
     deckNowPlaying: [{ deck: 1, contentId: "track-a", title: "A", artist: "Artist" }],
     deckPlaybacks: [strictDetectorPlayback(1, 3, { positionSec: 0.2 })],
   });
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
 });
 
 test("explicit master change activates an already-playing deck exactly once", () => {
@@ -1885,8 +1942,8 @@ test("explicit master change activates an already-playing deck exactly once", ()
   detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   assert.equal(events.filter((event) => event.type === "DJ_MASTER_CHANGED").length, 0);
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
-  assert.equal(events.find((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").payload.contentId, "b");
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+  assert.equal(events.find((event) => event.type === "DJ_TRACK_ACTIVE").payload.contentId, "b");
 });
 
 test("contentId enrichment after fallback metadata does not duplicate one play session", () => {
@@ -1907,7 +1964,7 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
       positionObservedAt: new Date(time).toISOString(),
     })],
   });
-  const firstActive = events.find((event) => event.type === "DJ_MASTER_TRACK_ACTIVE");
+  const firstActive = events.find((event) => event.type === "DJ_TRACK_ACTIVE");
   const firstState = detector.getState().decks[1];
 
   time = 2_000;
@@ -1929,7 +1986,7 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
 
   const state = detector.getState().decks[1];
   assert.equal(finiteNumber(null), null);
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
   assert.equal(events.filter((event) => event.type === "DJ_TRACK_LOADED").length, 1);
   assert.equal(firstActive.payload.playSessionId, state.playSessionId);
   assert.equal(firstActive.payload.startedAt, state.startedAt);
@@ -1956,7 +2013,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   const previous = detector.getState().decks[1];
   time = 11_000;
   detector.onTrackLoaded({ deck: 1, contentId: "new", title: "New", artist: "Artist" });
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
 
   detector.onSnapshot({
     explicitMasterDeck: 1,
@@ -1965,7 +2022,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
     deckPlaybacks: [strictDetectorPlayback(1, 2, { positionObservedAt: new Date(time).toISOString() })],
   });
   const preloaded = detector.getState().decks[1];
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
   assert.equal(preloaded.playSessionId, null);
   assert.equal(preloaded.awaitingPlayConfirmation, true);
 
@@ -1988,7 +2045,7 @@ test("a preloaded track with stale isPlaying waits for explicit play transition"
   const next = detector.getState().decks[1];
   assert.notEqual(next.playSessionId, previous.playSessionId);
   assert.equal(next.startedAt, new Date(time).toISOString());
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 2);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 2);
 });
 
 test("master_change waits for a fresh position/BPM sample before activating", () => {
@@ -2010,14 +2067,14 @@ test("master_change waits for a fresh position/BPM sample before activating", ()
   const authorityAt = new Date().toISOString();
   detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
   detector.onMasterChange({ deck: 2, explicitMasterUpdatedAt: authorityAt });
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
   detector.onSnapshot({
     explicitMasterDeck: 2,
     explicitMasterUpdatedAt: authorityAt,
     deckNowPlaying: [{ deck: 2, contentId: "b", title: "B", artist: "Two" }],
     deckPlaybacks: [strictDetectorPlayback(2, 1, { positionSec: 4 })],
   });
-  const activeEvents = events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE");
+  const activeEvents = events.filter((event) => event.type === "DJ_TRACK_ACTIVE");
   assert.equal(activeEvents.length, 1);
   assert.equal(activeEvents[0].payload.positionAtSendSec, 4);
   assert.equal(activeEvents[0].payload.contentId, "b");
@@ -2064,12 +2121,12 @@ test("Hook provider order keeps fallback track active emission single", async (t
   await send({ type: "track_load", deck: 1, contentId: 42 });
   await new Promise((resolve) => setTimeout(resolve, 35));
 
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
   assert.equal(events.filter((event) => event.type === "DJ_TRACK_LOADED").length, 2);
   assert.equal(detector.getState().decks[1].track.contentId, "42");
 });
 
-test("playback fallback stays stable but cannot activate until an explicit master change", async (t) => {
+test("playback fallback is diagnostic only and does not suppress a valid per-deck candidate", async (t) => {
   const port = 46_000 + Math.floor(Math.random() * 1_000);
   const provider = createHookUdpProvider({ enabled: true, port });
   const detector = createTrackActivityDetector({ idFactory: (() => {
@@ -2119,19 +2176,20 @@ test("playback fallback stays stable but cannot activate until an explicit maste
   await send({ type: "track_load", deck: 1, contentId: 46913811 });
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 0);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
   assert.equal(new Set(snapshots.map((snapshot) => snapshot.masterDeck)).size, 1);
   assert.equal(snapshots.at(-1).masterDeck, 1);
   assert.equal(snapshots.at(-1).source, "playback-fallback");
 
-  // A real master change is explicit and must still activate the already-playing deck.
+  // A later explicit master change may announce deck 2 independently because
+  // its title+artist metadata is also an exact candidate identity.
   await send({ type: "olvc", deck: 2, name: "@OriginalBPM", value: 12_000 });
   await send({ type: "olvc", deck: 2, name: "@BPM", value: 12_000 });
   await send({ type: "olvc", deck: 2, name: "@CurrentTime", value: 5_100 });
   await send({ type: "olvc", deck: 2, name: "@IsPlaying", value: 1 });
   await send({ type: "master_change", deck: 2 });
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(events.filter((event) => event.type === "DJ_MASTER_TRACK_ACTIVE").length, 1);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 2);
   assert.equal(snapshots.at(-1).masterDeck, 2);
   assert.equal(snapshots.at(-1).source, "explicit-master-change");
 });
@@ -2329,8 +2387,6 @@ test("real router getStateSync is encoded as a strict v3 State Sync frame", asyn
   assert.equal(socket.sent[1].type, "DJ_STATE_SYNC");
   assert.deepEqual(socket.sent[1].payload, {
     released: false,
-    masterDeck: "2",
-    activePlaySessionId: null,
   });
 
   socket.emit("message", JSON.stringify({
@@ -2804,7 +2860,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
   assert.equal(socket.sent.some((frame) => frame.type === "DJ_MASTER_CHANGED"), false);
 
   const rejectedTrack = client.sendEvent({
-    type: "DJ_MASTER_TRACK_ACTIVE",
+    type: "DJ_TRACK_ACTIVE",
     payload: strictV3TrackPayload({
       deck: 2,
       deckId: "rekordbox-deck-2",
@@ -2892,7 +2948,7 @@ test("invalid State Sync snapshots never send or request timeline, then recover 
       if (mode === "null") return null;
       if (mode === "undefined") return undefined;
       if (mode === "invalid") return { loopDivision: "bad" };
-      return { released: false, masterDeck: 1, activePlaySessionId: null };
+      return { released: false };
     },
   });
   client.on("state-sync-error", (failure) => errors.push(failure));
@@ -3500,7 +3556,7 @@ test("MIDI and pedal adapters stay safe when optional hardware is absent", () =>
   pedal.stop();
 });
 
-test("router keeps identity-unproven local loop action off the disconnected network", () => {
+test("router keeps identity-unproven Stage 1 actions off the disconnected network", () => {
   const sent = [];
   const detector = createTrackActivityDetector({ idFactory: () => "id" });
   const client = {
@@ -3534,16 +3590,17 @@ test("router keeps identity-unproven local loop action off the disconnected netw
   const routedEvents = [];
   router.on("event", (event) => routedEvents.push(event));
   const result = router.triggerAction("loop-half");
-  assert.equal(result.midiSent, true);
+  assert.equal(result.midiSent, false);
   assert.equal(result.ok, false);
-  assert.equal(result.reason, "loop-fallback-identity-unproven");
+  assert.equal(result.reason, "no-admitted-track-candidate");
   assert.equal(result.delivery, null);
-  assert.deepEqual(midiCalls, ["loopHalf"]);
+  assert.deepEqual(midiCalls, []);
   assert.deepEqual(sent, []);
   assert.deepEqual(routedEvents, []);
   const releaseResult = router.triggerAction("release");
   assert.equal(releaseResult.ok, false);
-  assert.equal(routedEvents.at(-1).type, "DJ_RELEASE");
+  assert.equal(releaseResult.reason, "no-admitted-track-candidate");
+  assert.deepEqual(routedEvents, []);
   router.stop();
 });
 
@@ -3554,6 +3611,7 @@ test("router correlates release timeout back to the same action event", async (t
     constructor() {
       super();
       this.readyState = 0;
+      this.sent = [];
       ActionWebSocket.instances.push(this);
       queueMicrotask(() => {
         this.readyState = 1;
@@ -3561,7 +3619,7 @@ test("router correlates release timeout back to the same action event", async (t
       });
     }
 
-    send() {}
+    send(value) { this.sent.push(JSON.parse(value)); }
 
     close() {
       this.readyState = 3;
@@ -3620,6 +3678,10 @@ test("router correlates release timeout back to the same action event", async (t
     deckNowPlaying: [{ deck: 1, contentId: "42", title: "Life Over", artist: "DSF", trackBpm: 120 }],
     deckPlaybacks: [strictDetectorPlayback(1, 1)],
   });
+  const activeFrame = socket.sent.find((frame) => frame.type === "DJ_TRACK_ACTIVE");
+  assert.ok(activeFrame);
+  socket.emit("message", JSON.stringify(strictV3Ack(activeFrame, "accepted")));
+  const actionSessionId = detector.getState().decks[1].playSessionId;
   socket.emit("message", JSON.stringify({
     v: 3,
     type: "DJ_TIMELINE_STATE",
@@ -3632,7 +3694,7 @@ test("router correlates release timeout back to the same action event", async (t
       loopActive: false,
       timelineId: "life-over",
       positionBars: 0,
-      playSessionId: "play-session-1",
+      playSessionId: actionSessionId,
       pedalOwner: "dj",
       releaseEventId: null,
     },
@@ -3677,4 +3739,27 @@ test("web server does not monitor or automatically launch Rekordbox", () => {
     "utf8",
   );
   assert.match(injectorSource, /"--handoff-seconds"[\s\S]*?default=0/);
+});
+
+test("DJ Agent status carries and renders a separate admitted owner diagnostic", () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, "..", "server", "index.js"), "utf8");
+  const appSource = fs.readFileSync(path.join(__dirname, "..", "server", "public", "app.js"), "utf8");
+  const htmlSource = fs.readFileSync(path.join(__dirname, "..", "server", "public", "index.html"), "utf8");
+
+  for (const field of ["ownerDeck", "ownerDeckId", "activePlaySessionId", "ownerTrack"]) {
+    assert.match(serverSource, new RegExp(`${field}: routerStatus\\.${field}`));
+  }
+  assert.match(serverSource, /ownerWireIdentity: routerStatus\.ownerWireIdentity/);
+  assert.match(htmlSource, /id="djAgentOwnerRow" class="row" hidden/);
+  assert.match(htmlSource, /id="djAgentOwner" class="dj-agent-value dj-agent-owner"/);
+  assert.match(appSource, /function formatAdmittedOwner\(agent\)/);
+  assert.match(appSource, /djAgentOwnerRowEl\.hidden = admittedOwner === null/);
+  assert.match(appSource, /djAgentOwnerEl\.textContent = admittedOwner/);
+  assert.match(appSource, /agent\?\.released === true/);
+  assert.match(appSource, /deckId !== `rekordbox-deck-\$\{deck\}`/);
+  const ownerRenderer = appSource.slice(
+    appSource.indexOf("function formatAdmittedOwner"),
+    appSource.indexOf("function isLocalDjAgentHost"),
+  );
+  assert.doesNotMatch(ownerRenderer, /master/i, "owner diagnostics must not be rendered as MASTER diagnostics");
 });

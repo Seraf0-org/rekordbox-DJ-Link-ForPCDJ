@@ -95,6 +95,16 @@ function mergeTrackIdentity(previous, reported) {
   });
 }
 
+function wireIdentityForTrack(track) {
+  if (track?.contentId) {
+    return { contentId: track.contentId };
+  }
+  if (track?.title && track?.artist) {
+    return { title: track.title, artist: track.artist };
+  }
+  return null;
+}
+
 function normalizePlayback(entry = {}) {
   if (!entry || typeof entry !== "object") {
     return null;
@@ -240,13 +250,13 @@ function createTrackActivityDetector({
         previousIsPlaying: null,
         playSessionId: null,
         startedAt: null,
-        lastActiveSessionId: null,
-        lastActiveMasterGeneration: null,
+        wireIdentity: null,
+        lastCandidateActiveSessionId: null,
+        lastCandidateSyncPositionRevision: null,
         lastTrackLoadedKey: null,
         awaitingPlayConfirmation: false,
         pendingTrackChange: false,
         loop: null,
-        lastSyncPositionRevision: null,
         lastLoopEventRevision: null,
       };
       decks.set(deck, state);
@@ -312,7 +322,10 @@ function createTrackActivityDetector({
     };
   }
 
-  function strictTrackPayload(deck, state) {
+  // Candidate frames use the strict current wire identity: a contentId is
+  // authoritative and must not travel alongside display text. If no contentId
+  // is available, title and artist together are the only permitted fallback.
+  function strictCandidateTrackPayload(deck, state) {
     const track = state.track || {};
     const playback = state.playback || {};
     const observedMs = Date.parse(playback.positionObservedAt);
@@ -322,10 +335,18 @@ function createTrackActivityDetector({
       : Number.isFinite(track.trackBpm) && track.trackBpm > 0
         ? track.trackBpm
         : null;
-    const exactTrackIdentity = track.contentId || (track.title && track.artist);
+    const startedAt = typeof state.startedAt === "string" && Number.isFinite(Date.parse(state.startedAt))
+      ? state.startedAt
+      : null;
+    // The first emitted candidate fixes the one-of wire identity for the
+    // session. Later Hook metadata may enrich state.track for diagnostics,
+    // but must never launder the same wire session from title+artist to a
+    // contentId (or the reverse).
+    const identity = state.wireIdentity || wireIdentityForTrack(track);
     if (
       !state.playSessionId ||
-      !exactTrackIdentity ||
+      !startedAt ||
+      !identity ||
       !Number.isFinite(playback.positionSec) ||
       playback.positionSec < 0 ||
       !Number.isFinite(effectiveBpm) ||
@@ -341,87 +362,65 @@ function createTrackActivityDetector({
     return {
       deck,
       deckId: `rekordbox-deck-${deck}`,
-      masterDeckRevision: masterActivationGeneration,
-      contentId: track.contentId || null,
-      title: track.title || null,
-      artist: track.artist || null,
-      trackBpm: Number.isFinite(track.trackBpm) ? track.trackBpm : null,
+      ...identity,
+      ...(Number.isFinite(track.trackBpm) && track.trackBpm > 0
+        ? { trackBpm: track.trackBpm }
+        : {}),
       positionAtSendSec: playback.positionSec,
       effectiveBpm,
       positionRevision: playback.positionRevision,
       sampleAgeMs,
       isPlaying: true,
-      master: true,
-      startedAt: state.startedAt || null,
-      playSessionId: state.playSessionId || null,
+      startedAt,
+      playSessionId: state.playSessionId,
       loop: currentLoopPayload(state.loop),
     };
   }
 
-  function maybeEmitActive(deck, state, { force = false, allowAwaiting = false } = {}) {
-    const master = currentMasterDeck();
+  function maybeEmitCandidateActive(deck, state) {
     if (
-      master !== deck ||
-      explicitMasterDeck !== deck ||
       state.playback?.isPlaying !== true ||
-      !state.track?.identity
+      !state.playSessionId ||
+      state.lastCandidateActiveSessionId === state.playSessionId
     ) {
       return null;
     }
-    if (state.awaitingPlayConfirmation && !allowAwaiting) {
-      return null;
-    }
-    if (allowAwaiting) {
-      state.awaitingPlayConfirmation = false;
-    }
-    if (!state.playSessionId) {
-      state.playSessionId = idFactory();
-      state.startedAt = state.startedAt || new Date(now()).toISOString();
-    }
-    if (
-      !force &&
-      state.lastActiveSessionId === state.playSessionId &&
-      state.lastActiveMasterGeneration === masterActivationGeneration
-    ) {
-      return null;
-    }
-    const payload = strictTrackPayload(deck, state);
+    const payload = strictCandidateTrackPayload(deck, state);
     if (!payload) {
       return null;
     }
-    state.lastActiveSessionId = state.playSessionId;
-    state.lastActiveMasterGeneration = masterActivationGeneration;
-    state.lastSyncPositionRevision = payload.positionRevision;
-    return emitEvent("DJ_MASTER_TRACK_ACTIVE", payload);
+    state.wireIdentity ||= wireIdentityForTrack(payload);
+    state.lastCandidateActiveSessionId = state.playSessionId;
+    state.lastCandidateSyncPositionRevision = payload.positionRevision;
+    return emitEvent("DJ_TRACK_ACTIVE", payload);
   }
 
-  function maybeEmitSync(deck, state) {
+  function maybeEmitCandidateSync(deck, state) {
     if (
-      currentMasterDeck() !== deck ||
-      explicitMasterDeck !== deck ||
       state.playback?.isPlaying !== true ||
-      state.lastActiveSessionId !== state.playSessionId ||
-      state.lastActiveMasterGeneration !== masterActivationGeneration
+      !state.playSessionId ||
+      state.lastCandidateActiveSessionId !== state.playSessionId
     ) {
       return null;
     }
-    const payload = strictTrackPayload(deck, state);
-    if (!payload || payload.positionRevision <= Number(state.lastSyncPositionRevision || 0)) {
+    const payload = strictCandidateTrackPayload(deck, state);
+    if (
+      !payload ||
+      payload.positionRevision <= Number(state.lastCandidateSyncPositionRevision || 0)
+    ) {
       return null;
     }
-    state.lastSyncPositionRevision = payload.positionRevision;
-    return emitEvent("DJ_MASTER_TRACK_SYNC", payload);
+    state.lastCandidateSyncPositionRevision = payload.positionRevision;
+    return emitEvent("DJ_TRACK_SYNC", payload);
   }
 
-  function maybeEmitMeasuredLoop(deck, state) {
+  function maybeEmitMeasuredLoop(deck, state, { force = false } = {}) {
     const loop = currentLoopPayload(state.loop);
     if (
       !loop ||
-      currentMasterDeck() !== deck ||
-      explicitMasterDeck !== deck ||
       !state.playSessionId ||
-      state.lastActiveSessionId !== state.playSessionId ||
-      loop.revision <= Number(state.lastLoopEventRevision || 0)
+      state.lastCandidateActiveSessionId !== state.playSessionId ||
+      (!force && loop.revision <= Number(state.lastLoopEventRevision || 0))
     ) {
       return null;
     }
@@ -429,7 +428,6 @@ function createTrackActivityDetector({
     return emitEvent("DJ_LOOP_STATE", {
       deck,
       deckId: `rekordbox-deck-${deck}`,
-      masterDeckRevision: masterActivationGeneration,
       playSessionId: state.playSessionId,
       ...loop,
     });
@@ -595,9 +593,10 @@ function createTrackActivityDetector({
   }
 
   function onSnapshot(snapshot = {}) {
-    if (!updateMasterFromSnapshot(snapshot)) {
-      return getState();
-    }
+    // MASTER is a diagnostic input only in generic v3. A stale or malformed
+    // MASTER assertion must fail closed for that diagnostic, never suppress
+    // independently valid per-deck playback candidates in this snapshot.
+    updateMasterFromSnapshot(snapshot);
     const measuredLoops = new Map();
     for (const entry of Array.isArray(snapshot.loopStates) ? snapshot.loopStates : []) {
       const deck = normalizeDeckNumber(entry?.deck);
@@ -666,10 +665,10 @@ function createTrackActivityDetector({
       if (started) {
         state.playSessionId = idFactory();
         state.startedAt = new Date(now()).toISOString();
+        state.wireIdentity = null;
         state.awaitingPlayConfirmation = false;
-        state.lastActiveSessionId = null;
-        state.lastActiveMasterGeneration = null;
-        state.lastSyncPositionRevision = null;
+        state.lastCandidateActiveSessionId = null;
+        state.lastCandidateSyncPositionRevision = null;
         state.lastLoopEventRevision = null;
         emitEvent("DJ_TRACK_PLAY_STARTED", diagnosticTrackPayload(deck, state));
       } else if (stopped) {
@@ -678,27 +677,27 @@ function createTrackActivityDetector({
       if ((trackChanged || firstTrack) && nextIsPlaying === true && !started) {
         // A deck can report the old playing state while a newly loaded track
         // is still only preloaded. Do not promote that stale true to a new
-        // play session; wait for false/null -> true or explicit master change.
+        // play session; wait for fresh false/null -> true evidence.
         state.playSessionId = null;
         state.startedAt = null;
+        state.wireIdentity = null;
         state.awaitingPlayConfirmation = true;
-        state.lastActiveSessionId = null;
-        state.lastActiveMasterGeneration = null;
-        state.lastSyncPositionRevision = null;
+        state.lastCandidateActiveSessionId = null;
+        state.lastCandidateSyncPositionRevision = null;
         state.lastLoopEventRevision = null;
       } else if ((trackChanged || firstTrack) && !started) {
         state.playSessionId = null;
         state.startedAt = null;
+        state.wireIdentity = null;
         state.awaitingPlayConfirmation = false;
-        state.lastActiveSessionId = null;
-        state.lastActiveMasterGeneration = null;
-        state.lastSyncPositionRevision = null;
+        state.lastCandidateActiveSessionId = null;
+        state.lastCandidateSyncPositionRevision = null;
         state.lastLoopEventRevision = null;
       }
       state.pendingTrackChange = false;
       state.previousIsPlaying = nextIsPlaying;
-      const active = maybeEmitActive(deck, state);
-      if (!active) maybeEmitSync(deck, state);
+      const candidateActive = maybeEmitCandidateActive(deck, state);
+      if (!candidateActive) maybeEmitCandidateSync(deck, state);
       maybeEmitMeasuredLoop(deck, state);
     }
     return getState();
@@ -748,38 +747,43 @@ function createTrackActivityDetector({
     if (!acceptMasterChange(deck, rawEvent.explicitMasterUpdatedAt)) {
       return null;
     }
-    const state = getDeckState(deck);
-    const hadPendingTrackChange = state.pendingTrackChange;
-    state.pendingTrackChange = false;
-    state.awaitingPlayConfirmation = false;
-    if (hadPendingTrackChange) {
-      state.playSessionId = null;
-      state.startedAt = null;
-      state.lastActiveSessionId = null;
-      state.lastActiveMasterGeneration = null;
-      state.lastSyncPositionRevision = null;
-      state.lastLoopEventRevision = null;
-    }
     snapshotMasterSource = "explicit-master-change";
-    return maybeEmitActive(deck, state, { allowAwaiting: true });
+    return null;
   }
 
-  function requestCurrentMasterActive() {
-    const deck = currentMasterDeck();
-    if (!deck) {
+  function requestMeasuredLoopForSession(rawOwner = {}) {
+    const deck = normalizeDeckNumber(rawOwner.deck);
+    if (!deck || rawOwner.deckId !== `rekordbox-deck-${deck}`) {
       return null;
     }
     const state = getDeckState(deck);
-    if (state.pendingTrackChange) {
-      state.playSessionId = null;
-      state.startedAt = null;
-      state.lastActiveSessionId = null;
-      state.lastActiveMasterGeneration = null;
-      state.lastSyncPositionRevision = null;
-      state.lastLoopEventRevision = null;
+    if (
+      state.playSessionId !== rawOwner.playSessionId ||
+      state.lastCandidateActiveSessionId !== state.playSessionId
+    ) {
+      return null;
     }
-    state.pendingTrackChange = false;
-    return maybeEmitActive(deck, state, { allowAwaiting: true });
+    return maybeEmitMeasuredLoop(deck, state, { force: true });
+  }
+
+  // A new Syndocal receiver has no durable knowledge of a currently playing
+  // session. Reannounce only the exact, fresh candidates that are observable
+  // now; this deliberately does not manufacture a start, advance revisions,
+  // or revive a stopped/ambiguous deck.
+  function requestCurrentTrackCandidates() {
+    const candidates = [];
+    for (const [deck, state] of decks) {
+      if (state.playback?.isPlaying !== true || !state.playSessionId) {
+        continue;
+      }
+      const payload = strictCandidateTrackPayload(deck, state);
+      if (!payload) {
+        continue;
+      }
+      state.wireIdentity ||= wireIdentityForTrack(payload);
+      candidates.push(emitEvent("DJ_TRACK_ACTIVE", payload));
+    }
+    return candidates;
   }
 
   function getState() {
@@ -790,12 +794,12 @@ function createTrackActivityDetector({
         playback: state.playback ? { ...state.playback } : null,
         playSessionId: state.playSessionId,
         startedAt: state.startedAt,
-        lastActiveSessionId: state.lastActiveSessionId,
-        lastActiveMasterGeneration: state.lastActiveMasterGeneration,
+        wireIdentity: state.wireIdentity ? { ...state.wireIdentity } : null,
+        lastCandidateActiveSessionId: state.lastCandidateActiveSessionId,
+        lastCandidateSyncPositionRevision: state.lastCandidateSyncPositionRevision,
         awaitingPlayConfirmation: state.awaitingPlayConfirmation,
         pendingTrackChange: state.pendingTrackChange,
         loop: state.loop ? { ...state.loop } : null,
-        lastSyncPositionRevision: state.lastSyncPositionRevision,
         lastLoopEventRevision: state.lastLoopEventRevision,
       };
     }
@@ -830,7 +834,8 @@ function createTrackActivityDetector({
     onMasterChange,
     onSnapshot,
     onTrackLoaded,
-    requestCurrentMasterActive,
+    requestMeasuredLoopForSession,
+    requestCurrentTrackCandidates,
     reset,
   };
 }

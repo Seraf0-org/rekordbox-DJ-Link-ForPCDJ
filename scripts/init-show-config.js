@@ -4,8 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.5.example.json");
-const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.5.json`;
+const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.6.example.json");
+const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.6.json`;
 const TOKEN_PLACEHOLDER = "<SYNDOCAL_ONE_TIME_TOKEN>";
 
 class ShowConfigInitializationError extends Error {
@@ -60,7 +60,7 @@ function parseAndValidateTemplate(raw) {
   if (!valid) {
     throw new ShowConfigInitializationError(
       "TEMPLATE_CONTRACT_MISMATCH",
-      "bundled show config template does not match the strict v1.1.5 contract",
+      "bundled show config template does not match the strict v1.1.6 contract",
     );
   }
   return config;

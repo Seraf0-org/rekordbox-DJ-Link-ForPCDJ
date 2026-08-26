@@ -67,7 +67,6 @@ function exactFallbackPayload(payload) {
   const fields = [
     "deck",
     "deckId",
-    "masterDeckRevision",
     "playSessionId",
     "pedalIntentId",
     "baseMeasuredLoopRevision",
@@ -86,7 +85,6 @@ function exactFallbackPayload(payload) {
     return null;
   }
   const deck = strictInteger(payload.deck, { min: 1, max: 4 });
-  const masterDeckRevision = strictInteger(payload.masterDeckRevision, { min: 1 });
   const pedalIntentId = strictInteger(payload.pedalIntentId, { min: 1 });
   const baseMeasuredLoopRevision = payload.baseMeasuredLoopRevision === null
     ? null
@@ -101,7 +99,6 @@ function exactFallbackPayload(payload) {
   if (
     deck == null ||
     payload.deckId !== `rekordbox-deck-${deck}` ||
-    masterDeckRevision == null ||
     pedalIntentId == null ||
     (payload.baseMeasuredLoopRevision !== null && baseMeasuredLoopRevision == null) ||
     (payload.baseLoopDivision !== null && baseLoopDivision == null) ||
@@ -116,7 +113,6 @@ function exactFallbackPayload(payload) {
   return {
     deck,
     deckId: payload.deckId,
-    masterDeckRevision,
     playSessionId: payload.playSessionId,
     pedalIntentId,
     baseMeasuredLoopRevision,
@@ -130,11 +126,9 @@ function exactFallbackPayload(payload) {
 function strictIntent(intent, responseWindowMs) {
   if (!isPlainRecord(intent)) return null;
   const deck = strictInteger(intent.deck, { min: 1, max: 4 });
-  const masterDeckRevision = strictInteger(intent.masterDeckRevision, { min: 1 });
   if (
     deck == null ||
     intent.deckId !== `rekordbox-deck-${deck}` ||
-    masterDeckRevision == null ||
     !isIdentity(intent.playSessionId)
   ) {
     return null;
@@ -142,7 +136,6 @@ function strictIntent(intent, responseWindowMs) {
   return {
     deck,
     deckId: intent.deckId,
-    masterDeckRevision,
     playSessionId: intent.playSessionId,
     responseWindowMs,
   };
@@ -154,11 +147,9 @@ function loopResponseLineage(event) {
   }
   const payload = event.payload;
   const deck = strictInteger(payload.deck, { min: 1, max: 4 });
-  const masterDeckRevision = strictInteger(payload.masterDeckRevision, { min: 1 });
   if (
     deck == null ||
     payload.deckId !== "rekordbox-deck-" + deck ||
-    masterDeckRevision == null ||
     !isIdentity(payload.playSessionId)
   ) {
     return null;
@@ -166,7 +157,6 @@ function loopResponseLineage(event) {
   return {
     deck,
     deckId: payload.deckId,
-    masterDeckRevision,
     playSessionId: payload.playSessionId,
   };
 }
@@ -175,7 +165,6 @@ function measuredLoop(event) {
   if (!isPlainRecord(event) || event.type !== "DJ_LOOP_STATE" || !isPlainRecord(event.payload)) return null;
   const payload = event.payload;
   const deck = strictInteger(payload.deck, { min: 1, max: 4 });
-  const masterDeckRevision = strictInteger(payload.masterDeckRevision, { min: 1 });
   const revision = strictInteger(payload.revision, { min: 1 });
   const sampleAgeMs = strictInteger(payload.sampleAgeMs, {
     min: 0,
@@ -184,7 +173,6 @@ function measuredLoop(event) {
   if (
     deck == null ||
     payload.deckId !== `rekordbox-deck-${deck}` ||
-    masterDeckRevision == null ||
     !isIdentity(payload.playSessionId) ||
     revision == null ||
     sampleAgeMs == null ||
@@ -219,7 +207,6 @@ function measuredLoop(event) {
   return {
     deck,
     deckId: payload.deckId,
-    masterDeckRevision,
     playSessionId: payload.playSessionId,
     revision,
     sampleAgeMs,
@@ -229,7 +216,7 @@ function measuredLoop(event) {
 }
 
 function lineageKey(value) {
-  return `${value.deck}|${value.deckId}|${value.masterDeckRevision}|${value.playSessionId}`;
+  return `${value.deck}|${value.deckId}|${value.playSessionId}`;
 }
 
 function sameLineage(left, right) {
@@ -345,7 +332,6 @@ function createStage1LoopFallback({
       const payload = exactFallbackPayload({
         deck: intent.deck,
         deckId: intent.deckId,
-        masterDeckRevision: intent.masterDeckRevision,
         playSessionId: intent.playSessionId,
         pedalIntentId: candidate.intentId,
         baseMeasuredLoopRevision: base.revision,
@@ -570,7 +556,6 @@ function createStage1LoopFallback({
         ? {
             deck: pending.deck,
             deckId: pending.deckId,
-            masterDeckRevision: pending.masterDeckRevision,
             playSessionId: pending.playSessionId,
             targetLengthBeats: pending.targetLengthBeats,
             responseWindowMs: pending.responseWindowMs,

@@ -61,7 +61,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.5.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.6.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -196,6 +196,11 @@ const state = {
       releaseMacroActive: false,
       lastAction: null,
       lastActionAt: null,
+      ownerDeck: null,
+      ownerDeckId: null,
+      activePlaySessionId: null,
+      ownerWireIdentity: null,
+      ownerTrack: null,
     },
   },
   warnings: [],
@@ -1097,6 +1102,11 @@ function updateDjAgentStatus() {
     lastAction: routerStatus.lastAction || state.status.djAgent.lastAction || null,
     loopDivision: routerStatus.loopDivision,
     released: routerStatus.released,
+    ownerDeck: routerStatus.ownerDeck,
+    ownerDeckId: routerStatus.ownerDeckId,
+    activePlaySessionId: routerStatus.activePlaySessionId,
+    ownerWireIdentity: routerStatus.ownerWireIdentity,
+    ownerTrack: routerStatus.ownerTrack,
     updatedAt: new Date().toISOString(),
   };
   emitState();

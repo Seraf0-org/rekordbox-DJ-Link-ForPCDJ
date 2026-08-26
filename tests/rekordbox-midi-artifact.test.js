@@ -15,7 +15,7 @@ const ARTIFACT = path.join(
   "server",
   "public",
   "setup",
-  "CustomMIDI1-Syndocal-v1.1.5.csv",
+  "CustomMIDI1-Syndocal-v1.1.6.csv",
 );
 
 test("bundled CustomMIDI1 mapping matches the reviewed rekordbox setup contract", () => {
