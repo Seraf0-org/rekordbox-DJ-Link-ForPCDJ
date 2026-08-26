@@ -9,7 +9,7 @@
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
 product source versionは`1.1.5`、branchは`beta-v1.1.2`です。current runtime-source
 checkpointはpushed commit
-`862cf8035dfb365a7d799f820936585882d0a1e7`です。この後のdocs-only branch tipは
+`ffd013c91f23df6ced84cd6daabc97266993dc34`です。この後のdocs-only branch tipは
 runtime identityを変更しません。controlled-source acceptanceは
 branch `beta-v1.1.2`、clean、upstream-equal、HがHEADのancestor、かつ
 `H..HEAD`が正確に`API.md`、`README.md`、`SYNDOCAL_PEDAL_HANDOFF.md`だけであることを
@@ -28,8 +28,17 @@ fallbackは単調増加する`pedalIntentId`と、発行時点の
 focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
 wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
 
-このruntime checkpointではfull `npm test`が389 total / 387 pass / 0 fail /
-2 intentional pkg skip、Stage1+strict-v3 focusedが33/33、first-party warningは0です。
+このcheckpointはtracked token-free template
+`config/dj-agent-v1.1.5.example.json`と、checkout位置に依存しないexact
+`start-all.bat --init-config`を追加しました。initializerは
+`C:\SyndocalShow\dj-agent-v1.1.5.json`を存在しない場合だけ排他的に作成し、既存のvalid、
+invalid、link targetを上書きしません。tokenを生成・読込・表示せず、build、server、
+Rekordbox、injectを起動しません。このsoftware setup proofはreal token、HELLO、ACK、
+MIDI、pedal、hardware acceptanceを一行も閉じず、matrixは引き続き**0/12**です。
+
+このruntime checkpointではfull `npm test`が393 total / 391 pass / 0 fail /
+2 intentional pkg skip、config initializer + launcher + security focusedが46/46、
+Stage1+strict-v3 focusedが33/33、first-party warningは0です。
 独立Terra xHigh再監査はrapid-F14/inactive-loop競合、
 late fallback causality、実測loop wire shapeのP1を段階的に検出し、全修正後は
 P0/P1/P2なしでPASSしました。Ox-alphaはこのsessionでcallableではなかったため、

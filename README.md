@@ -10,10 +10,13 @@ The only current Syndocal adapter is `syndocal-envelope-v3`; every frame is the
 exact `{v:3,type,agentId,sessionId,sequence,eventId,payload}` shape. Flat, v1,
 and v2 adapters/frames are retired and fail closed. The target DJ-PC source
 route stays on branch `beta-v1.1.2`, requires a clean upstream-equal checkout,
-an external `DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. Product
+an external `DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. A missing
+external file is initialized from the tracked token-free template with exact
+`start-all.bat --init-config`; the initializer never overwrites an existing
+target and performs no build, server, Rekordbox, or injection action. Product
 source metadata is `1.1.5`; no v1.1.5 installer/tag/public release is claimed.
 The exact pushed runtime-source checkpoint is
-`862cf8035dfb365a7d799f820936585882d0a1e7`; a later docs-only branch tip does
+`ffd013c91f23df6ced84cd6daabc97266993dc34`; a later docs-only branch tip does
 not change that runtime identity.
 
 Stage 1 separates Rekordbox MIDI from Syndocal delivery. Physical F14 arms the
@@ -167,7 +170,7 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 
 The current show path is deliberately **source only**, not a public distribution.
 Runtime checkpoint H is the exact full commit
-`862cf8035dfb365a7d799f820936585882d0a1e7` on branch `beta-v1.1.2` (product
+`ffd013c91f23df6ced84cd6daabc97266993dc34` on branch `beta-v1.1.2` (product
 source version `1.1.5`). Docs-only commits changing exactly `README.md`,
 `SYNDOCAL_PEDAL_HANDOFF.md`, and `API.md` may follow H, so the proof must
 never require `HEAD == H`; it verifies ancestry plus an all-docs diff instead.
@@ -175,7 +178,7 @@ Before each controlled source acceptance, prove the checkout at runtime:
 
 ```powershell
 git fetch origin
-$checkpointH = "862cf8035dfb365a7d799f820936585882d0a1e7"
+$checkpointH = "ffd013c91f23df6ced84cd6daabc97266993dc34"
 $docsAllowlist = @("README.md", "SYNDOCAL_PEDAL_HANDOFF.md", "API.md")
 if (([string](git branch --show-current)).Trim() -ne "beta-v1.1.2") { throw "wrong source branch" }
 $dirty = @(git status --porcelain)
@@ -203,9 +206,10 @@ is clean, `HEAD` equals `origin/beta-v1.1.2`,
 Any other result is a failed source acceptance; do not launch or substitute a
 different checkout.
 
-Checkpoint H's recorded software gates are: Stage 1 + strict-v3 focused suite
-33/33 pass, full `npm test` 389 total / 387 pass / 0 fail / 2 intentional
-package-smoke skips, and first-party warnings 0. The Stage 1 contract covers
+Checkpoint H's recorded software gates are: config initializer + launcher +
+security focused suite 46/46 pass, full `npm test` 393 total / 391 pass /
+0 fail / 2 intentional package-smoke skips, and first-party warnings 0. The
+Stage 1 + strict-v3 focused suite remains 33/33 pass. The Stage 1 contract covers
 the full `8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64` profile;
 `1/64` is the only floor. These are source-level gates only; hardware acceptance
 remains **0/12** and is not closed by them.
@@ -222,15 +226,20 @@ DJ PC's proven checkout, a checkout-external config file, and the current
 Syndocal one-time token:
 
 ```powershell
+.\start-all.bat --init-config
+# Edit C:\SyndocalShow\dj-agent-v1.1.5.json:
+# replace only <SYNDOCAL_ONE_TIME_TOKEN> and verify the exact CustomMIDI1 port.
 $env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.5.json"
+.\start-all.bat --preflight-only
 .\start-all.bat
 ```
 
 `start-all.bat` is the sole source-launch path, not an installer. Run it with
-**no arguments**; the only other accepted invocation is exactly the lowercase
-`--preflight-only`, which runs the same fail-closed preflight and then starts
-no build or show-side process. Any other argument fails closed before anything
-is built or started. It must be
+**no arguments** for production. Two exact lowercase, no-side-effect utilities
+are also accepted: `--init-config` exclusively creates the token-free external
+file and refuses every existing target, while `--preflight-only` runs the same
+fail-closed production preflight. Both start no build or show-side process. Any
+other or combined argument fails closed before anything is built or started. It must be
 started in the same PowerShell that set `DJ_AGENT_CONFIG_PATH`; it does not
 persist or reload the config, token, or Setup selections. Before it builds or
 starts anything, it fail-closes on the retired `REKORDBOX_EXE_PATH` in Process,
@@ -360,49 +369,17 @@ tokenをrepository、スクリーンショット、ログへ保存しません�
 Setup列挙で`CustomMIDI1`がport 1と表示された場合だけ正しく、列挙値が違えばその整数へ
 完全一致で直します。名前だけ、推測値、暗黙port 0は拒否されます。
 
-~~~json
-{
-  "enabled": true,
-  "syndocal": {
-    "enabled": true,
-    "host": "192.168.50.1",
-    "port": 9100,
-    "path": "/dj-link",
-    "nic": "192.168.50.2",
-    "token": "<SYNDOCAL_ONE_TIME_TOKEN>",
-    "adapter": "syndocal-envelope-v3",
-    "heartbeatMs": 5000
-  },
-  "pedal": {
-    "enabled": true,
-    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
-  },
-  "midi": {
-    "enabled": true,
-    "device": "CustomMIDI1",
-    "port": 1,
-    "mappings": {
-      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
-      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
-      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
-      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
-    },
-    "deckChannels": { "1": 1, "2": 2 },
-    "filter": { "startValue": 127, "endValue": 0, "durationMs": 2000, "updateIntervalMs": 50 },
-    "releaseFade": {
-      "enabled": true, "mapping": "releaseFade", "target": "deck",
-      "startValue": 127, "endValue": 0, "durationMs": 1000,
-      "updateIntervalMs": 50, "resetAfterStop": true, "resetValue": 127
-    },
-    "releaseMacro": {
-      "enabled": false,
-      "sequence": "filter-then-fade",
-      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
-      "resetAfterStop": true
-    }
-  }
-}
-~~~
+The canonical token-free source is tracked at
+`config/dj-agent-v1.1.5.example.json`. Do not copy JSON out of this README.
+From any checkout location, create the external file exactly once with:
+
+```powershell
+.\start-all.bat --init-config
+```
+
+The initializer resolves the template relative to its own checkout, writes only
+`C:\SyndocalShow\dj-agent-v1.1.5.json`, and refuses to overwrite any existing
+regular, invalid, or linked target. It never generates, reads, or prints a token.
 
 `releaseMacro.enabled` はphysical acceptanceが完了するまで必ずfalseのままにします。
 上のramp定義は受入れ後にoperatorが明示的に有効化する場合の契約例であり、
@@ -431,7 +408,7 @@ read-only GET APIや既存のSocket.IOイベントが認証付きになったわ
 (退役済み)で
 v3のcapability setに含まれず、受入れ済みwire eventとして扱いません。公開済み
 v1.1.3はこのencoder/router negative proofを満たさないためblockedです。訂正版
-v1.1.5 runtime checkpoint `862cf8035dfb365a7d799f820936585882d0a1e7` は経路到達不能の
+v1.1.5 runtime checkpoint `ffd013c91f23df6ced84cd6daabc97266993dc34` は経路到達不能の
 negative proofを持ちますが、installer／実機受入れとは別です。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
 send-failedを `/api/dj-agent/status` とUIに反映します。`accepted`/`duplicate`だけが
 成功、`no_mapping`/`rejected`はterminal failure、`busy`だけが同じ`eventId`・
@@ -560,13 +537,17 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 選択を保存・読込しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定
 し直して同じランチャーを再実行してください。退役済み`REKORDBOX_EXE_PATH`の
 Process/User/Machine確認とfail-closeは、ここに重複した手順を置かず、必ず
-`start-all.bat`自身が行います。launcherは**引数なし**で実行します。唯一の代替呼び出しは
-完全に小文字のexact `--preflight-only`で、これは同一のfail-closed preflightだけを行い、
-buildや公演側processを何も起動しません。それ以外の引数は一切受理されません。
+`start-all.bat`自身が行います。production launcherは**引数なし**で実行します。
+初回の外部JSON作成だけはexact小文字`--init-config`、production preflightだけはexact小文字
+`--preflight-only`を使えます。どちらもbuildや公演側processを起動せず、それ以外または
+複合した引数は一切受理されません。
 現在の公演にinstallerやpackaged exeは不要です。
 
 ```powershell
+.\start-all.bat --init-config
+# Replace only <SYNDOCAL_ONE_TIME_TOKEN> in the created external file.
 $env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.5.json"
+.\start-all.bat --preflight-only
 .\start-all.bat
 ```
 
@@ -583,8 +564,9 @@ installer完成を主張するものではありません。
 #### Source launcherの動作
 
 プロジェクトルートにある**唯一のsource launcher**を実行してください。引数は付けません。
-唯一の代替はexact小文字の`--preflight-only`（preflight成功のみで終了）で、その他の引数は
-何より先に拒否されます。これはまず
+初回のtoken-free外部JSON作成だけはexact小文字の`--init-config`、preflight成功のみの確認は
+exact小文字の`--preflight-only`です。その他または複合した引数は何より先に拒否されます。
+production起動はまず
 `REKORDBOX_EXE_PATH`のProcess/User/Machine preflightをfail-closeで行い、「DLLの再ビルドと
 provenance検証」→「このcheckoutが所有するWebサーバーを現在の環境変数で再起動」→
 「Rekordboxへのインジェクト」→「ブラウザ起動」までを処理します。対応版のRekordboxが
