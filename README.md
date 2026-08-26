@@ -4,12 +4,34 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
+## Current show-source authority — v1.1.5 strict v3 (2026-08-26)
+
+The only current Syndocal adapter is `syndocal-envelope-v3`; every frame is the
+exact `{v:3,type,agentId,sessionId,sequence,eventId,payload}` shape. Flat, v1,
+and v2 adapters/frames are retired and fail closed. The target DJ-PC source
+route stays on branch `beta-v1.1.2`, requires a clean upstream-equal checkout,
+an external `DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. Product
+source metadata is `1.1.5`; no v1.1.5 installer/tag/public release is claimed.
+The exact pushed runtime-source checkpoint is
+`45f6d1daae0a7874588d6834ccb530590bce7610`; a later docs-only branch tip does
+not change that runtime identity.
+
+Stage 1 separates Rekordbox MIDI from Syndocal delivery. Physical F14 arms the
+response window before the MIDI send. Fresh measured Rekordbox loop state is
+primary. Only true no-response emits `DJ_LOOP_FALLBACK`, using
+`8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64` and stopping only at
+`1/64`. Invalid, stale, or contradictory same-lineage responses suppress the
+fallback, and a late fresh measurement rebases it. Physical F13 sends one
+correlated `DJ_RELEASE` even when local Stop MIDI fails, so the Rekordbox and
+Syndocal results stay independently visible. These are software gates only;
+controller/pedal/Rekordbox/wired-Syndocal acceptance remains exactly **0/12**.
+
 ## SUPERSEDED / DO NOT EXECUTE — v1.1.3 リリースノート（immutable historical release evidence）
 
 公開済みimmutable v1.1.3は履歴・provenance evidenceだけです。内部の
 `DJ_MASTER_CHANGED` mismatchがstrict-v2 clean-breakのnegative proofを阻むため、
 現行final artifactとしてinstall、接続、受入れに使ってはなりません。現在の実行可能な
-案内は、修正済みv1.1.4（planned、未tag・未公開）の公開後に切り替えます。
+案内は、修正済みv1.1.5 strict-v3 source checkpointへ切り替えます。
 
 Syndocal公演同期を`syndocal-envelope-v2`へclean breakし、配布物の真正性検証
 （provenance）も大幅に強化しました。
@@ -137,7 +159,7 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
 相互運用は、対象環境での実機受入試験が別途必要です。
 
-## Current show-first source position — 2026-08-30
+## SUPERSEDED / DO NOT EXECUTE — v1.1.4 show-first source position
 
 The current show path is deliberately **source only**, not a public distribution.
 Runtime checkpoint H is the exact full commit
@@ -196,7 +218,7 @@ DJ PC's proven checkout, a checkout-external config file, and the current
 Syndocal one-time token:
 
 ```powershell
-$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.4.json"
+$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.5.json"
 .\start-all.bat
 ```
 
@@ -238,7 +260,7 @@ do not advance a failing row by retrying through an alternate/legacy adapter.
 11. Restart the app and prove next-show reuse with a new valid session/token configuration.
 12. Prove Art-Net/sACN traffic can share the wired network during the DJ run.
 
-## Current corrective-release guidance — planned v1.1.4
+## SUPERSEDED / HISTORICAL — planned v1.1.4 strict-v2 guidance
 
 The intended current wire contract is strict `syndocal-envelope-v2`; explicitly reject
 `generic-json` and `syndocal-envelope-v1` with no fallback, alias, or implicit conversion.
@@ -318,18 +340,18 @@ $env:MIDI_PORT = "1"
 空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
 しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
 Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
-unpaired surrogateは拒否します。次の訂正版v1.1.4で出荷する唯一のproduction adapterは
-`syndocal-envelope-v2`、接続先pathは`/dj-link`、heartbeatは5000msです。公開済み
+  unpaired surrogateは拒否します。v1.1.5 sourceで使用する唯一のproduction adapterは
+  `syndocal-envelope-v3`、接続先pathは`/dj-link`、heartbeatは5000msです。公開済み
 immutable v1.1.3は`DJ_MASTER_CHANGED` mismatchのため現行受入れに使いません。接続後は
 `DJ_AGENT_HELLO` → `DJ_STATE_SYNC` → `DJ_TIMELINE_STATE_REQUEST` の順序が必須です。
 Syndocalが返す権威`DJ_TIMELINE_STATE`が有効になるまでtimeline操作はfail-closedです
 (SnapshotRequired)。adapterは
 `SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示できます。選択可能値は
-`syndocal-envelope-v2`だけです。旧flat/v1名、未知名、曖昧な別名はfail-closedで、
+`syndocal-envelope-v3`だけです。旧flat/v1/v2名、未知名、曖昧な別名はfail-closedで、
 変換・fallback・legacy adapterはありません。
 
 次は2026-08-30公演のpre-release source acceptanceで使用する現在の構成です。
-実ファイルはcheckout外（例：`C:\SyndocalShow\dj-agent-v1.1.4.json`）へ置き、
+実ファイルはcheckout外（例：`C:\SyndocalShow\dj-agent-v1.1.5.json`）へ置き、
 `<SYNDOCAL_ONE_TIME_TOKEN>`だけをSyndocalが表示した現在のtokenへ置換します。
 tokenをrepository、スクリーンショット、ログへ保存しません。`MIDI_PORT: 1`はDJ PCの
 Setup列挙で`CustomMIDI1`がport 1と表示された場合だけ正しく、列挙値が違えばその整数へ
@@ -345,7 +367,7 @@ Setup列挙で`CustomMIDI1`がport 1と表示された場合だけ正しく、�
     "path": "/dj-link",
     "nic": "192.168.50.2",
     "token": "<SYNDOCAL_ONE_TIME_TOKEN>",
-    "adapter": "syndocal-envelope-v2",
+    "adapter": "syndocal-envelope-v3",
     "heartbeatMs": 5000
   },
   "pedal": {
@@ -399,25 +421,25 @@ peerを偽装できません。旧env `DJ_AGENT_ALLOW_REMOTE_ACTIONS` とconfig-
 物理ペダルとglobal hotkeyはDJ PCローカルで動作し、FOH側のShow Controlは
 トークン認証済みの `/dj-link` WebSocket経由で行います。この変更で、LAN向けの
 read-only GET APIや既存のSocket.IOイベントが認証付きになったわけではありません
-（両者は従来どおり無認証のままです）。現行v2の物理/control eventは
-`DJ_MASTER_TRACK_ACTIVE`、`DJ_LOOP_STATE`、`DJ_RELEASE`、
+（両者は従来どおり無認証のままです）。現行v3の物理/control eventは
+`DJ_MASTER_TRACK_ACTIVE`、`DJ_LOOP_STATE`、`DJ_LOOP_FALLBACK`、`DJ_RELEASE`、
 `DJ_TIMELINE_BEAT_JUMP`、`DJ_TIMELINE_LOOP_SET`で、これらはACK必須です。
 `DJ_MASTER_TRACK_SYNC`は連続する非ACK telemetryです。`DJ_MASTER_CHANGED` is retired/unreachable
 (退役済み)で
-v2のcapability setに含まれず、受入れ済みwire eventとして扱いません。公開済み
-v1.1.3はこのencoder/router negative proofを満たさないためblockedです。次の訂正版
-v1.1.4 sourceが経路到達不能のnegative proofを示すまで、これをacceptance evidenceに
-使いません。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
+v3のcapability setに含まれず、受入れ済みwire eventとして扱いません。公開済み
+v1.1.3はこのencoder/router negative proofを満たさないためblockedです。訂正版
+v1.1.5 runtime checkpoint `45f6d1daae0a7874588d6834ccb530590bce7610` は経路到達不能の
+negative proofを持ちますが、installer／実機受入れとは別です。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
 send-failedを `/api/dj-agent/status` とUIに反映します。`accepted`/`duplicate`だけが
 成功、`no_mapping`/`rejected`はterminal failure、`busy`だけが同じ`eventId`・
-`sequence`・canonical v2 shape・socket generationのまま短い指数backoffで有限回
+`sequence`・canonical v3 shape・socket generationのまま短い指数backoffで有限回
 再送されます。型不足・未知outcome・`ok`不整合のACKはprotocol failureとして無視し、
 ACK timeoutまでpendingを維持します。HELLO/heartbeat/State Sync/timeline requestは
 physical ID capから分離したcontrol ID/sequenceを使い、再接続時に旧physical eventを
 再送しません。timeline state requestのcaller-supplied eventIdは受け付けず、control
 IDはプロセス内で生成します。
 
-State Sync providerがthrow、null、undefined、またはKDMX strict-v2 validationに失敗した
+State Sync providerがthrow、null、undefined、またはKDMX strict-v3 validationに失敗した
 場合は、空snapshotへ置換せず、state-sync-error/send-failedとstatusへ記録してState
 Syncもtimeline requestも送信しません。valid snapshotを送信できた場合だけtimeline
 requestを続行します。
@@ -436,7 +458,7 @@ MIDIをRekordboxのmaster deckごとに分ける場合は、`midi.deckChannels` 
 `{"1":1,"2":2}` のようなdeck番号→MIDI channel（1〜16）を指定します。
 loop-half、release、filter rampの全CC送信に適用され、未指定のdeckは各mappingの
 `channel`へfallbackします。実行中のaction resultには `targetDeck` と
-`targetChannel` が含まれます。KDMX strict-v2 envelope framesはstrict fieldsだけを送信し、
+`targetChannel` が含まれます。KDMX strict-v3 envelope framesはstrict fieldsだけを送信し、
 この診断情報は含めません。環境変数では
 `MIDI_DECK_CHANNELS` に同じJSONを指定できます。
 
@@ -444,8 +466,11 @@ loop-half、release、filter rampの全CC送信に適用され、未指定のdec
 
 The physical bindings are an explicit state machine. For the 2026-08-30 source
 acceptance, Stage 1 fixes `releaseMacro.enabled:false`: F13 performs only the
-direct local Cue/Stop then `DJ_RELEASE` path. It is neither a compatibility
-fallback nor an inferred macro mode. F14 keeps the local LoopHalf mapping. F15
+direct local Cue/Stop plus one independently routed `DJ_RELEASE`. Stop MIDI
+failure does not suppress the Syndocal Release leg. It is neither a compatibility
+fallback nor an inferred macro mode. F14 keeps the local LoopHalf mapping and
+arms the measured-response window before MIDI; true no-response alone emits the
+full-profile `DJ_LOOP_FALLBACK`. F15
 is deliberately inactive in Stage 1 and sends neither MIDI nor Syndocal events.
 Release-macro enablement (Filter/ChannelFader ramp and its sequence) is outside
 this acceptance and may be considered only after all twelve rows pass, in a
@@ -472,7 +497,7 @@ the CustomMIDI1 example uses Filter CC16 (`B010`) and release-fade CC17
 
 配布時は `@julusian/midi` と `uiohook-napi` をoptionalDependenciesとして解決し、
 Windows native prebuildをpkgのassetsに含めます。機器やnative moduleがない環境でも
-本体は起動継続します。strict v2 envelopeの形状はpeer contractに固定していますが、
+本体は起動継続します。strict v3 envelopeの形状はpeer contractに固定していますが、
 実際のSyndocal接続・認証・MIDI機器の受入れは対象環境で別途確認が必要です。
 環境変数の導線と既定値は [`.env.example`](.env.example) にまとめています。
 
@@ -515,19 +540,19 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 - [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
 - [MSYS2](https://www.msys2.org/) (mingw-w64)
 
-### 2. 検証済みv1.1.4インストール済みリリースの起動
+### 2. 将来の検証済みv1.1.5インストール済みリリースの起動
 
-この経路は、v1.1.4のtag・identity-bound artifact・対象DJ PCでの検証が完了した後だけ
-公演運用に使用します。公開済みv1.1.3は使用禁止であり、v1.1.4未公開期間に既存shortcutを
-起動して代用してはいけません。検証済みv1.1.4をインストールした後は、Rekordboxを先に
+この経路は、v1.1.5のtag・identity-bound artifact・対象DJ PCでの検証が完了した後だけ
+公演運用に使用します。公開済みv1.1.3は使用禁止であり、v1.1.5未公開期間に既存shortcutを
+起動して代用してはいけません。検証済みv1.1.5をインストールした後は、Rekordboxを先に
 起動し、スタートメニューまたはデスクトップの
 `DJLinkForPCDJ` ショートカットを実行してください。これはインストール先の
 `start-rb.bat` を起動し、署名済みmanifestと全payloadを検証してからserverとHookを
 開始します。
 
-### 3. v1.1.4未公開期間の公演前source acceptance（現在の暫定正規経路）
+### 3. v1.1.5未公開期間の公演前source acceptance（現在の暫定正規経路）
 
-検証済みv1.1.4 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
+検証済みv1.1.5 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
 明示して**唯一の**source launcherを実行します。`start-all.bat`は`.env`やSetup画面の
 選択を保存・読込しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定
 し直して同じランチャーを再実行してください。退役済み`REKORDBOX_EXE_PATH`の
@@ -538,12 +563,12 @@ buildや公演側processを何も起動しません。それ以外の引数は�
 現在の公演にinstallerやpackaged exeは不要です。
 
 ```powershell
-$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.4.json"
+$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.5.json"
 .\start-all.bat
 ```
 
 起動後に`http://localhost:8787`のSetup/statusで、Agent enabled、token configured、
-adapter `syndocal-envelope-v2`、host `192.168.50.1`、local NIC `192.168.50.2`、MIDI
+adapter `syndocal-envelope-v3`、host `192.168.50.1`、local NIC `192.168.50.2`、MIDI
 `CustomMIDI1`と現在列挙されたexact portを確認します。この画面の`token configured`や
 WebSocketの`connected`だけではHELLO/auth成功を証明しません。次にSyndocal側のpeerで
 HELLO/authとstate sync、generation、heartbeatを確認し、最後に物理イベントの相関ACKを

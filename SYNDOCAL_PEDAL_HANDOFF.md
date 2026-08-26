@@ -2,7 +2,33 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-25 strict show-sync v2 clean break
+## 2026-08-26 current strict show-sync v3 clean break
+
+現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
+`{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
+flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
+product source versionは`1.1.5`、branchは`beta-v1.1.2`です。current runtime-source
+checkpointはpushed commit
+`45f6d1daae0a7874588d6834ccb530590bce7610`です。この後のdocs-only branch tipは
+runtime identityを変更しません。
+
+F14の物理意図はRekordbox MIDI送信より先にresponse windowを開始します。freshな
+同一session測定が権威で、actual no-responseだけが別型の`DJ_LOOP_FALLBACK`を送ります。
+profileは`8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64`で、2では
+止まりません。不正・stale・矛盾応答はfallbackをfail-closedで抑止し、late fresh測定は
+predictionを上書き・rebaseします。F13 ReleaseはStop MIDI結果から分離され、Stop送信失敗
+でも相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。
+
+focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
+wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
+
+このruntime checkpointではfull `npm test`が387 total / 385 pass / 0 fail /
+2 intentional pkg skip、Stage1+strict-v3 focusedが31/31、release-focusedが51/51、
+first-party warningは0です。独立Terra xHigh再監査はrapid-F14競合とinactive loop-off
+shapeの初回P1 2件を検出し、修正後は新規P1なしでPASSしました。Ox-alphaはこのsessionで
+callableではなかったため、Sol監督がこの限定例外とTerra独立再監査を記録しています。
+
+## SUPERSEDED / HISTORICAL — 2026-08-25 strict show-sync v2 clean break
 
 出荷・現行・productionの唯一のadapterは`syndocal-envelope-v2`です。旧flat
 `generic-json`と`syndocal-envelope-v1`は設定、Setup、build identity、runtimeから
@@ -18,7 +44,7 @@ nonempty contentIdは権威であり、異なるcontentIdを同じtitle/artist�
 物理LAN/MIDI/ペダル/Rekordbox/Syndocal ACKの受入れは別途必要で、mockから完了とは
 主張しません。
 
-## 2026-08-30 show-first source operation: v1.1.4
+## SUPERSEDED / HISTORICAL — 2026-08-30 v1.1.4 source operation
 
 The only current show path is the target DJ PC's controlled source-acceptance
 exception. Runtime checkpoint H is the exact full commit
@@ -48,7 +74,7 @@ until the following exact rows have recorded physical evidence. See README's
 **DJ-PC wake and HW-4 acceptance sequence (exactly 12 rows)**; that sequence is
 the single executable operator order for this handoff.
 
-## 2026-08-25 current corrective release preparation: v1.1.4
+## SUPERSEDED / HISTORICAL — 2026-08-25 corrective release preparation: v1.1.4
 
 公開済み`v1.1.3`はwire mismatchを含むimmutable historical artifactとして保持し、tagや
 assetを移動・差し替えません。次のcorrective product versionは`1.1.4`です。`package.json`、
@@ -329,7 +355,7 @@ branch/commitは削除していない。
 `origin/beta-v1.1.2`と同一です。既存の他ファイルのdirty/untracked状態は保持し、
 このsupport laneではcommit/pushを行いません。
 
-## 権威ソースとwire契約(2026-08更新)
+## SUPERSEDED / HISTORICAL — strict-v2 wire契約(2026-08-25)
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
 全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定、

@@ -107,12 +107,19 @@ IPv6 loopback, and `::1` are accepted. A remote request receives HTTP 403 unless
 status route remains remotely readable.
 
 For actions that send `DJ_RELEASE`, HTTP 202 with
-`ok:false`/`ackState:"pending"` means the local action was sent and is waiting
-for a Syndocal ACK. ACK `ok:false`, timeout, disconnected send, and local MIDI
-failure remain failures; they are never reported as `ok:true` merely because a
-send call returned. Stage 1 loop-half is local MIDI only. Network
-`DJ_LOOP_STATE` frames come exclusively from measured hook loop packets and
-carry active/startBeat/endBeat/lengthBeats plus revision and freshness.
+`ok:false`/`ackState:"pending"` means the Syndocal leg is waiting for an ACK.
+ACK rejection, timeout, disconnected send, and local MIDI failure remain
+separate failures; one leg is never reported successful merely because the
+other send returned. Stage 1 F13 routes one correlated `DJ_RELEASE` even when
+the local Rekordbox Stop MIDI send fails.
+
+Physical Stage 1 F14 arms a 50..1500 ms response window (default 500 ms) before
+attempting local MIDI. Fresh, valid, same-lineage hook measurement is primary
+and is sent as `DJ_LOOP_STATE`. Invalid, stale, or contradictory same-lineage
+responses suppress prediction fail-closed. Only actual no-response emits the
+distinct `DJ_LOOP_FALLBACK` with source `pedal-no-response-predicted`. Its exact
+absolute profile is `8, 4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64`; it saturates
+only at `1/64`. A late fresh measured report overrides and rebases prediction.
 
 Track activity is derived from Hook UDP snapshots and explicit master_change
 packets. DJ_TRACK_LOADED remains diagnostic. DJ_MASTER_TRACK_ACTIVE is delayed
@@ -123,9 +130,9 @@ same session; missing, null, nonfinite, stale, duplicate, and reordered samples
 fail closed. A nonempty contentId is authoritative; title+artist is used only
 when contentId is absent.
 
-The sole shipped/current/production adapter is `syndocal-envelope-v2`.
-Every frame has exactly `{v:2,type,agentId,sessionId,sequence,eventId,payload}`.
-Flat and v1 frames, retired adapter names, aliases, and unknown names are
+The sole current/production adapter is `syndocal-envelope-v3`.
+Every frame has exactly `{v:3,type,agentId,sessionId,sequence,eventId,payload}`.
+Flat, v1, and v2 frames, retired adapter names, aliases, and unknown names are
 rejected visibly; there is no compatibility adapter or fallback. The transport
 provides reconnect, heartbeat, event IDs, monotonically increasing wire
 sequence values, ACK tracking, and DJ_STATE_SYNC. An unacknowledged physical
@@ -136,11 +143,11 @@ wire sequence; duplicate ACK outcome is success.
 connection-generation + wire-sequence eventId, never enters the durable
 physical-event registry, and is never replayed after reconnect. A fresh sync
 must arrive for the new connection/session; late frames stay socket-fenced.
-When Syndocal is disabled, local-only MIDI actions continue to work without a
-network. When handoff is enabled, the initial connection, reconnection, and
-disconnected interval are fail-closed until an authoritative timeline snapshot
-is received; Stage 1 pedals send no Rekordbox MIDI while that snapshot is
-pending. Stale pedal events are not replayed after reconnection.
+When Syndocal is disabled or disconnected, local Rekordbox MIDI actions remain
+independent. Network fallback/release delivery then fails visibly; it is not
+queued as a successful Syndocal action. Stage 2 remains fail-closed until an
+authoritative timeline snapshot is received, and stale pedal events are not
+replayed after reconnection.
 
 `GET /api/dj-agent/status` also exposes the handoff state machine:
 `mode` is `dj-control`, `handoff-pending`, or `timeline-control`; `timelineState`
@@ -178,7 +185,7 @@ reconnect instead of comparing across sessions. A skipped or terminally failed
 toggle latch immediately and stays retryable as a fresh absolute value on the
 next F14 press.
 
-`DJ_TIMELINE_STATE` is an exact v2 envelope. Its payload has exactly
+`DJ_TIMELINE_STATE` is an exact v3 envelope. Its payload has exactly
 `state`, `loopActive`, `timelineId`, `positionBars`, `playSessionId`,
 `pedalOwner`, and `releaseEventId`. A generic `running` state never transfers
 pedal ownership. `pedalOwner:"timeline"` is accepted only when playSessionId
