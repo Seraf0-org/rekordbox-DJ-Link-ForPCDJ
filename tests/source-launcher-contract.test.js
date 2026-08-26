@@ -87,6 +87,12 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /User\/Machine REKORDBOX_EXE_PATH state could not be verified conclusively/i);
   assert.doesNotMatch(source, /reg\s+query/i, "ambiguous reg.exe exit code must not decide absence");
   assert.match(source, /--preflight-only/i);
+  assert.match(source, /--init-config/i);
+  const initJumpIndex = source.search(/if "%_RB_INIT_CONFIG%"=="1" goto initialize_show_config/i);
+  const initCommandIndex = source.search(/node scripts\\init-show-config\.js/i);
+  assert.ok(initJumpIndex >= 0, "initializer dispatch must be present");
+  assert.ok(initJumpIndex < retiredOverrideIndex, "initializer must bypass production preflight and show-side actions");
+  assert.ok(initCommandIndex > browserIndex, "initializer implementation must remain outside the production launch path");
   assert.match(source, /strict source preflight passed; no show-side process or build action was taken/i);
   assert.match(source, /DJ_AGENT_CONFIG_PATH is required for the controlled source path/i);
   assert.match(source, /path\.isAbsolute\(raw\)/);
@@ -94,6 +100,7 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /fs\.realpathSync\.native\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
   assert.match(source, /c\.syndocal\.adapter!==['"]syndocal-envelope-v3['"]/);
+  assert.match(source, /c\.syndocal\.heartbeatMs!==5000/);
   assert.match(source, /c\.midi\.device!==['"]CustomMIDI1['"]/);
   assert.match(source, /c\.midi\.releaseMacro\.enabled/);
   assert.doesNotMatch(source, /web server already running/i);
@@ -152,6 +159,7 @@ test(
         nic: "192.168.50.2",
         token: "0123456789abcdef0123456789abcdef",
         adapter: "syndocal-envelope-v3",
+        heartbeatMs: 5000,
       },
       pedal: { enabled: true },
       midi: {
@@ -180,9 +188,17 @@ test(
       assert.equal(extra.status, 64, extra.stdout + extra.stderr);
       assert.match(extra.stdout, /Unexpected launcher arguments/i);
 
+      const initExtra = runLauncher("--init-config unexpected", cleanShowEnv());
+      assert.equal(initExtra.status, 64, initExtra.stdout + initExtra.stderr);
+      assert.match(initExtra.stdout, /Unexpected launcher arguments/i);
+
       const caseVariantFlag = runLauncher("--PREFLIGHT-ONLY", cleanShowEnv());
       assert.equal(caseVariantFlag.status, 64, caseVariantFlag.stdout + caseVariantFlag.stderr);
       assert.match(caseVariantFlag.stdout, /Unknown launcher argument/i);
+
+      const initCaseVariant = runLauncher("--INIT-CONFIG", cleanShowEnv());
+      assert.equal(initCaseVariant.status, 64, initCaseVariant.stdout + initCaseVariant.stderr);
+      assert.match(initCaseVariant.stdout, /Unknown launcher argument/i);
 
       const hiddenThird = runLauncher('\"\" \"\" unexpected', cleanShowEnv());
       assert.equal(hiddenThird.status, 64, hiddenThird.stdout + hiddenThird.stderr);
@@ -236,7 +252,9 @@ test(
       for (const result of [
         unknown,
         extra,
+        initExtra,
         caseVariantFlag,
+        initCaseVariant,
         hiddenThird,
         processOverride,
         missingConfig,

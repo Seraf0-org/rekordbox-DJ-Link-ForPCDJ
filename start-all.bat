@@ -11,19 +11,29 @@ rem Clear any inherited environment variable with this name so cmd.exe exposes
 rem its own trusted executable-directory pseudo-variable on the next line.
 set "__APPDIR__="
 set "_RB_PREFLIGHT_ONLY=0"
+set "_RB_INIT_CONFIG=0"
 if "%1"=="" goto launcher_arguments_validated
-if not "%~1"=="--preflight-only" (
-  echo [ERROR] Unknown launcher argument. Use no arguments or exactly --preflight-only.
-  exit /b 64
+if "%~1"=="--preflight-only" (
+  set "_RB_PREFLIGHT_ONLY=1"
+  goto launcher_argument_accepted
 )
-set "_RB_PREFLIGHT_ONLY=1"
+if "%~1"=="--init-config" (
+  set "_RB_INIT_CONFIG=1"
+  goto launcher_argument_accepted
+)
+echo [ERROR] Unknown launcher argument. Use no arguments, exactly --preflight-only, or exactly --init-config.
+exit /b 64
+
+:launcher_argument_accepted
 shift
 if not "%1"=="" (
-  echo [ERROR] Unexpected launcher arguments. Use no arguments or exactly --preflight-only.
+  echo [ERROR] Unexpected launcher arguments. Use no arguments, exactly --preflight-only, or exactly --init-config.
   exit /b 64
 )
 
 :launcher_arguments_validated
+
+if "%_RB_INIT_CONFIG%"=="1" goto initialize_show_config
 
 call :reject_retired_rekordbox_override
 if errorlevel 1 (
@@ -103,6 +113,10 @@ echo [rb-output] done.
 pause
 exit /b 0
 
+:initialize_show_config
+node scripts\init-show-config.js
+exit /b %errorlevel%
+
 :reject_retired_rekordbox_override
 rem REKORDBOX_EXE_PATH is a retired launch override.  A configured value in any
 rem scope is ambiguous, so the controlled source path refuses to launch.
@@ -148,12 +162,12 @@ if not defined DJ_AGENT_CONFIG_PATH (
   exit /b 1
 )
 
-node -e "const fs=require('node:fs'),path=require('node:path');try{const forbidden=new Set(['DJ_AGENT_CONFIG','DJ_AGENT_ENABLED','DJ_AGENT_ALLOW_REMOTE_ACTIONS','SYNDOCAL_ENABLED','SYNDOCAL_HOST','SYNDOCAL_PORT','SYNDOCAL_PATH','SYNDOCAL_NIC','SYNDOCAL_TOKEN','SYNDOCAL_WS_ADAPTER','SYNDOCAL_HEARTBEAT_MS','PEDAL_ENABLED','PEDAL_MODULE','MIDI_ENABLED','MIDI_MODULE','MIDI_DEVICE','MIDI_PORT','MIDI_RELEASE_FADE','MIDI_RELEASE_MACRO','MIDI_DECK_CHANNELS','PORT','RB_OUTPUT_HOST','RB_OUTPUT_SETUP_MAPPING_PATH']);if(Object.keys(process.env).some(k=>forbidden.has(k.toUpperCase())))process.exit(2);const raw=process.env.DJ_AGENT_CONFIG_PATH||'';if(!path.isAbsolute(raw))process.exit(3);const requested=path.resolve(raw),stat=fs.lstatSync(requested);if(!stat.isFile()||stat.isSymbolicLink())process.exit(4);const file=fs.realpathSync.native(requested),root=fs.realpathSync.native(process.cwd())+path.sep;if(file.toLowerCase().startsWith(root.toLowerCase()))process.exit(5);const {loadDjAgentConfig}=require('./server/dj-agent/config');const c=loadDjAgentConfig();const tokenBytes=Buffer.byteLength(c.syndocal.token||'','utf8');if(c.warning||!c.enabled||!c.syndocal.enabled||!c.pedal.enabled||!c.midi.enabled||c.syndocal.host!=='192.168.50.1'||c.syndocal.port!==9100||c.syndocal.path!=='/dj-link'||c.syndocal.nic!=='192.168.50.2'||c.syndocal.adapter!=='syndocal-envelope-v3'||tokenBytes<32||tokenBytes>256||c.midi.device!=='CustomMIDI1'||!Number.isInteger(c.midi.port)||c.midi.releaseMacro.enabled)process.exit(6);process.exit(0)}catch{process.exit(7)}"
+node -e "const fs=require('node:fs'),path=require('node:path');try{const forbidden=new Set(['DJ_AGENT_CONFIG','DJ_AGENT_ENABLED','DJ_AGENT_ALLOW_REMOTE_ACTIONS','SYNDOCAL_ENABLED','SYNDOCAL_HOST','SYNDOCAL_PORT','SYNDOCAL_PATH','SYNDOCAL_NIC','SYNDOCAL_TOKEN','SYNDOCAL_WS_ADAPTER','SYNDOCAL_HEARTBEAT_MS','PEDAL_ENABLED','PEDAL_MODULE','MIDI_ENABLED','MIDI_MODULE','MIDI_DEVICE','MIDI_PORT','MIDI_RELEASE_FADE','MIDI_RELEASE_MACRO','MIDI_DECK_CHANNELS','PORT','RB_OUTPUT_HOST','RB_OUTPUT_SETUP_MAPPING_PATH']);if(Object.keys(process.env).some(k=>forbidden.has(k.toUpperCase())))process.exit(2);const raw=process.env.DJ_AGENT_CONFIG_PATH||'';if(!path.isAbsolute(raw))process.exit(3);const requested=path.resolve(raw),stat=fs.lstatSync(requested);if(!stat.isFile()||stat.isSymbolicLink())process.exit(4);const file=fs.realpathSync.native(requested),root=fs.realpathSync.native(process.cwd())+path.sep;if(file.toLowerCase().startsWith(root.toLowerCase()))process.exit(5);const {loadDjAgentConfig}=require('./server/dj-agent/config');const c=loadDjAgentConfig();const tokenBytes=Buffer.byteLength(c.syndocal.token||'','utf8');if(c.warning||!c.enabled||!c.syndocal.enabled||!c.pedal.enabled||!c.midi.enabled||c.syndocal.host!=='192.168.50.1'||c.syndocal.port!==9100||c.syndocal.path!=='/dj-link'||c.syndocal.nic!=='192.168.50.2'||c.syndocal.adapter!=='syndocal-envelope-v3'||c.syndocal.heartbeatMs!==5000||tokenBytes<32||tokenBytes>256||c.midi.device!=='CustomMIDI1'||!Number.isInteger(c.midi.port)||c.midi.releaseMacro.enabled)process.exit(6);process.exit(0)}catch{process.exit(7)}"
 if errorlevel 1 (
   echo.
   echo [ERROR] The checkout-external DJ Agent show config failed strict readiness validation.
   echo         Require enabled DJ/Syndocal/pedal/MIDI, exact adapter syndocal-envelope-v3,
-  echo         192.168.50.1:9100/dj-link via NIC 192.168.50.2, a 32..256-byte token,
+  echo         192.168.50.1:9100/dj-link via NIC 192.168.50.2, heartbeat 5000 ms, a 32..256-byte token,
   echo         CustomMIDI1 name+port, releaseMacro.enabled=false, and no env overrides.
   echo         No config content is printed.
   echo.

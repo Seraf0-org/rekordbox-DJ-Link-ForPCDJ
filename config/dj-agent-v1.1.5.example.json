@@ -1,0 +1,47 @@
+{
+  "enabled": true,
+  "syndocal": {
+    "enabled": true,
+    "host": "192.168.50.1",
+    "port": 9100,
+    "path": "/dj-link",
+    "nic": "192.168.50.2",
+    "token": "<SYNDOCAL_ONE_TIME_TOKEN>",
+    "adapter": "syndocal-envelope-v3",
+    "heartbeatMs": 5000
+  },
+  "pedal": {
+    "enabled": true,
+    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
+  },
+  "midi": {
+    "enabled": true,
+    "device": "CustomMIDI1",
+    "port": 1,
+    "mappings": {
+      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
+      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
+      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
+      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
+    },
+    "deckChannels": { "1": 1, "2": 2 },
+    "filter": { "startValue": 127, "endValue": 0, "durationMs": 2000, "updateIntervalMs": 50 },
+    "releaseFade": {
+      "enabled": true,
+      "mapping": "releaseFade",
+      "target": "deck",
+      "startValue": 127,
+      "endValue": 0,
+      "durationMs": 1000,
+      "updateIntervalMs": 50,
+      "resetAfterStop": true,
+      "resetValue": 127
+    },
+    "releaseMacro": {
+      "enabled": false,
+      "sequence": "filter-then-fade",
+      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
+      "resetAfterStop": true
+    }
+  }
+}
