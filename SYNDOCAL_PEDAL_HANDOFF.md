@@ -9,7 +9,7 @@
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
 product source versionは`1.1.5`、branchは`beta-v1.1.2`です。current runtime-source
 checkpointはpushed commit
-`45f6d1daae0a7874588d6834ccb530590bce7610`です。この後のdocs-only branch tipは
+`862cf8035dfb365a7d799f820936585882d0a1e7`です。この後のdocs-only branch tipは
 runtime identityを変更しません。
 
 F14の物理意図はRekordbox MIDI送信より先にresponse windowを開始します。freshな
@@ -18,15 +18,19 @@ profileは`8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/6
 止まりません。不正・stale・矛盾応答はfallbackをfail-closedで抑止し、late fresh測定は
 predictionを上書き・rebaseします。F13 ReleaseはStop MIDI結果から分離され、Stop送信失敗
 でも相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。
+fallbackは単調増加する`pedalIntentId`と、発行時点の
+`baseMeasuredLoopRevision`/`baseLoopDivision`を必須で持ちます。実測wireは
+`payload.loop`へ正規にネストし、旧flat shapeは受信側でfail-closedです。
 
 focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
 wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
 
-このruntime checkpointではfull `npm test`が387 total / 385 pass / 0 fail /
-2 intentional pkg skip、Stage1+strict-v3 focusedが31/31、release-focusedが51/51、
-first-party warningは0です。独立Terra xHigh再監査はrapid-F14競合とinactive loop-off
-shapeの初回P1 2件を検出し、修正後は新規P1なしでPASSしました。Ox-alphaはこのsessionで
-callableではなかったため、Sol監督がこの限定例外とTerra独立再監査を記録しています。
+このruntime checkpointではfull `npm test`が389 total / 387 pass / 0 fail /
+2 intentional pkg skip、Stage1+strict-v3 focusedが33/33、first-party warningは0です。
+独立Terra xHigh再監査はrapid-F14/inactive-loop競合、
+late fallback causality、実測loop wire shapeのP1を段階的に検出し、全修正後は
+P0/P1/P2なしでPASSしました。Ox-alphaはこのsessionでcallableではなかったため、
+Sol監督がこの限定例外とTerra独立再監査を記録しています。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 strict show-sync v2 clean break
 

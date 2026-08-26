@@ -120,6 +120,11 @@ responses suppress prediction fail-closed. Only actual no-response emits the
 distinct `DJ_LOOP_FALLBACK` with source `pedal-no-response-predicted`. Its exact
 absolute profile is `8, 4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64`; it saturates
 only at `1/64`. A late fresh measured report overrides and rebases prediction.
+`DJ_LOOP_STATE` puts the exact measured fields under `payload.loop`; a flat
+measured-loop wire payload is retired and rejected. Every fallback carries a
+monotonic `pedalIntentId`, `baseMeasuredLoopRevision`, and `baseLoopDivision`.
+Syndocal accepts it only when that causal base still equals its current state
+and the target is exactly one downward step (or the saturated `1/64` floor).
 
 Track activity is derived from Hook UDP snapshots and explicit master_change
 packets. DJ_TRACK_LOADED remains diagnostic. DJ_MASTER_TRACK_ACTIVE is delayed

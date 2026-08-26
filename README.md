@@ -13,7 +13,7 @@ route stays on branch `beta-v1.1.2`, requires a clean upstream-equal checkout,
 an external `DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. Product
 source metadata is `1.1.5`; no v1.1.5 installer/tag/public release is claimed.
 The exact pushed runtime-source checkpoint is
-`45f6d1daae0a7874588d6834ccb530590bce7610`; a later docs-only branch tip does
+`862cf8035dfb365a7d799f820936585882d0a1e7`; a later docs-only branch tip does
 not change that runtime identity.
 
 Stage 1 separates Rekordbox MIDI from Syndocal delivery. Physical F14 arms the
@@ -25,6 +25,10 @@ fallback, and a late fresh measurement rebases it. Physical F13 sends one
 correlated `DJ_RELEASE` even when local Stop MIDI fails, so the Rekordbox and
 Syndocal results stay independently visible. These are software gates only;
 controller/pedal/Rekordbox/wired-Syndocal acceptance remains exactly **0/12**.
+Each fallback carries a monotonic `pedalIntentId` plus the exact measured
+revision and effective loop-division base. The strict-v3 sender nests measured
+loop truth under `payload.loop`, matching Syndocal ingress; the retired flat
+wire shape is rejected.
 
 ## SUPERSEDED / DO NOT EXECUTE — v1.1.3 リリースノート（immutable historical release evidence）
 
@@ -428,7 +432,7 @@ read-only GET APIや既存のSocket.IOイベントが認証付きになったわ
 (退役済み)で
 v3のcapability setに含まれず、受入れ済みwire eventとして扱いません。公開済み
 v1.1.3はこのencoder/router negative proofを満たさないためblockedです。訂正版
-v1.1.5 runtime checkpoint `45f6d1daae0a7874588d6834ccb530590bce7610` は経路到達不能の
+v1.1.5 runtime checkpoint `862cf8035dfb365a7d799f820936585882d0a1e7` は経路到達不能の
 negative proofを持ちますが、installer／実機受入れとは別です。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
 send-failedを `/api/dj-agent/status` とUIに反映します。`accepted`/`duplicate`だけが
 成功、`no_mapping`/`rejected`はterminal failure、`busy`だけが同じ`eventId`・
