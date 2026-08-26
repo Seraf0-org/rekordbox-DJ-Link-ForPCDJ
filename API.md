@@ -8,6 +8,24 @@ only when the extension is explicitly enabled.
 
 ## Current state
 
+### Current Syndocal authority — v1.1.6 any-deck strict v3
+
+The current and next operator route uses
+`config/dj-agent-v1.1.6.example.json` and
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.6.csv`. The initializer creates
+only `C:\SyndocalShow\dj-agent-v1.1.6.json` when absent; it does not overwrite,
+copy, delete, or read the deployed historical v1.1.5 file. A mapped track may
+be admitted from any actually playing Rekordbox deck. MASTER/master-change is
+diagnostic only and never assigns show-control ownership. The v1.1.5
+controlled-source handoff remains deployed historical evidence, not current or
+next operator guidance.
+
+The exact v1.1.6 implementation checkpoint is
+`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`. Its 2026-08-27 full Node gate
+completed with 404 passed, 0 failed, and 2 explicitly skipped
+real-packaging-only cases. It is not yet deployed or physically accepted on the
+target DJ PC.
+
 `GET /api/now-playing` (also available as `GET /api/state`) returns the complete
 snapshot used by the web UI. The loop-only endpoint is:
 
@@ -94,12 +112,12 @@ physical pedal:
 * POST /api/dj-agent/actions/track-active
 
 When configured, `midi.deckChannels` maps a one-based Rekordbox deck to a MIDI
-channel, for example `{ "1": 1, "2": 2 }`. The current detector master deck
-selects the channel for loop-half, release, and every filter-ramp CC message;
-an unmapped deck falls back to the mapping's configured `channel`. Action
-results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads expose `targetDeck` and
-`targetChannel`. The equivalent environment override is the JSON-valued
-`MIDI_DECK_CHANNELS` variable.
+channel, for example `{ "1": 1, "2": 2 }`. The admitted owner deck (not the
+current MASTER diagnostic) selects the channel for loop-half, release, and
+every filter-ramp CC message; an unmapped deck falls back to the mapping's
+configured `channel`. Action results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads
+expose `targetDeck` and `targetChannel`. The equivalent environment override is
+the JSON-valued `MIDI_DECK_CHANNELS` variable.
 
 POST actions are loopback-only by default. IPv4 `127.0.0.0/8`, IPv4-mapped
 IPv6 loopback, and `::1` are accepted. A remote request receives HTTP 403 unless
@@ -126,14 +144,17 @@ monotonic `pedalIntentId`, `baseMeasuredLoopRevision`, and `baseLoopDivision`.
 Syndocal accepts it only when that causal base still equals its current state
 and the target is exactly one downward step (or the saturated `1/64` floor).
 
-Track activity is derived from Hook UDP snapshots and explicit master_change
-packets. DJ_TRACK_LOADED remains diagnostic. DJ_MASTER_TRACK_ACTIVE is delayed
-until one play session has an exact master deck, exact track identity,
-positionAtSendSec, effectiveBpm, a monotonic positionRevision, and a sample no
-older than 1500 ms. DJ_MASTER_TRACK_SYNC then carries later revisions for that
-same session; missing, null, nonfinite, stale, duplicate, and reordered samples
-fail closed. A nonempty contentId is authoritative; title+artist is used only
-when contentId is absent.
+Track activity is derived from Hook UDP snapshots. Rekordbox MASTER and
+master_change are diagnostics only. DJ_TRACK_LOADED remains diagnostic.
+DJ_TRACK_ACTIVE is emitted once for every actually playing deck session with
+exactly one identity form, positionAtSendSec, effectiveBpm, a monotonic
+positionRevision, and a sample no older than 1500 ms. A nonempty contentId is
+authoritative; exact title+artist is used only when contentId is absent.
+DJ_TRACK_SYNC then carries later revisions for that exact admitted
+deck/deckId/playSessionId and identity; missing, null, nonfinite, stale,
+duplicate, reordered, foreign, or cross-identity samples fail closed.
+The first emitted ACTIVE freezes that session's one-of wire identity; late
+metadata enrichment is diagnostic only and cannot alter later ACTIVE or SYNC.
 
 The sole current/production adapter is `syndocal-envelope-v3`.
 Every frame has exactly `{v:3,type,agentId,sessionId,sequence,eventId,payload}`.
@@ -144,15 +165,23 @@ sequence values, ACK tracking, and DJ_STATE_SYNC. An unacknowledged physical
 event is retried after reconnect with the same eventId and semantic payload
 (including playSessionId), a fresh connection sessionId, and a new monotonic
 wire sequence; duplicate ACK outcome is success.
-`DJ_MASTER_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
+The generic State Sync payload is exactly `{released}` when no session is
+admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
+three owner-correlation fields are present. Rekordbox MASTER is never encoded
+as show-control ownership. `DJ_LOOP_STATE` and `DJ_LOOP_FALLBACK` likewise
+correlate only to the admitted deck/deckId/playSessionId; foreign, mixed, or
+master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.6
+operator capability; it remains only deployed historical v1.1.5 evidence.
+`DJ_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
 connection-generation + wire-sequence eventId, never enters the durable
 physical-event registry, and is never replayed after reconnect. A fresh sync
 must arrive for the new connection/session; late frames stay socket-fenced.
-When Syndocal is disabled or disconnected, local Rekordbox MIDI actions remain
-independent. Network fallback/release delivery then fails visibly; it is not
-queued as a successful Syndocal action. Stage 2 remains fail-closed until an
-authoritative timeline snapshot is received, and stale pedal events are not
-replayed after reconnection.
+Stage 1 MIDI/fallback actions require a terminal `accepted` or `duplicate` ACK
+for the exact candidate deck/session; they otherwise fail closed. Network
+fallback/release delivery remains visible and is never queued as a successful
+Syndocal action. Stage 2 remains fail-closed until an authoritative timeline
+snapshot is received, and stale pedal events are not replayed after
+reconnection.
 
 `GET /api/dj-agent/status` also exposes the handoff state machine:
 `mode` is `dj-control`, `handoff-pending`, or `timeline-control`; `timelineState`

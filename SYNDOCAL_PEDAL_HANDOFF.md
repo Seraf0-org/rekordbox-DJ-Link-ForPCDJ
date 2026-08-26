@@ -2,31 +2,56 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-26 current strict show-sync v3 clean break
+## 2026-08-26 current v1.1.6 any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.5`、branchは`beta-v1.1.2`です。current runtime-source
-checkpointはpushed commit
-`ffd013c91f23df6ced84cd6daabc97266993dc34`です。この後のdocs-only branch tipは
-runtime identityを変更しません。controlled-source acceptanceは
-branch `beta-v1.1.2`、clean、upstream-equal、HがHEADのancestor、かつ
-`H..HEAD`が正確に`API.md`、`README.md`、`SYNDOCAL_PEDAL_HANDOFF.md`だけであることを
-毎回証明します。これは`HEAD == H`を要求しません。
+product source versionは`1.1.6`です。v1.1.6のinstaller、tag、public release、または
+hardware acceptanceはこの文書で主張しません。current/next operator routeはtracked
+`config/dj-agent-v1.1.6.example.json`と
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.6.csv`を使います。exact
+`start-all.bat --init-config`は存在しない場合だけ
+`C:\SyndocalShow\dj-agent-v1.1.6.json`を作成し、deployed historical
+`C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
+
+v1.1.6実装のexact source checkpointは
+`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`です。2026-08-27のfull Node gateは
+406 tests中404 pass、0 fail、real-packaging-onlyの明示2件skipで、独立adversarial
+reviewはP0/P1/P2なしでした。これはsource証拠であり、対象DJ PCへのv1.1.6配備と
+physical HW-4 12項目は未受入です。
+
+exact mappingに一致した**任意の実再生Rekordbox deck**がshow-control candidateです。
+`DJ_TRACK_ACTIVE`はdeck/deckId/playSessionIdごとに一度だけ、`contentId`またはexact
+title+artistの一方だけを持って送ります。`DJ_TRACK_SYNC`はそのexact ownerとidentityの
+positionRevisionだけを進めます。MASTER/master-changeは診断だけで、ownerを付与・置換・
+再triggerしません。unmapped/foreign/stale/conflicting/ambiguous candidateはownerを変更せず
+fail-closedです。sessionの最初のACTIVEがone-of wire identityをfreezeし、late contentId等の
+metadata enrichmentはdiagnostic/internal stateだけを更新して後続ACTIVE/SYNCのidentityを
+切替えません。generic `DJ_STATE_SYNC`は`{released}`、または
+`{released,ownerDeck,ownerDeckId,activePlaySessionId}`のall-or-noneだけです。
+`DJ_LOOP_STATE`と`DJ_LOOP_FALLBACK`も同じadmitted deck/deckId/playSessionIdへ相関し、
+outer payloadのunknown/legacy key（`masterDeckRevision`を含む）はrejectします。
 
 F14の物理意図はRekordbox MIDI送信より先にresponse windowを開始します。freshな
-同一session測定が権威で、actual no-responseだけが別型の`DJ_LOOP_FALLBACK`を送ります。
+同一admitted owner sessionの測定が権威で、actual no-responseだけが別型の
+`DJ_LOOP_FALLBACK`を送ります。
 profileは`8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64`で、2では
 止まりません。不正・stale・矛盾応答はfallbackをfail-closedで抑止し、late fresh測定は
 predictionを上書き・rebaseします。F13 ReleaseはStop MIDI結果から分離され、Stop送信失敗
-でも相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。
+でもadmitted owner sessionへ相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。
 fallbackは単調増加する`pedalIntentId`と、発行時点の
 `baseMeasuredLoopRevision`/`baseLoopDivision`を必須で持ちます。実測wireは
 `payload.loop`へ正規にネストし、旧flat shapeは受信側でfail-closedです。
 
 focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
 wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
+
+### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
+
+以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。
+provenanceのため保持しますが、current/next operator guidance、v1.1.6 config/CSV、または
+any-deck authorityとして実行・再利用・解釈してはいけません。
 
 このcheckpointはtracked token-free template
 `config/dj-agent-v1.1.5.example.json`と、checkout位置に依存しないexact
@@ -51,7 +76,7 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 `syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
 指定時に拒否していました。全frameは当時
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
-現行authorityは本書冒頭のv1.1.5/v3だけです。
+現行authorityは本書冒頭のv1.1.6 any-deck/v3だけです。
 
 この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
 任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
@@ -91,8 +116,8 @@ runtime event contractを現行環境へ設定してはいけません。
 
 当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
 `syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
-DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.5/v3 authorityと、
-READMEの独立したcurrent controlled-source acceptance節だけに従います。
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.6 any-deck/v3 authorityと、
+READMEの独立したcurrent source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
 `refs/tags/v*`の削除とnon-fast-forward更新を禁止します。workflowも
@@ -355,7 +380,7 @@ branch/commitは削除していない。
 この節以下のstrict-v2 runbookは過去の設計証拠であり、**実行・設定コピー禁止**です。
 現在形・命令形で残る記述も当時の契約を正確に保存するための引用範囲で、現行DJ PC、
 launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用してはいけません。現行authorityは
-本書冒頭のv1.1.5 strict-v3節だけです。この履歴範囲にはcurrent operator linkを置きません。
+本書冒頭のv1.1.6 any-deck strict-v3節だけです。この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
 全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定、
