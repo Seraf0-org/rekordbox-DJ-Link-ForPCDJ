@@ -552,7 +552,7 @@ function encodeV3BeatJump(payload) {
   const bars = strictFinite(payload, "bars", { integer: true });
   const timelineId = requiredString(payload, "timelineId");
   const playSessionId = requiredString(payload, "playSessionId");
-  return [-4, 4].includes(bars) && timelineId && playSessionId
+  return bars === 4 && timelineId && playSessionId
     ? { bars, timelineId, playSessionId }
     : null;
 }
@@ -601,6 +601,7 @@ function decodeV3TimelineState(message) {
   const fields = [
     "state",
     "loopActive",
+    "transitionHoldActive",
     "timelineId",
     "positionBars",
     "playSessionId",
@@ -610,6 +611,7 @@ function decodeV3TimelineState(message) {
   if (!isPlainRecord(payload) || !hasExactFields(payload, fields)) return null;
   if (typeof payload.state !== "string" || !TIMELINE_STATES.has(payload.state)) return null;
   if (typeof payload.loopActive !== "boolean") return null;
+  if (typeof payload.transitionHoldActive !== "boolean") return null;
   const timelineId = payload.timelineId === null ? null : requiredString(payload, "timelineId");
   const playSessionId = payload.playSessionId === null ? null : requiredString(payload, "playSessionId");
   const releaseEventId = payload.releaseEventId === null ? null : requiredString(payload, "releaseEventId");
@@ -627,6 +629,7 @@ function decodeV3TimelineState(message) {
     type: "DJ_TIMELINE_STATE",
     state: payload.state,
     loopActive: payload.loopActive,
+    transitionHoldActive: payload.transitionHoldActive,
     timelineId,
     positionBars,
     playSessionId,
@@ -1493,7 +1496,7 @@ function createSyndocalClient({
     ) {
       const timelineState = adapterObject.decodeTimelineState?.(message);
       if (!timelineState) {
-        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state and boolean loopActive";
+        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive";
         updateStatus({ lastError: warning });
         emitter.emit("warning", { message: warning, type: "DJ_TIMELINE_STATE", raw: message });
         return;

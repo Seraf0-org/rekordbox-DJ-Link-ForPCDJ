@@ -103,6 +103,7 @@ function strictTimelineState(overrides = {}) {
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "life-over",
       positionBars: 8,
       playSessionId: "play-session-1",
@@ -403,10 +404,10 @@ test("generic v3 State Sync emits owner correlation all-or-none", () => {
   }
 });
 
-test("v3 beat jump and loop set encoders require a canonical playSessionId", () => {
+test("v3 beat jump +4 and loop set encoders require a canonical playSessionId", () => {
   const adapter = createSyndocalEnvelopeV3Adapter({ token: TEST_TOKEN });
   adapter.encodeHello({ eventId: "hello-actions", sequence: 1 });
-  const beatJump = { bars: -4, timelineId: "life-over", playSessionId: "play-session-1" };
+  const beatJump = { bars: 4, timelineId: "life-over", playSessionId: "play-session-1" };
   const loopSet = { active: true, timelineId: "life-over", playSessionId: "play-session-1" };
   const jumpFrame = adapter.encodeEvent({
     type: "DJ_TIMELINE_BEAT_JUMP",
@@ -416,6 +417,12 @@ test("v3 beat jump and loop set encoders require a canonical playSessionId", () 
   });
   assertV3Frame(jumpFrame, "DJ_TIMELINE_BEAT_JUMP");
   assert.deepEqual(jumpFrame.payload, beatJump);
+  assert.equal(adapter.encodeEvent({
+    type: "DJ_TIMELINE_BEAT_JUMP",
+    eventId: "jump-retired-minus-4",
+    sequence: 200,
+    payload: { ...beatJump, bars: -4 },
+  }), null);
   const loopFrame = adapter.encodeEvent({
     type: "DJ_TIMELINE_LOOP_SET",
     eventId: "loop-canonical",
@@ -1688,7 +1695,7 @@ test("pending beat jump fails closed on socket close and is not replayed", async
   client.start();
   await flush();
   const first = V3WebSocket.instances[0];
-  const boundPayload = { bars: -4, timelineId: "life-over", playSessionId: currentSession };
+  const boundPayload = { bars: 4, timelineId: "life-over", playSessionId: currentSession };
   const queued = client.sendEvent({ type: "DJ_TIMELINE_BEAT_JUMP", payload: boundPayload });
   assert.equal(queued.state, "pending");
   const firstFrame = first.sent.find((frame) => frame.eventId === queued.eventId);
@@ -1730,6 +1737,62 @@ test("pending beat jump fails closed on socket close and is not replayed", async
   assert.equal(client.getStatus().pendingAcks, 0);
   assert.equal(second.sent.some((frame) => frame.type === "DJ_TIMELINE_BEAT_JUMP"), false);
   assert.equal(second.sent.some((frame) => frame.eventId === queued.eventId), false);
+});
+
+test("pending absolute LOOP_SET fails closed on socket close and only a new manual edge may send after reconnect", async (t) => {
+  V3WebSocket.instances = [];
+  let currentSession = "play-session-a";
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: currentSession }),
+  });
+  t.after(() => client.stop());
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const queued = client.sendEvent({
+    type: "DJ_TIMELINE_LOOP_SET",
+    payload: { active: false, timelineId: "life-over", playSessionId: currentSession },
+  });
+  assert.equal(queued.state, "pending");
+  const firstFrame = first.sent.find((frame) => frame.eventId === queued.eventId);
+  assertV3Frame(firstFrame, "DJ_TIMELINE_LOOP_SET");
+
+  currentSession = "play-session-b";
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "queued LOOP_SET reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "loop-set-connection-closed");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+  assert.equal(client.getStatus().lastDelivery.reason, "connection-closed");
+  await reconnect;
+
+  const second = V3WebSocket.instances.at(-1);
+  assert.equal(second.sent.some((frame) => frame.eventId === queued.eventId), false);
+  assert.equal(second.sent.some((frame) => frame.type === "DJ_TIMELINE_LOOP_SET"), false);
+
+  // A changed session requires a new physical/manual edge; the client never
+  // turns a reconnect into an automatic LOOP_SET replay.
+  const freshManual = client.sendEvent({
+    type: "DJ_TIMELINE_LOOP_SET",
+    payload: { active: false, timelineId: "life-over", playSessionId: currentSession },
+  });
+  assert.equal(freshManual.state, "pending");
+  const freshFrame = second.sent.find((frame) => frame.eventId === freshManual.eventId);
+  assertV3Frame(freshFrame, "DJ_TIMELINE_LOOP_SET");
+  assert.equal(freshFrame.payload.playSessionId, "play-session-b");
 });
 
 test("DJ_RELEASE reconnect retry preserves eventId/payload and fresh v3 session until terminal ACK", async (t) => {
@@ -2442,8 +2505,10 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   t.after(() => client.stop());
   const failures = [];
   const states = [];
+  const warnings = [];
   client.on("protocol-failure", (failure) => failures.push(failure));
   client.on("timeline-state", (state) => states.push(state));
+  client.on("warning", (warning) => warnings.push(warning));
   client.start();
   await flush();
   const socket = V3WebSocket.instances[0];
@@ -2458,6 +2523,7 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   ]);
   assert.equal(states.length, 1);
   assert.equal(states[0].playSessionId, "play-session-1");
+  assert.equal(states[0].transitionHoldActive, false);
   // The decoded state exposes authoritative session identity and the
   // monotonic per-session sequence so the router can fence same-session
   // stale/equal replays without inventing any defaults.
@@ -2473,6 +2539,26 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   assert.equal(decoded.sequence, 9);
   assert.equal(decoded.eventId, "timeline-state-9");
   assert.equal(decodeV3TimelineState({ ...strictTimelineState(), bonus: true }), null);
+  const missingTransitionHold = strictTimelineState();
+  delete missingTransitionHold.payload.transitionHoldActive;
+  assert.equal(decodeV3TimelineState(missingTransitionHold), null);
+  assert.equal(decodeV3TimelineState(strictTimelineState({ transitionHoldActive: "true" })), null);
+  assert.equal(decodeV3TimelineState(strictTimelineState({ transitionHoldActive: false, extra: true })), null);
+
+  // The public transport warning names the new strict field, rather than
+  // leaving an operator to infer why an otherwise valid-looking v3 state was
+  // rejected. Neither missing nor non-boolean values may reach the router.
+  socket.emit("message", JSON.stringify(missingTransitionHold));
+  socket.emit("message", JSON.stringify(strictTimelineState({ transitionHoldActive: "true" })));
+  assert.equal(states.length, 1);
+  assert.deepEqual(warnings.map((warning) => warning.message), [
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
+  ]);
+  assert.equal(
+    client.getStatus().lastError,
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
+  );
 });
 
 test("v3 timeline state accepts idle pedalOwner null and rejects unknown ownership", () => {
@@ -2796,19 +2882,19 @@ test("router reannounces fresh candidates only after each connection's timeline-
   // It must be treated exactly like a reconnect, rather than assuming the
   // first pre-open send was retained by the receiver.
   assert.equal(reannounceCalls, 0);
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(reannounceCalls, 1);
   assert.deepEqual(client.sent.map((event) => event.type), ["DJ_TRACK_ACTIVE"]);
   assert.equal(Object.hasOwn(client.sent[0].payload, "master"), false);
 
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(reannounceCalls, 1, "one connection may request candidates only once");
 
   client.sent.length = 0;
   client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
   client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
   assert.equal(reannounceCalls, 1);
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(reannounceCalls, 2);
   assert.deepEqual(client.sent.map((event) => event.type), ["DJ_TRACK_ACTIVE"]);
 });
@@ -2819,6 +2905,7 @@ test("router retires prior timeline sessions within one connection generation", 
     client.emit("timeline-state", {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: `timeline-${sessionId}`,
       positionBars: sequence,
       playSessionId: `play-${sessionId}`,
@@ -2878,7 +2965,7 @@ test("router never revives a released session during a reconnect reannouncement"
     });
   };
 
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   client.emit("delivery", {
     eventId: "released-reannounce-1",
     type: "DJ_TRACK_ACTIVE",
@@ -2892,7 +2979,7 @@ test("router never revives a released session during a reconnect reannouncement"
 
   client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
   client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(reannounceCalls, 2);
   assert.equal(
     client.sent.filter((event) => event.type === "DJ_TRACK_ACTIVE").length,

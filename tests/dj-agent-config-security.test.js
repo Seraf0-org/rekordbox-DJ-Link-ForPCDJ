@@ -27,7 +27,7 @@ const PRIVATE_PATH = "C:\\Users\\alice\\Documents\\dj-agent-secret.json";
 
 function strictShowConfig(token = TEST_TOKEN) {
   return {
-    version: "1.1.8",
+    version: "1.1.9",
     enabled: true,
     syndocal: {
       enabled: true,
@@ -108,7 +108,7 @@ test("config read failure exposes only a generic public warning", () => {
   assert.equal(result.warning.includes("alice"), false);
 });
 
-test("runtime enables only the exact external v1.1.8 show source", () => {
+test("runtime enables only the exact external v1.1.9 show source", () => {
   const config = loadExternalShow();
   assert.equal(config.enabled, true);
   assert.equal(config.warning, null);
@@ -143,7 +143,7 @@ test("source-direct and packaged-equivalent roots share the exact activation gat
   };
 
   const legacy = strictShowConfig();
-  legacy.version = "1.1.6";
+  legacy.version = "1.1.8";
   for (const repositoryRoot of [REPOSITORY_ROOT, packageRoot]) {
     assert.equal(load(strictShowConfig(), repositoryRoot).enabled, true);
     assertDisabled(load(legacy, repositoryRoot));
@@ -173,7 +173,7 @@ test("module checkout root, not process cwd, defines the direct-entry external b
   assert.equal(loadedFromDifferentCwd.enabled, true);
   assert.equal(
     resolveStrictExternalShowPath(
-      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.8.example.json"),
+      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.9.example.json"),
       fs,
       REPOSITORY_ROOT,
     ),
@@ -314,6 +314,7 @@ test("strict external config composes production MIDI/client/router through F13 
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "composition-timeline",
       positionBars: 0,
       playSessionId: candidate.payload.playSessionId,
@@ -352,6 +353,7 @@ test("strict external config composes production MIDI/client/router through F13 
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "composition-timeline",
       positionBars: 16,
       playSessionId: candidate.payload.playSessionId,

@@ -656,6 +656,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 32,
     playSessionId: timelineSession,
@@ -669,7 +670,8 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
+    transitionHoldActive: true,
     timelineId: "show-1",
     positionBars: 32,
     playSessionId: timelineSession,
@@ -678,13 +680,13 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   });
   assert.equal(router.getStatus().mode, "timeline-control");
   midiCalls.length = 0;
-  const minus = router.triggerAction("release");
-  assert.equal(minus.ok, true);
-  assert.equal(sent.at(-1).type, "DJ_TIMELINE_BEAT_JUMP");
-  assert.equal(sent.at(-1).payload.bars, -4);
+  const transitionHoldOff = router.triggerAction("release");
+  assert.equal(transitionHoldOff.ok, true);
+  assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_SET");
+  assert.equal(sent.at(-1).payload.active, false);
   client.emit("delivery", {
     eventId: sent.at(-1).eventId,
-    type: "DJ_TIMELINE_BEAT_JUMP",
+    type: "DJ_TIMELINE_LOOP_SET",
     state: "rejected",
     ackState: "rejected",
     ok: false,
@@ -692,6 +694,17 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   });
   assert.equal(router.getStatus().lastTimelineAction.delivery.state, "rejected");
   assert.equal(router.getStatus().lastTimelineAction.ok, false);
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: timelineSession,
+    pedalOwner: "timeline",
+    releaseEventId: stage1Release.delivery.eventId,
+  });
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.ok, true);
   assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_SET");
@@ -704,6 +717,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: true,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 32,
     playSessionId: timelineSession,
@@ -738,7 +752,12 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   client.emit("status", connection);
   assert.equal(router.getStatus().mode, "timeline-control");
   assert.equal(router.triggerAction("release").reason, "timeline-state-pending");
-  client.emit("timeline-state", { state: "ended", loopActive: false, timelineId: "show-1" });
+  client.emit("timeline-state", {
+    state: "ended",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+  });
   assert.equal(router.getStatus().mode, "dj-control");
   router.stop();
 });
@@ -803,6 +822,7 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 32,
     playSessionId: sessionA,
@@ -816,7 +836,8 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
+    transitionHoldActive: true,
     timelineId: "show-1",
     positionBars: 32,
     playSessionId: sessionA,
@@ -853,19 +874,30 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
   };
 }
 
-test("stage2 timeline actions stamp the exact current authoritative playSessionId", () => {
-  const { router, sent, sessionA } = createStage2TimelineFixture();
-  const jump = router.triggerAction("release");
-  assert.equal(jump.ok, true);
-  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").payload, {
-    bars: -4,
+test("stage2 F13 stamps an exact authoritative loop-off without changing F14", () => {
+  const { router, client, sent, sessionA, handoffEventId } = createStage2TimelineFixture();
+  const transitionHoldOff = router.triggerAction("release");
+  assert.equal(transitionHoldOff.ok, true);
+  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").payload, {
+    active: false,
     timelineId: "show-1",
     playSessionId: sessionA,
     source: "pedal",
   });
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.ok, true);
-  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").payload, {
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET").at(-1).payload, {
     active: true,
     timelineId: "show-1",
     playSessionId: sessionA,
@@ -873,8 +905,225 @@ test("stage2 timeline actions stamp the exact current authoritative playSessionI
   });
   assert.deepEqual(
     sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).map((event) => event.type),
-    ["DJ_TIMELINE_BEAT_JUMP", "DJ_TIMELINE_LOOP_SET"],
+    ["DJ_TIMELINE_LOOP_SET", "DJ_TIMELINE_LOOP_SET"],
   );
+  router.stop();
+});
+
+test("stage2 F13 removes an ordinary authored loop while transition hold is inactive", () => {
+  const { router, client, sent, sessionA, handoffEventId, midiCalls } = createStage2TimelineFixture();
+  const midiBeforeStage2 = [...midiCalls];
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  const ordinaryLoopOff = router.triggerAction("release");
+  assert.equal(ordinaryLoopOff.ok, true);
+  assert.deepEqual(sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").payload, {
+    active: false,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
+  assert.deepEqual(midiCalls, midiBeforeStage2, "Stage 2 ordinary loop-off must not emit local MIDI");
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 33,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
+  router.stop();
+});
+
+test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails closed without MIDI", () => {
+  const {
+    router,
+    client,
+    sent,
+    midiCalls,
+    sessionA,
+    handoffEventId,
+    setConnection,
+  } = createStage2TimelineFixture({ sendState: "pending" });
+  const loopSends = () => sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET");
+  const midiBeforeStage2 = [...midiCalls];
+
+  const first = router.triggerAction("release");
+  assert.equal(first.delivery.state, "pending");
+  assert.equal(loopSends().length, 1);
+  assert.equal(loopSends()[0].payload.active, false);
+  assert.equal(sent.some((event) => event.type === "DJ_TIMELINE_BEAT_JUMP"), false);
+
+  const duplicate = router.triggerAction("release");
+  assert.equal(duplicate.reason, "timeline-loop-action-pending");
+  assert.equal(loopSends().length, 1, "a pending F13 must not double-fire");
+
+  client.emit("delivery", {
+    eventId: first.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "rejected",
+    ackState: "rejected",
+    ok: false,
+    reason: "denied",
+  });
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 33,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
+  assert.equal(loopSends().length, 1);
+
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: true,
+    timelineId: "show-1",
+    positionBars: 34,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
+  assert.equal(loopSends().length, 1);
+
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: true,
+    timelineId: "show-1",
+    positionBars: 35,
+    playSessionId: sessionA,
+    pedalOwner: "dj",
+    releaseEventId: null,
+  });
+  assert.equal(router.triggerAction("release").reason, "handoff-pending");
+  assert.equal(loopSends().length, 1);
+
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: true,
+    timelineId: "show-1",
+    positionBars: 36,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  const f14Pending = router.triggerAction("loop-half");
+  assert.equal(f14Pending.delivery.state, "pending");
+  assert.equal(loopSends().length, 2);
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
+  assert.equal(loopSends().length, 2, "F13 shares F14's pending LOOP_SET latch");
+  setConnection("disconnected");
+  client.emit("status", { enabled: true, state: "disconnected" });
+  assert.equal(router.triggerAction("release").reason, "timeline-network-disconnected");
+  assert.equal(loopSends().length, 2);
+  assert.deepEqual(midiCalls, midiBeforeStage2, "Stage 2 F13 must not add Rekordbox MIDI");
+  router.stop();
+});
+
+test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh correlated snapshot permits one new manual edge", () => {
+  const {
+    router,
+    client,
+    sent,
+    midiCalls,
+    sessionA,
+    handoffEventId,
+    setConnection,
+  } = createStage2TimelineFixture({ sendState: "pending" });
+  const loopSends = () => sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET");
+  const midiBeforeStage2 = [...midiCalls];
+
+  const first = router.triggerAction("release");
+  assert.equal(first.delivery.state, "pending");
+  assert.equal(loopSends().length, 1);
+
+  // A foreign terminal delivery and an authoritative state for the wrong
+  // target must not release the exact F13/F14 latch.
+  client.emit("delivery", {
+    eventId: "foreign-loop-set-terminal",
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "rejected",
+    ackState: "rejected",
+    ok: false,
+    reason: "foreign",
+  });
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: true,
+    timelineId: "show-1",
+    positionBars: 37,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
+  assert.equal(router.triggerAction("loop-half").reason, "timeline-loop-action-pending");
+
+  // The real Syndocal transport terminalizes LOOP_SET as send-failed on a
+  // socket close; it never queues it for reconnect replay. The exact terminal
+  // delivery clears only this latch, while reconnect resets timeline snapshot
+  // authority and cannot send an automatic replacement command.
+  setConnection("disconnected");
+  client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
+  client.emit("delivery", {
+    eventId: first.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "send-failed",
+    ackState: "send-failed",
+    ok: false,
+    reason: "connection-closed",
+  });
+  assert.equal(router.triggerAction("release").reason, "timeline-network-disconnected");
+  setConnection("connected");
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
+  assert.equal(router.triggerAction("release").reason, "timeline-state-pending");
+  assert.equal(loopSends().length, 1, "reconnect must not automatically replay the prior LOOP_SET");
+
+  // A fresh correlated state makes exactly the next physical/manual edge
+  // eligible. It still has no automatic outbound effect by itself.
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: true,
+    timelineId: "show-1",
+    positionBars: 38,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
+  assert.equal(loopSends().length, 1, "a state snapshot is not a replacement physical/manual edge");
+  const retry = router.triggerAction("release");
+  assert.equal(retry.delivery.state, "pending");
+  assert.equal(loopSends().length, 2);
+  assert.deepEqual(midiCalls, midiBeforeStage2, "shared Stage 2 loop latch must not emit local MIDI");
   router.stop();
 });
 
@@ -886,11 +1135,12 @@ test("an unacknowledged replacement cannot take a released Stage 2 owner", () =>
   assert.equal(replacement.payload.playSessionId, sessionB);
   const stillOwnedByA = router.triggerAction("release");
   assert.equal(stillOwnedByA.ok, true);
-  assert.equal(sent.find((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").payload.playSessionId, sessionA);
+  assert.equal(sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").payload.playSessionId, sessionA);
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 40,
     playSessionId: sessionB,
@@ -934,7 +1184,7 @@ test("a queued stage2 command keeps its original playSessionId when the session 
   assert.equal(sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).length, 1);
   const nextCommand = router.triggerAction("release");
   assert.equal(nextCommand.delivery.state, "pending");
-  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_BEAT_JUMP").at(-1).payload.playSessionId, sessionA);
+  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET").at(-1).payload.playSessionId, sessionA);
   assert.deepEqual(queuedEvent.payload, {
     bars: 4,
     timelineId: "show-1",
@@ -963,6 +1213,7 @@ test("reconnect requires a fresh authoritative snapshot before stage2 sends resu
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: true,
     timelineId: "show-1",
     positionBars: 48,
     playSessionId: sessionA,
@@ -1034,6 +1285,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 8,
     playSessionId: session,
@@ -1048,6 +1300,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 8,
     playSessionId: session,
@@ -1136,6 +1389,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     type: "DJ_TIMELINE_STATE",
     state: "running",
     loopActive: true,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 16,
     playSessionId: session,
@@ -1217,6 +1471,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "show-1",
       positionBars: 16,
       playSessionId: "play-session-1",
@@ -1234,15 +1489,27 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
   // Equal-sequence duplicate and stale replay are provably rejectable: no
   // mutation of any router state, including the freshness timestamp.
   socket.emit("message", stateMessage({ sequence: 5, eventId: "fence-5-duplicate" }));
-  socket.emit("message", stateMessage({ sequence: 4, eventId: "fence-4-stale", positionBars: 99 }));
+  socket.emit("message", stateMessage({
+    sequence: 4,
+    eventId: "fence-4-stale",
+    positionBars: 99,
+    transitionHoldActive: true,
+  }));
   const afterReplays = router.getStateSync();
   assert.equal(afterReplays.timelinePositionBars, applied.timelinePositionBars);
+  assert.equal(afterReplays.timelineTransitionHoldActive, false);
   assert.equal(afterReplays.timelineStateUpdatedAt, applied.timelineStateUpdatedAt);
   assert.equal(warnings.filter((message) => message === "Stale duplicate DJ_TIMELINE_STATE ignored").length, 2);
 
   // A strictly newer sequence applies normally.
-  socket.emit("message", stateMessage({ sequence: 6, eventId: "fence-6", positionBars: 20 }));
+  socket.emit("message", stateMessage({
+    sequence: 6,
+    eventId: "fence-6",
+    positionBars: 20,
+    transitionHoldActive: true,
+  }));
   assert.equal(router.getStateSync().timelinePositionBars, 20);
+  assert.equal(router.getStateSync().timelineTransitionHoldActive, true);
 
   // A replacement session owns its own sequence space: the fence re-keys and
   // applies it, then fences replays inside the new session too.
@@ -1342,7 +1609,7 @@ test("Stage 1 actions fail closed without an acknowledged candidate", () => {
   assert.equal(router.triggerAction("loop-half").midiSent, false);
   assert.deepEqual(midiCalls, []);
 
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(router.getStatus().mode, "dj-control");
   assert.equal(router.triggerAction("loop-half").midiSent, false);
   assert.deepEqual(midiCalls, []);
@@ -1356,7 +1623,7 @@ test("Stage 1 actions fail closed without an acknowledged candidate", () => {
   assert.equal(router.triggerAction("loop-half").midiSent, false);
   assert.deepEqual(midiCalls, []);
 
-  client.emit("timeline-state", { state: "stopped", loopActive: false });
+  client.emit("timeline-state", { state: "stopped", loopActive: false, transitionHoldActive: false });
   assert.equal(router.triggerAction("filter-close").ignored, true);
   assert.deepEqual(midiCalls, []);
   router.stop();
@@ -1405,6 +1672,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
   client.emit("timeline-state", {
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 0,
     playSessionId: handoffSession,
@@ -1456,6 +1724,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
   client.emit("timeline-state", {
     state: "running",
     loopActive: false,
+    transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 0,
     playSessionId: handoffSession,
@@ -1516,7 +1785,7 @@ test("synchronous DJ_RELEASE send failure returns to dj-control and remains retr
     timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   router.triggerAction("release");
   releaseTimers.runPlannedCompletion();
   const first = router.getStatus().lastAction;
@@ -1561,7 +1830,7 @@ test("Stage 1 release routes physical DJ_RELEASE when planned Stop MIDI fails", 
     timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
-  client.emit("timeline-state", { state: "idle", loopActive: false });
+  client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   router.triggerAction("release");
   releaseTimers.runPlannedCompletion();
   const result = router.getStatus().lastAction;
@@ -2305,6 +2574,7 @@ test("real router getStateSync is encoded as a strict v3 State Sync frame", asyn
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "show-1",
       positionBars: 16,
       playSessionId: "play-session-1",
@@ -2323,6 +2593,7 @@ test("real router getStateSync is encoded as a strict v3 State Sync frame", asyn
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "show-1",
       positionBars: 16,
       playSessionId: "play-session-1",
@@ -2465,7 +2736,7 @@ test("Syndocal defaults use /dj-link, strict v3, five-second heartbeat, ws, and 
   for (let index = 0; index < 8; index += 1) {
     client.sendEvent({
       type: "DJ_TIMELINE_BEAT_JUMP",
-      payload: { bars: index % 2 === 0 ? -4 : 4, timelineId: "history-bound", playSessionId: "play-session-1" },
+      payload: { bars: 4, timelineId: "history-bound", playSessionId: "play-session-1" },
     });
   }
   assert.equal(client.getStatus().deliveryHistoryMax, 3);
@@ -2799,7 +3070,7 @@ test("every physical event waits for typed ACK outcomes and retired DJ_MASTER_CH
 
   const timedOutTimeline = client.sendEvent({
     type: "DJ_TIMELINE_BEAT_JUMP",
-    payload: { bars: -4, timelineId: "timeline-1", playSessionId: "play-session-1" },
+    payload: { bars: 4, timelineId: "timeline-1", playSessionId: "play-session-1" },
   });
   assert.equal(timedOutTimeline.state, "pending");
   await new Promise((resolve) => setTimeout(resolve, 35));
@@ -3607,6 +3878,7 @@ test("router correlates release timeout back to the same action event", async (t
     payload: {
       state: "running",
       loopActive: false,
+      transitionHoldActive: false,
       timelineId: "life-over",
       positionBars: 0,
       playSessionId: actionSessionId,
@@ -3667,6 +3939,8 @@ test("DJ Agent status carries and renders a separate admitted owner diagnostic",
     assert.match(serverSource, new RegExp(`${field}: routerStatus\\.${field}`));
   }
   assert.match(serverSource, /ownerWireIdentity: routerStatus\.ownerWireIdentity/);
+  assert.match(serverSource, /timelineTransitionHoldActive: routerStatus\.timelineTransitionHoldActive/);
+  assert.doesNotMatch(htmlSource, /djAgentTransitionHold/i, "transition hold remains API/status-only; no extra UI row");
   assert.match(htmlSource, /id="djAgentOwnerRow" class="row" hidden/);
   assert.match(htmlSource, /id="djAgentOwner" class="dj-agent-value dj-agent-owner"/);
   assert.match(appSource, /function formatAdmittedOwner\(agent\)/);

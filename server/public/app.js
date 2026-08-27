@@ -96,7 +96,7 @@ let stateFetchInFlight = null;
 let djAgentSetupFetchInFlight = null;
 
 const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
-  version: "1.1.8",
+  version: "1.1.9",
   enabled: false,
   syndocal: {
     host: "",
@@ -135,8 +135,8 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.8.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.8.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.9.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.9.csv",
   valid: null,
 };
 const djAgentSetupDraft = {

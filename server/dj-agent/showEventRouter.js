@@ -1,5 +1,6 @@
 const { EventEmitter } = require("node:events");
 const { createStage1LoopFallback } = require("./stage1LoopFallback");
+const { resolveCurrentTimelineLoopOff } = require("./timelineLoopOffPolicy");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
@@ -53,6 +54,7 @@ function createShowEventRouter({
   let mode = "dj-control";
   let timelineState = "unknown";
   let timelineLoopActive = null;
+  let timelineTransitionHoldActive = null;
   let timelineId = null;
   let timelinePositionBars = null;
   let timelinePlaySessionId = null;
@@ -61,7 +63,11 @@ function createShowEventRouter({
   let timelineStateUpdatedAt = null;
   let timelineSnapshotReady = false;
   let lastSyndocalState = syndocalClient.getStatus?.().state || "unknown";
-  let pendingLoopDesired = null;
+  // LOOP_SET never reconnect-replays: transport terminalizes it on teardown.
+  // Keep its target identity while it is pending/acknowledged so an unrelated
+  // (or still-true) timeline snapshot cannot make a second F13/F14 command
+  // race the original event.
+  let pendingLoopAction = null;
   let pendingHandoffEventId = null;
   let lastTimelineAction = null;
   let lastTimelineWarning = null;
@@ -269,6 +275,7 @@ function createShowEventRouter({
       timelineId,
       state: timelineState,
       loopActive: timelineLoopActive,
+      transitionHoldActive: timelineTransitionHoldActive,
       positionBars: timelinePositionBars,
       playSessionId: timelinePlaySessionId,
       pedalOwner: timelinePedalOwner,
@@ -381,26 +388,81 @@ function createShowEventRouter({
     return delivery?.state || delivery?.ackState || null;
   }
 
-  // The loop latch may only stay armed while a delivery can still resolve
-  // later: pending (awaiting ACK), acknowledged (awaiting the authoritative
-  // broadcast), or retrying (queued for reconnect replay). Every other state
-  // is terminal and will never emit another delivery update, so holding the
-  // latch would wedge timeline loop actions forever. Fail closed to
-  // retryability: clear the exact latch immediately.
-  const LOOP_LATCH_AWAIT_STATES = new Set(["pending", "acknowledged", "retrying"]);
+  // The loop latch may only stay armed while a LOOP_SET can still resolve:
+  // pending (awaiting ACK) or acknowledged (awaiting the authoritative
+  // broadcast). Unlike DJ_RELEASE, LOOP_SET never reconnect-replays; socket
+  // teardown is terminal send-failed. Every other state is terminal and will
+  // never emit another delivery update, so holding the latch would wedge
+  // manual timeline loop actions. Clear only the exact terminal latch.
+  const LOOP_LATCH_AWAIT_STATES = new Set(["pending", "acknowledged"]);
 
   function loopDeliveryIsFinalWithoutUpdate(delivery) {
     const state = deliveryState(delivery);
     return typeof state === "string" && state.length > 0 && !LOOP_LATCH_AWAIT_STATES.has(state);
   }
 
+  function pendingLoopDesired() {
+    return pendingLoopAction?.desiredLoopActive ?? null;
+  }
+
+  function clearPendingLoopActionForDelivery(delivery) {
+    if (
+      pendingLoopAction &&
+      loopDeliveryIsFinalWithoutUpdate(delivery) &&
+      typeof pendingLoopAction.eventId === "string" &&
+      pendingLoopAction.eventId === delivery?.eventId
+    ) {
+      pendingLoopAction = null;
+      return true;
+    }
+    return false;
+  }
+
+  function clearPendingLoopActionForObservedState(state) {
+    if (
+      pendingLoopAction &&
+      state?.loopActive === pendingLoopAction.desiredLoopActive &&
+      state?.timelineId === pendingLoopAction.timelineId &&
+      state?.playSessionId === pendingLoopAction.playSessionId
+    ) {
+      pendingLoopAction = null;
+      return true;
+    }
+    return false;
+  }
+
+  function sendPendingLoopSet(action, desiredLoopActive, playSessionId) {
+    const pending = {
+      desiredLoopActive,
+      timelineId,
+      playSessionId,
+      eventId: null,
+    };
+    pendingLoopAction = pending;
+    const result = sendTimelineAction(
+      action,
+      "DJ_TIMELINE_LOOP_SET",
+      { active: desiredLoopActive, timelineId, playSessionId },
+      { ...timelineTarget(), desiredLoopActive },
+    );
+    const delivery = result.delivery;
+    if (!delivery || loopDeliveryIsFinalWithoutUpdate(delivery)) {
+      if (pendingLoopAction === pending) {
+        pendingLoopAction = null;
+      }
+    } else if (pendingLoopAction === pending && typeof delivery.eventId === "string") {
+      pending.eventId = delivery.eventId;
+    }
+    return result;
+  }
+
   function isDeliveryFailure(delivery) {
     const state = deliveryState(delivery);
-    // A physical event remains live while it is pending, acknowledged but
-    // awaiting the correlated timeline state, or queued for reconnect replay.
-    // In particular, `retrying` is not a terminal failure: clearing the
-    // handoff event id here would make the next connection's ACK unable to
-    // promote the same release.
+    // DJ_RELEASE remains live while it is pending, acknowledged but awaiting
+    // the correlated timeline state, or queued for reconnect replay. In
+    // particular, `retrying` is not a terminal failure here: clearing the
+    // handoff event id would make the next connection's ACK unable to promote
+    // the same release. LOOP_SET has its separate terminal latch policy above.
     if (["pending", "acknowledged", "retrying", "disconnected"].includes(state)) {
       return false;
     }
@@ -567,7 +629,8 @@ function createShowEventRouter({
     if (
       !state ||
       !TIMELINE_STATES.has(String(state.state || "").toLowerCase()) ||
-      typeof state.loopActive !== "boolean"
+      typeof state.loopActive !== "boolean" ||
+      typeof state.transitionHoldActive !== "boolean"
     ) {
       onTimelineWarning("Invalid authoritative timeline state ignored");
       return;
@@ -579,6 +642,7 @@ function createShowEventRouter({
       releaseMacroPhase === "handoff-pending";
     timelineState = String(state.state).toLowerCase();
     timelineLoopActive = state.loopActive;
+    timelineTransitionHoldActive = state.transitionHoldActive;
     timelineId = state.timelineId ?? null;
     timelinePositionBars = state.positionBars ?? null;
     timelinePlaySessionId = state.playSessionId ?? null;
@@ -586,7 +650,10 @@ function createShowEventRouter({
     timelineReleaseEventId = state.releaseEventId ?? null;
     timelineStateUpdatedAt = new Date(now()).toISOString();
     timelineSnapshotReady = true;
-    pendingLoopDesired = null;
+    // ACK/retry/reconnect may be followed by a still-true snapshot from the
+    // same timeline. Only the state that proves this exact LOOP_SET's desired
+    // result is allowed to release the shared latch.
+    clearPendingLoopActionForObservedState(state);
     if (reannounceCandidatesAfterTimelineState && syndocalEnabled() && syndocalState() === "connected") {
       reannounceCandidatesAfterTimelineState = false;
       detector.requestCurrentTrackCandidates?.();
@@ -706,9 +773,7 @@ function createShowEventRouter({
         }
       }
       if (delivery?.type === "DJ_TIMELINE_LOOP_SET") {
-        if (loopDeliveryIsFinalWithoutUpdate(delivery)) {
-          pendingLoopDesired = null;
-        }
+        clearPendingLoopActionForDelivery(delivery);
         emitState();
       }
       if (delivery?.type?.startsWith?.("DJ_TIMELINE_")) {
@@ -796,8 +861,19 @@ function createShowEventRouter({
     if (!playSessionId) {
       return blockedAction(action, "timeline-play-session-unproven");
     }
-    if (action === "beat-jump-minus-4") {
-      return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: -4, timelineId, playSessionId });
+    if (action === "timeline-current-loop-off") {
+      if (typeof timelineId !== "string" || timelineId.length === 0) {
+        return blockedAction(action, "timeline-id-unproven");
+      }
+      const resolution = resolveCurrentTimelineLoopOff({
+        loopActive: timelineLoopActive,
+        pendingLoopDesired: pendingLoopDesired(),
+      });
+      if (!resolution.allowed) {
+        return blockedAction(action, resolution.reason);
+      }
+      const desired = resolution.desiredLoopActive;
+      return sendPendingLoopSet(action, desired, playSessionId);
     }
     if (action === "beat-jump-plus-4") {
       return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: 4, timelineId, playSessionId });
@@ -806,21 +882,11 @@ function createShowEventRouter({
       if (timelineLoopActive == null) {
         return blockedAction(action, "timeline-loop-state-unknown");
       }
-      if (pendingLoopDesired != null) {
+      if (pendingLoopAction) {
         return blockedAction(action, "timeline-loop-action-pending");
       }
       const desired = !timelineLoopActive;
-      pendingLoopDesired = desired;
-      const result = sendTimelineAction(
-        action,
-        "DJ_TIMELINE_LOOP_SET",
-        { active: desired, timelineId, playSessionId },
-        { ...timelineTarget(), desiredLoopActive: desired },
-      );
-      if (!result.delivery || loopDeliveryIsFinalWithoutUpdate(result.delivery)) {
-        pendingLoopDesired = null;
-      }
-      return result;
+      return sendPendingLoopSet(action, desired, playSessionId);
     }
     return blockedAction(action, "unknown-timeline-action");
   }
@@ -1292,7 +1358,7 @@ function createShowEventRouter({
     const normalized = String(action || "").trim().toLowerCase();
     if (mode === "timeline-control") {
       if (normalized === "release") {
-        return triggerStage2Action("beat-jump-minus-4");
+        return triggerStage2Action("timeline-current-loop-off");
       }
       if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
         return triggerStage2Action("timeline-loop-toggle");
@@ -1405,6 +1471,7 @@ function createShowEventRouter({
       mode,
       timelineState,
       timelineLoopActive,
+      timelineTransitionHoldActive,
       timelineId,
       timelinePositionBars,
       timelineSnapshotReady,
@@ -1444,6 +1511,7 @@ function createShowEventRouter({
       mode,
       timelineState,
       timelineLoopActive,
+      timelineTransitionHoldActive,
       timelineId,
       timelinePositionBars,
       timelinePlaySessionId,
@@ -1497,6 +1565,7 @@ function createShowEventRouter({
       releaseMacroReason = null;
     }
     stage1LoopFallback.clear("router-stopped");
+    pendingLoopAction = null;
     detector.stop?.();
     for (const timer of resetTimers) {
       releaseTimerApi.clearTimeout(timer);

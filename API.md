@@ -8,19 +8,19 @@ only when the extension is explicitly enabled.
 
 ## Current state
 
-### Current Syndocal authority — v1.1.8 any-deck strict v3
+### Current Syndocal authority — v1.1.9 any-deck strict v3
 
 The current and next operator route uses
-`config/dj-agent-v1.1.8.example.json` and
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.8.csv`. The initializer creates
-only `C:\SyndocalShow\dj-agent-v1.1.8.json` when absent; it does not overwrite,
+`config/dj-agent-v1.1.9.example.json` and
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.9.csv`. The initializer creates
+only `C:\SyndocalShow\dj-agent-v1.1.9.json` when absent; it does not overwrite,
 copy, delete, or read the deployed historical v1.1.5 file. A mapped track may
 be admitted from any actually playing Rekordbox deck. MASTER/master-change is
 diagnostic only and never assigns show-control ownership. The v1.1.5
 controlled-source handoff remains deployed historical evidence, not current or
 next operator guidance.
 
-The controlled v1.1.8 source change is the current controlled-source tranche
+The controlled v1.1.9 source change is the current controlled-source tranche
 and checkpoint. This document does not claim an installer, tag, public release,
 deployment, or physical hardware acceptance.
 
@@ -94,7 +94,7 @@ once for each known deck.
 
 ## DJ Agent extension
 
-The DJ Agent extension is disabled unless an exact external v1.1.8
+The DJ Agent extension is disabled unless an exact external v1.1.9
 `filter-then-fade-then-stop` JSON file is supplied through `DJ_AGENT_CONFIG_PATH`.
 `DJ_AGENT_ENABLED`, inline JSON, and every Syndocal/MIDI/pedal environment
 override fail closed with one fixed secret-free reason. When disabled,
@@ -175,7 +175,7 @@ admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
 three owner-correlation fields are present. Rekordbox MASTER is never encoded
 as show-control ownership. `DJ_LOOP_STATE` and `DJ_LOOP_FALLBACK` likewise
 correlate only to the admitted deck/deckId/playSessionId; foreign, mixed, or
-master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.8
+master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.9
 operator capability; it remains only deployed historical v1.1.5 evidence.
 `DJ_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
 connection-generation + wire-sequence eventId, never enters the durable
@@ -208,7 +208,8 @@ ignored. A valid current `DJ_TIMELINE_STATE` response clears the request correla
 `GET /api/dj-agent/status` also exposes the handoff state machine:
 `mode` is `dj-control`, `handoff-pending`, or `timeline-control`; `timelineState`
 is the last authoritative state (`idle`, `running`, `stopped`, `ended`, or
-`reset`); `timelineLoopActive` is the authoritative loop value; and
+`reset`); `timelineLoopActive` is the authoritative loop value;
+`timelineTransitionHoldActive` is the authoritative transition-hold value; and
 `lastTimelineAction` contains the last Stage 2 action and its ACK delivery.
 `releaseMacroSequence` is exactly `filter-then-fade-then-stop`, and
 `releaseMacroPhase` reports `idle`, `blocked`, `filter-ramp`, `fade-ramp`,
@@ -227,12 +228,17 @@ HTTP 200 so an intentional no-op is not rendered as a hardware/network error.
 
 When Stage 2 is active, the pedal aliases are:
 
-* F13 / `release` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": -4, "timelineId": "...", "playSessionId": "..." }`
+* F13 / `release` → one absolute `DJ_TIMELINE_LOOP_SET` with `{ "active": false, "timelineId": "...", "playSessionId": "..." }`, only when the exact current snapshot has `loopActive:true`; authored loops and post-Follow transition holds share this action, while `transitionHoldActive` remains a strict diagnostic field
 * F14 / `loop-half` → `DJ_TIMELINE_LOOP_SET` with an absolute `{ "active": true|false, "timelineId": "...", "playSessionId": "..." }`
 * F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4, "timelineId": "...", "playSessionId": "..." }`
 
-Both commands stamp the authoritative snapshot's exact current `timelineId` and
-`playSessionId`. Their encoders accept only those exact payload fields; any
+The shared loop-set pending latch makes repeated F13/F14 no-ops until an
+authoritative state update for the same target and desired loop value, or a
+terminal delivery for the same loop-set event, clears it. F13 loop false/unknown,
+missing snapshot, invalid correlation, or disconnect
+send neither a beat jump nor MIDI. The beat-jump encoder accepts only `+4`;
+the retired `-4` value is rejected. All commands stamp the authoritative
+snapshot's exact current `timelineId` and `playSessionId`. Their encoders accept only those exact payload fields; any
 unknown field fails closed, and the internal local-source marker
 (`source:"pedal"`) is stripped so transmitted frames carry only canonical
 fields. Authoritative `DJ_TIMELINE_STATE` frames are fenced within one session
@@ -241,10 +247,10 @@ mutation, and the fence re-keys on each new connection generation after a
 reconnect instead of comparing across sessions. A skipped or terminally failed
 (rejected/timed-out/send-failed) `DJ_TIMELINE_LOOP_SET` clears its pending
 toggle latch immediately and stays retryable as a fresh absolute value on the
-next F14 press.
+next F13/F14 press.
 
 `DJ_TIMELINE_STATE` is an exact v3 envelope. Its payload has exactly
-`state`, `loopActive`, `timelineId`, `positionBars`, `playSessionId`,
+`state`, `loopActive`, `transitionHoldActive`, `timelineId`, `positionBars`, `playSessionId`,
 `pedalOwner`, and `releaseEventId`. A generic `running` state never transfers
 pedal ownership. `pedalOwner:"timeline"` is accepted only when playSessionId
 matches the current show session and releaseEventId matches its correlated

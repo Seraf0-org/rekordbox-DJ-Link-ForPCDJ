@@ -70,7 +70,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.8.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.9.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -194,6 +194,7 @@ const state = {
       mode: "dj-control",
       timelineState: "unknown",
       timelineLoopActive: null,
+      timelineTransitionHoldActive: null,
       timelineId: null,
       timelinePositionBars: null,
       timelineSnapshotReady: false,
@@ -1121,6 +1122,7 @@ function updateDjAgentStatus() {
     mode: routerStatus.mode,
     timelineState: routerStatus.timelineState,
     timelineLoopActive: routerStatus.timelineLoopActive,
+    timelineTransitionHoldActive: routerStatus.timelineTransitionHoldActive,
     timelineId: routerStatus.timelineId,
     timelinePositionBars: routerStatus.timelinePositionBars,
     timelineSnapshotReady: routerStatus.timelineSnapshotReady,
@@ -1806,7 +1808,7 @@ function buildDjAgentSetupSnapshot() {
     midiPorts,
     mappingArtifact,
     configTemplate: {
-      version: "1.1.8",
+      version: "1.1.9",
       enabled: true,
       syndocal: {
         enabled: true,
@@ -1905,7 +1907,7 @@ function handleDjAgentAction(action, _req, res) {
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
-      error: "DJ Agent extension is disabled; exact external v1.1.8 filter-then-fade-then-stop configuration is required",
+      error: "DJ Agent extension is disabled; exact external v1.1.9 filter-then-fade-then-stop configuration is required",
     });
     return;
   }

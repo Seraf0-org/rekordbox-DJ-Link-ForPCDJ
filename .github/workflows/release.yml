@@ -132,7 +132,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $expectedTag = "v1.1.8"
+          $expectedTag = "v1.1.9"
           $tag = $env:GITHUB_REF_NAME
           $githubSha = $env:GITHUB_SHA
           $trustedGit = "C:\Program Files\Git\cmd\git.exe"
@@ -177,6 +177,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             dist/DJLinkForPCDJ-setup.exe
-            dist/rb-output-1.1.8.zip
+            dist/rb-output-1.1.9.zip
             dist/release-manifest.json
           fail_on_unmatched_files: true

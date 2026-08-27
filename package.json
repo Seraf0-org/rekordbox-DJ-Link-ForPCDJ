@@ -1,6 +1,6 @@
 {
   "name": "rb-output",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "Rekordbox now-playing and realtime BPM viewer for LAN devices",
   "main": "server/index.js",
   "scripts": {
