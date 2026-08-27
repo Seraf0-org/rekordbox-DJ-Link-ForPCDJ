@@ -165,11 +165,12 @@ if not defined DJ_AGENT_CONFIG_PATH (
 node -e "const fs=require('node:fs'),path=require('node:path');try{const forbidden=new Set(['DJ_AGENT_CONFIG','DJ_AGENT_ENABLED','DJ_AGENT_ALLOW_REMOTE_ACTIONS','SYNDOCAL_ENABLED','SYNDOCAL_HOST','SYNDOCAL_PORT','SYNDOCAL_PATH','SYNDOCAL_NIC','SYNDOCAL_TOKEN','SYNDOCAL_WS_ADAPTER','SYNDOCAL_HEARTBEAT_MS','PEDAL_ENABLED','PEDAL_MODULE','MIDI_ENABLED','MIDI_MODULE','MIDI_DEVICE','MIDI_PORT','MIDI_RELEASE_FADE','MIDI_RELEASE_MACRO','MIDI_DECK_CHANNELS','PORT','RB_OUTPUT_HOST','RB_OUTPUT_SETUP_MAPPING_PATH']);if(Object.keys(process.env).some(k=>forbidden.has(k.toUpperCase())))process.exit(2);const raw=process.env.DJ_AGENT_CONFIG_PATH||'';if(!path.isAbsolute(raw))process.exit(3);const requested=path.resolve(raw),stat=fs.lstatSync(requested);if(!stat.isFile()||stat.isSymbolicLink())process.exit(4);const file=fs.realpathSync.native(requested),root=fs.realpathSync.native(process.cwd())+path.sep;if(file.toLowerCase().startsWith(root.toLowerCase()))process.exit(5);const source=JSON.parse(fs.readFileSync(file,'utf8'));const {loadDjAgentConfig,validateFilterThenFadeThenStopShowConfig}=require('./server/dj-agent/config');const c=loadDjAgentConfig();if(c.warning||!validateFilterThenFadeThenStopShowConfig(source))process.exit(6);process.exit(0)}catch{process.exit(7)}"
 if errorlevel 1 (
   echo.
-  echo [ERROR] The checkout-external DJ Agent show config failed strict readiness validation.
+  echo [ERROR] The checkout-external DJ Agent show config failed strict readiness validation: exact production owner selection is required.
   echo         Require enabled DJ/Syndocal/pedal/MIDI, exact adapter syndocal-envelope-v3,
   echo         192.168.50.1:9100/dj-link via NIC 192.168.50.2, heartbeat 5000 ms, a 32..256-byte token,
   echo         CustomMIDI1 strict Filter/Cue mappings with deck 1/2 channels, 1000 ms 64-to-127 Filter,
-  echo         releaseMacro.enabled=true, sequence=filter-then-fade-then-stop, CC16 HPF plus CC17 ChannelFader fade, and no env overrides.
+  echo         releaseMacro.enabled=true, sequence=filter-then-fade-then-stop, CC16 HPF plus CC17 ChannelFader fade,
+  echo         exact trackActivity.ownerSelection for 人生オーバー with 1400 ms Deck 1 fallback, and no env overrides.
   echo         No config content is printed.
   echo.
   exit /b 1

@@ -4,6 +4,11 @@ const {
   currentPlaybackMatchesSignatureProof,
   normalizeSignatureIdentityProof,
 } = require("./signatureIdentityProof");
+const {
+  normalizeOwnerSelectionPolicy,
+  productionFallbackReevaluationDelayMs,
+  selectProductionOwnerCandidate,
+} = require("./ownerSelectionPolicy");
 
 function defaultIdFactory() {
   return typeof crypto.randomUUID === "function"
@@ -254,10 +259,18 @@ function createTrackActivityDetector({
   idFactory = defaultIdFactory,
   maxDeck = 4,
   maxSampleAgeMs = 1_500,
+  ownerSelectionPolicy = null,
+  ownerSelectionTimerApi = globalThis,
 } = {}) {
   const emitter = new EventEmitter();
   const boundedMaxSampleAgeMs =
     Number.isFinite(maxSampleAgeMs) && maxSampleAgeMs >= 0 ? maxSampleAgeMs : 1_500;
+  const configuredOwnerSelectionPolicy = normalizeOwnerSelectionPolicy(ownerSelectionPolicy);
+  const ownerSelectionTimers = (
+    ownerSelectionTimerApi &&
+    typeof ownerSelectionTimerApi.setTimeout === "function" &&
+    typeof ownerSelectionTimerApi.clearTimeout === "function"
+  ) ? ownerSelectionTimerApi : globalThis;
   const decks = new Map();
   let explicitMasterDeck = null;
   let explicitMasterUpdatedAt = null;
@@ -267,6 +280,15 @@ function createTrackActivityDetector({
   let snapshotMasterSource = "unknown";
   let masterActivationGeneration = 0;
   let knownMasterDeck = null;
+  let ownerSelectionTimer = null;
+  let ownerSelectionTimerGeneration = 0;
+  let stopped = false;
+  // A router restart is not a fresh Rekordbox observation. Each production
+  // candidate must instead prove that *its own deck* received current track
+  // identity plus a fresh playing sample after this generation began. Do not
+  // replace this with a global-ready flag: a Deck 2 snapshot must never revive
+  // a stale Deck 1 owner after reconnect.
+  let productionSnapshotGeneration = 0;
 
   function getDeckState(deck) {
     let state = decks.get(deck);
@@ -287,6 +309,7 @@ function createTrackActivityDetector({
         signatureProofConflictRevision: null,
         loop: null,
         lastLoopEventRevision: null,
+        productionSnapshotGeneration: null,
       };
       decks.set(deck, state);
     }
@@ -354,7 +377,7 @@ function createTrackActivityDetector({
   // Candidate frames use the strict current wire identity: a contentId is
   // authoritative and must not travel alongside display text. If no contentId
   // is available, title and artist together are the only permitted fallback.
-  function strictCandidateTrackPayload(deck, state) {
+  function candidatePlaybackContext(state) {
     const track = state.track || {};
     const playback = state.playback || {};
     const observedMs = Date.parse(playback.positionObservedAt);
@@ -367,15 +390,9 @@ function createTrackActivityDetector({
     const startedAt = typeof state.startedAt === "string" && Number.isFinite(Date.parse(state.startedAt))
       ? state.startedAt
       : null;
-    // The first emitted candidate fixes the one-of wire identity for the
-    // session. Later Hook metadata may enrich state.track for diagnostics,
-    // but must never launder the same wire session from title+artist to a
-    // contentId (or the reverse).
-    const identity = state.wireIdentity || wireIdentityForTrack(track);
     if (
       !state.playSessionId ||
       !startedAt ||
-      !identity ||
       !Number.isFinite(playback.positionSec) ||
       playback.positionSec < 0 ||
       !Number.isFinite(effectiveBpm) ||
@@ -388,6 +405,19 @@ function createTrackActivityDetector({
     ) {
       return null;
     }
+    return { track, playback, effectiveBpm, startedAt, sampleAgeMs };
+  }
+
+  function strictCandidateTrackPayload(deck, state, preferredWireIdentity = null) {
+    const context = candidatePlaybackContext(state);
+    if (!context) return null;
+    const { track, playback, effectiveBpm, startedAt, sampleAgeMs } = context;
+    // The first emitted candidate fixes the one-of wire identity for the
+    // session. Later Hook metadata may enrich state.track for diagnostics,
+    // but must never launder the same wire session from title+artist to a
+    // contentId (or the reverse).
+    const identity = state.wireIdentity || preferredWireIdentity || wireIdentityForTrack(track);
+    if (!identity) return null;
     return {
       deck,
       deckId: `rekordbox-deck-${deck}`,
@@ -404,6 +434,72 @@ function createTrackActivityDetector({
       playSessionId: state.playSessionId,
       loop: currentLoopPayload(state.loop),
     };
+  }
+
+  function currentProductionSnapshotDescriptor(deck, state) {
+    if (
+      state.playback?.isPlaying !== true ||
+      state.pendingTrackChange ||
+      state.awaitingPlayConfirmation
+    ) return null;
+    const context = candidatePlaybackContext(state);
+    if (!context) return null;
+    const startedAtMs = Date.parse(context.startedAt);
+    const sessionAgeMs = now() - startedAtMs;
+    if (!Number.isFinite(sessionAgeMs) || sessionAgeMs < 0) return null;
+    return {
+      deck,
+      fresh: true,
+      isPlaying: true,
+      title: context.track.title || null,
+      artist: context.track.artist || null,
+      contentId: context.track.contentId || null,
+      sessionAgeMs,
+    };
+  }
+
+  function productionCandidateDescriptor(deck, state) {
+    if (state.productionSnapshotGeneration !== productionSnapshotGeneration) {
+      return null;
+    }
+    return currentProductionSnapshotDescriptor(deck, state);
+  }
+
+  function freshReportedProductionPlayback(playback) {
+    const observedAtMs = Date.parse(playback?.positionObservedAt);
+    const sampleAgeMs = Number.isFinite(observedAtMs) ? now() - observedAtMs : NaN;
+    return Boolean(
+      playback?.isPlaying === true &&
+      Number.isFinite(playback.positionSec) &&
+      playback.positionSec >= 0 &&
+      Number.isSafeInteger(playback.positionRevision) &&
+      playback.positionRevision >= 1 &&
+      Number.isFinite(sampleAgeMs) &&
+      sampleAgeMs >= 0 &&
+      sampleAgeMs <= boundedMaxSampleAgeMs
+    );
+  }
+
+  function recordProductionSnapshotProvenance(
+    deck,
+    state,
+    tracks,
+    playbacks,
+    equalRevisionSignatureConflict,
+  ) {
+    if (!usesProductionOwnerSelection() || !tracks.has(deck) || !playbacks.has(deck)) {
+      return;
+    }
+    // The actual snapshot supplied both fields for this deck. Mark it only
+    // after merge/session handling proves the resulting state is transport
+    // fresh and playing; stale/stopped/replacement input clears prior proof.
+    state.productionSnapshotGeneration = (
+      !equalRevisionSignatureConflict &&
+      freshReportedProductionPlayback(playbacks.get(deck)) &&
+      currentProductionSnapshotDescriptor(deck, state)
+    )
+      ? productionSnapshotGeneration
+      : null;
   }
 
   function maybeEmitCandidateActive(deck, state) {
@@ -441,6 +537,80 @@ function createTrackActivityDetector({
     }
     state.lastCandidateSyncPositionRevision = payload.positionRevision;
     return emitEvent("DJ_TRACK_SYNC", payload);
+  }
+
+  function emitConfiguredProductionCandidate({ forceActive = false } = {}) {
+    const candidates = [];
+    for (const [deck, state] of decks) {
+      if (deck <= maxDeck) {
+        const candidate = productionCandidateDescriptor(deck, state);
+        if (candidate) candidates.push(candidate);
+      }
+    }
+    const selected = selectProductionOwnerCandidate(candidates, configuredOwnerSelectionPolicy);
+    if (!selected || selected.kind === "wait-for-text-identity") return null;
+    const state = decks.get(selected.deck);
+    if (!state) return null;
+    const payload = strictCandidateTrackPayload(selected.deck, state, selected.wireIdentity);
+    if (!payload) return null;
+    state.wireIdentity ||= { ...selected.wireIdentity };
+    if (forceActive || state.lastCandidateActiveSessionId !== state.playSessionId) {
+      state.lastCandidateActiveSessionId = state.playSessionId;
+      state.lastCandidateSyncPositionRevision = payload.positionRevision;
+      const active = emitEvent("DJ_TRACK_ACTIVE", payload);
+      maybeEmitMeasuredLoop(selected.deck, state);
+      return active;
+    }
+    if (payload.positionRevision <= Number(state.lastCandidateSyncPositionRevision || 0)) {
+      return null;
+    }
+    state.lastCandidateSyncPositionRevision = payload.positionRevision;
+    return emitEvent("DJ_TRACK_SYNC", payload);
+  }
+
+  function usesProductionOwnerSelection() {
+    return configuredOwnerSelectionPolicy.mode === "titleContains";
+  }
+
+  function productionCandidateDescriptors() {
+    const candidates = [];
+    for (const [deck, state] of decks) {
+      if (deck <= maxDeck) {
+        const candidate = productionCandidateDescriptor(deck, state);
+        if (candidate) candidates.push(candidate);
+      }
+    }
+    return candidates;
+  }
+
+  function cancelOwnerSelectionReevaluation() {
+    ownerSelectionTimerGeneration += 1;
+    if (ownerSelectionTimer !== null) {
+      ownerSelectionTimers.clearTimeout(ownerSelectionTimer);
+      ownerSelectionTimer = null;
+    }
+  }
+
+  function scheduleOwnerSelectionReevaluation() {
+    if (stopped || !usesProductionOwnerSelection()) return;
+    const delayMs = productionFallbackReevaluationDelayMs(
+      productionCandidateDescriptors(),
+      configuredOwnerSelectionPolicy,
+    );
+    if (!Number.isInteger(delayMs) || delayMs <= 0) return;
+    const generation = ownerSelectionTimerGeneration + 1;
+    const snapshotGeneration = productionSnapshotGeneration;
+    cancelOwnerSelectionReevaluation();
+    ownerSelectionTimerGeneration = generation;
+    ownerSelectionTimer = ownerSelectionTimers.setTimeout(() => {
+      if (
+        stopped ||
+        generation !== ownerSelectionTimerGeneration ||
+        snapshotGeneration !== productionSnapshotGeneration
+      ) return;
+      ownerSelectionTimer = null;
+      emitConfiguredProductionCandidate();
+    }, delayMs);
   }
 
   function maybeEmitMeasuredLoop(deck, state, { force = false } = {}) {
@@ -622,6 +792,8 @@ function createTrackActivityDetector({
   }
 
   function onSnapshot(snapshot = {}) {
+    if (stopped) return getState();
+    cancelOwnerSelectionReevaluation();
     // MASTER is a diagnostic input only in generic v3. A stale or malformed
     // MASTER assertion must fail closed for that diagnostic, never suppress
     // independently valid per-deck playback candidates in this snapshot.
@@ -744,14 +916,28 @@ function createTrackActivityDetector({
       }
       state.pendingTrackChange = false;
       state.previousIsPlaying = nextIsPlaying;
-      const candidateActive = maybeEmitCandidateActive(deck, state);
-      if (!candidateActive) maybeEmitCandidateSync(deck, state);
+      recordProductionSnapshotProvenance(
+        deck,
+        state,
+        tracks,
+        playbacks,
+        equalRevisionSignatureConflict,
+      );
+      if (!usesProductionOwnerSelection()) {
+        const candidateActive = maybeEmitCandidateActive(deck, state);
+        if (!candidateActive) maybeEmitCandidateSync(deck, state);
+      }
       maybeEmitMeasuredLoop(deck, state);
+    }
+    if (usesProductionOwnerSelection()) {
+      emitConfiguredProductionCandidate();
+      scheduleOwnerSelectionReevaluation();
     }
     return getState();
   }
 
   function onTrackLoaded(rawEvent = {}) {
+    if (stopped) return null;
     const deck = normalizeDeckNumber(rawEvent.logicalDeck || rawEvent.deck);
     if (!deck) {
       return null;
@@ -764,11 +950,19 @@ function createTrackActivityDetector({
     const mergedTrack = mergeTrackIdentity(state.track, nextTrack);
     const changed = Boolean(state.track && !tracksRepresentSame(state.track, mergedTrack));
     const firstTrack = !state.track;
+    // A valid metadata input can replace the current selection or enrich the
+    // same session. Fence the old callback only after identifying the input;
+    // malformed/no-op packets must not erase the only bounded fallback timer.
+    cancelOwnerSelectionReevaluation();
     state.track = mergedTrack;
     if (!changed && !firstTrack) {
       // A later contentId/metadata packet can enrich the same playing track.
       // Update the canonical loaded key without emitting another load event.
       state.lastTrackLoadedKey = state.track.identity;
+      if (usesProductionOwnerSelection()) {
+        emitConfiguredProductionCandidate();
+        scheduleOwnerSelectionReevaluation();
+      }
       return null;
     }
     if (changed || firstTrack) {
@@ -784,10 +978,17 @@ function createTrackActivityDetector({
       artist: state.track.artist,
       trackBpm: state.track.trackBpm,
     });
+    if (usesProductionOwnerSelection()) {
+      // A replacement remains pending until an explicit fresh play snapshot.
+      // Re-evaluate other decks only; productionCandidateDescriptor excludes
+      // this pending deck so an old session can never be promoted by timer.
+      scheduleOwnerSelectionReevaluation();
+    }
     return loadedEvent;
   }
 
   function onSignatureIdentityProof(rawProof = {}) {
+    if (stopped) return null;
     const proof = normalizeSignatureIdentityProof(rawProof);
     if (!proof) {
       return null;
@@ -824,10 +1025,13 @@ function createTrackActivityDetector({
       artist: candidateTrack.artist,
       trackBpm: candidateTrack.trackBpm,
     });
-    return maybeEmitCandidateActive(proof.deck, state);
+    return usesProductionOwnerSelection()
+      ? emitConfiguredProductionCandidate()
+      : maybeEmitCandidateActive(proof.deck, state);
   }
 
   function onMasterChange(rawEvent = {}) {
+    if (stopped) return null;
     const deck = normalizeDeckNumber(rawEvent.logicalDeck || rawEvent.deck);
     if (!deck) {
       return null;
@@ -840,6 +1044,7 @@ function createTrackActivityDetector({
   }
 
   function requestMeasuredLoopForSession(rawOwner = {}) {
+    if (stopped) return null;
     const deck = normalizeDeckNumber(rawOwner.deck);
     if (!deck || rawOwner.deckId !== `rekordbox-deck-${deck}`) {
       return null;
@@ -859,6 +1064,16 @@ function createTrackActivityDetector({
   // now; this deliberately does not manufacture a start, advance revisions,
   // or revive a stopped/ambiguous deck.
   function requestCurrentTrackCandidates() {
+    if (stopped) return [];
+    if (usesProductionOwnerSelection()) {
+      // Reconnect is an explicit receiver-knowledge boundary: reannounce the
+      // currently selected, fresh owner as ACTIVE even if normal snapshot
+      // dedupe already emitted the same revision. The selection and frozen
+      // wire identity are revalidated here; ordinary snapshots still use the
+      // non-forcing path above.
+      const candidate = emitConfiguredProductionCandidate({ forceActive: true });
+      return candidate ? [candidate] : [];
+    }
     const candidates = [];
     for (const [deck, state] of decks) {
       if (state.playback?.isPlaying !== true || !state.playSessionId) {
@@ -906,6 +1121,9 @@ function createTrackActivityDetector({
   }
 
   function reset() {
+    cancelOwnerSelectionReevaluation();
+    stopped = false;
+    productionSnapshotGeneration += 1;
     decks.clear();
     explicitMasterDeck = null;
     explicitMasterUpdatedAt = null;
@@ -915,6 +1133,17 @@ function createTrackActivityDetector({
     snapshotMasterSource = "unknown";
     masterActivationGeneration = 0;
     knownMasterDeck = null;
+  }
+
+  function start() {
+    cancelOwnerSelectionReevaluation();
+    stopped = false;
+    productionSnapshotGeneration += 1;
+  }
+
+  function stop() {
+    stopped = true;
+    cancelOwnerSelectionReevaluation();
   }
 
   return {
@@ -928,6 +1157,8 @@ function createTrackActivityDetector({
     requestMeasuredLoopForSession,
     requestCurrentTrackCandidates,
     reset,
+    start,
+    stop,
   };
 }
 

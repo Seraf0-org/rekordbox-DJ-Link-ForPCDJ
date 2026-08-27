@@ -1478,6 +1478,7 @@ function createShowEventRouter({
   }
 
   function start() {
+    detector.start?.();
     midi.start();
     pedal.start();
     syndocalClient.start();
@@ -1496,6 +1497,7 @@ function createShowEventRouter({
       releaseMacroReason = null;
     }
     stage1LoopFallback.clear("router-stopped");
+    detector.stop?.();
     for (const timer of resetTimers) {
       releaseTimerApi.clearTimeout(timer);
     }

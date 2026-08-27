@@ -33,10 +33,26 @@ That wire identity freezes with the first emitted ACTIVE for the session; late
 metadata enrichment remains diagnostic and cannot change subsequent ACTIVE or
 SYNC identity.
 Rekordbox MASTER/master-change remains diagnostic and never grants show-control
-ownership. An unmapped, foreign, stale, conflicting, or ambiguous candidate
-fails closed without replacing the admitted owner. The current operator import
+ownership. An unmapped, foreign, stale, conflicting, or identity-incomplete
+candidate fails closed without replacing the admitted owner. The current operator import
 artifact is `server/public/setup/CustomMIDI1-Syndocal-v1.1.8.csv`; the
 v1.1.5 CSV/config and its deployed observations are historical evidence only.
+
+The controlled v1.1.8 external JSON must contain the exact
+`trackActivity.ownerSelection` policy (`mode:"titleContains"`, NFC/case-sensitive
+`titleNeedle:"人生オーバー"`, `deck1MetadataWaitMs:1400`). A missing, legacy, or
+modified policy fails strict launcher readiness; it never silently falls back
+to content-first selection. The selector itself ignores artist, but a matching
+title cannot enter the v3 network path until Rekordbox also supplies artist:
+v3 text identity is always title **and** artist, and contentId cannot bypass
+that prerequisite for a matching title. With two or more positive titles, a
+fresh actually-playing transport-valid Deck 1 wins (even if its own title is
+not positive); if Deck 1 is unavailable, the lowest transport-valid positive
+deck wins. With zero title matches, a fresh actually-playing Deck 1 may use its
+complete text identity (or contentId only when text is unavailable) after 1400
+ms. That leaves an explicit 100-ms
+dispatch reserve inside the v3 1500-ms freshness bound; a later timer fails
+closed rather than sending stale data.
 
 Stage 1 separates Rekordbox MIDI from Syndocal delivery. Physical F14 arms the
 response window before the MIDI send. Fresh measured Rekordbox loop state is
@@ -308,6 +324,15 @@ Note37、deck channel 1/2、両方のresetをexactに要求します。extra map
 `filter-then-stop`/`filter-then-fade`、direct-Stop fallback、別duration/value/channelは
 launcher preflightでrejectします。Setup画面のtoken-free previewは
 外部show sourceではなく、launch authorizationにも使用できません。
+同じstrict readinessは`trackActivity.ownerSelection`にも適用され、
+`titleContains` / `人生オーバー` / `deck1MetadataWaitMs:1400` のexact nested
+object以外はrejectします。タイトル一致はartistを選択条件に使いませんが、v3送信は
+title+artistの両方が届くまでfail-closedです。1400 msはv3 freshness 1500 msの
+内側に100 msのtimer dispatch reserveを残す値であり、遅延時にsample ageを偽装しません。
+title positiveが複数なら、fresh/playingかつtransport-validなDeck 1を優先し
+（Deck 1自身のtitle positiveは不要）、Deck 1が使えない時だけ最小deck番号の
+transport-valid positiveを選びます。identity不足、stale、停止、相関不能はこの
+arbitrationの候補にならずfail-closedです。
 
 exact external v1.1.8 config が無い場合は Syndocal接続、MIDI、global-hotkey adapterを起動せず、
 SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、HTTP APIは

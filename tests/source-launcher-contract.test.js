@@ -101,6 +101,7 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
   assert.match(source, /validateFilterThenFadeThenStopShowConfig\(source\)/);
   assert.match(source, /releaseMacro\.enabled=true, sequence=filter-then-fade-then-stop, CC16 HPF plus CC17 ChannelFader fade/i);
+  assert.match(source, /exact production owner selection is required/i);
   assert.doesNotMatch(source, /web server already running/i);
   assert.doesNotMatch(
     source,
@@ -147,6 +148,7 @@ test(
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-launcher-"));
     const validPath = path.join(tempRoot, "valid.json");
     const macroPath = path.join(tempRoot, "fade-enabled.json");
+    const missingPolicyPath = path.join(tempRoot, "missing-owner-policy.json");
     const valid = {
       version: "1.1.8",
       enabled: true,
@@ -161,6 +163,13 @@ test(
         heartbeatMs: 5000,
       },
       pedal: { enabled: true, bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" } },
+      trackActivity: {
+        ownerSelection: {
+          mode: "titleContains",
+          titleNeedle: "人生オーバー",
+          deck1MetadataWaitMs: 1400,
+        },
+      },
       midi: {
         enabled: true,
         device: "CustomMIDI1",
@@ -201,6 +210,11 @@ test(
         ...valid,
         midi: { ...valid.midi, releaseFade: { enabled: true } },
       }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      missingPolicyPath,
+      JSON.stringify(Object.fromEntries(Object.entries(valid).filter(([key]) => key !== "trackActivity"))),
       "utf8",
     );
 
@@ -257,6 +271,13 @@ test(
       assert.equal(macroEnabled.status, 1, macroEnabled.stdout + macroEnabled.stderr);
       assert.match(macroEnabled.stdout, /failed strict readiness validation/i);
 
+      const missingPolicy = runLauncher(
+        "--preflight-only",
+        cleanShowEnv({ DJ_AGENT_CONFIG_PATH: missingPolicyPath }),
+      );
+      assert.equal(missingPolicy.status, 1, missingPolicy.stdout + missingPolicy.stderr);
+      assert.match(missingPolicy.stdout, /exact production owner selection is required/i);
+
       const caseVariantOverride = runLauncher(
         "--preflight-only",
         cleanShowEnv({
@@ -285,6 +306,7 @@ test(
         missingConfig,
         pseudoAppDirTamper,
         macroEnabled,
+        missingPolicy,
         caseVariantOverride,
         accepted,
       ]) {

@@ -265,6 +265,13 @@
     "enabled": true,
     "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
   },
+  "trackActivity": {
+    "ownerSelection": {
+      "mode": "titleContains",
+      "titleNeedle": "人生オーバー",
+      "deck1MetadataWaitMs": 1400
+    }
+  },
   "midi": {
     "enabled": true,
     "device": "CustomMIDI1",
@@ -302,7 +309,7 @@
               <button id="djAgentConfigDownload" type="button">Download config preview</button>
               <button id="djAgentConfigCopy" type="button">Copy config preview</button>
             </div>
-            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.8 configuration.</p>
+            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. The production title selector is 人生オーバー; a matching title waits for Rekordbox artist metadata before v3 network admission. Deck 1 fallback waits 1400 ms, reserving 100 ms inside the v3 1500-ms freshness bound. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.8 configuration.</p>
           </section>
         </div>
 

@@ -40,6 +40,13 @@ function strictShowConfig(token = TEST_TOKEN) {
       heartbeatMs: 5000,
     },
     pedal: { enabled: true, bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" } },
+    trackActivity: {
+      ownerSelection: {
+        mode: "titleContains",
+        titleNeedle: "人生オーバー",
+        deck1MetadataWaitMs: 1400,
+      },
+    },
     midi: {
       enabled: true,
       device: "CustomMIDI1",
@@ -109,6 +116,14 @@ test("runtime enables only the exact external v1.1.8 show source", () => {
   assert.deepEqual(config.midi.mappings, strictShowConfig().midi.mappings);
   assert.equal(config.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
   assert.equal(config.midi.releaseFade.mappingName, "releaseFade");
+  assert.deepEqual(config.trackActivity.ownerSelection, strictShowConfig().trackActivity.ownerSelection);
+});
+
+test("controlled source rejects a show config that omits the exact production owner policy", () => {
+  const source = strictShowConfig();
+  delete source.trackActivity;
+  const config = loadExternalShow(source);
+  assertDisabled(config);
 });
 
 test("source-direct and packaged-equivalent roots share the exact activation gate", (t) => {

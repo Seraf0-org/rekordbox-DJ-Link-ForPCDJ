@@ -28,6 +28,13 @@ function strictShowConfig() {
       heartbeatMs: 5000,
     },
     pedal: { enabled: true, bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" } },
+    trackActivity: {
+      ownerSelection: {
+        mode: "titleContains",
+        titleNeedle: "人生オーバー",
+        deck1MetadataWaitMs: 1400,
+      },
+    },
     midi: {
       enabled: true,
       device: "CustomMIDI1",

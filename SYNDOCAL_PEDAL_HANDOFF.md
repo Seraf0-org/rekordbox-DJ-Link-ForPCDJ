@@ -93,6 +93,34 @@ fallbackは単調増加する`pedalIntentId`と、発行時点の
 focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
 wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
 
+### 2026-08-27 CURRENT production title-owner selection checkpoint
+
+公演用owner選定はexternal show JSONのexact
+`trackActivity.ownerSelection = {"mode":"titleContains","titleNeedle":"人生オーバー","deck1MetadataWaitMs":1400}`
+だけを受理します。selectorはNFC正規化後のcase-sensitive title包含であり、artistや
+MASTER状態を選定条件にしません。ただしstrict-v3 text identityはtitleとartistの両方を
+要求するため、該当titleでartist未着のdeckは送信せず待機します。最初に送ったone-of
+identityはそのplay session中固定し、後着contentIdで切り替えません。
+
+実再生かつfreshなpositiveが1つならそのdeck、複数ならfresh/playing Deck 1を優先し、
+Deck 1がtransport-validでない場合だけ最小番号のtransport-valid positiveを選びます。
+positiveが0の場合はfresh/playing Deck 1だけを1400 ms後にfallback候補とします。
+1400 msはstrict-v3の1500 ms freshness上限に対する100 ms reserveで、遅延callbackが
+1500 msを超えた場合は送信しません。Deck 2だけの観測はDeck 1 fallbackを作りません。
+router stop/start後はdeckごとの新generation track+playback snapshotが揃うまで旧deckを
+再告知せず、再接続の`requestCurrent`はfreshな選定済みownerと凍結identityだけを
+`DJ_TRACK_ACTIVE`として再告知します。
+
+branch `beta-v1.1.2`、base HEAD/upstream
+`8dc1808e8addd7d08b9d41bf0e5941ea2f896918`からのtitle-owner trancheとして、
+focused関連**168/168**、full `npm test` **449 total / 447 pass / 0 fail /
+2 intentional skip**、変更JS `node --check` **6/6**、README contract **6/6**、
+`git diff --check`がpassし、first-party warningは**0**です。独立Terra xHigh reviewは
+restart時のper-deck provenance、timer generation、reconnect再告知、strict config/UI/
+launcher/READMEを再監査してP0/P1/P2なしの**GO**でした。これはsource checkpointであり、
+対象DJ PCへのpull/config更新、real Rekordbox title、wired ACK、pedalまたはHW-4受入を
+主張しません。次の別trancheは`transitionHoldActive`を受信するStage 2 F13 loop-offです。
+
 ### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
 
 以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。

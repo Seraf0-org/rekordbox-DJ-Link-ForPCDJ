@@ -45,7 +45,7 @@ test("static setup preview is complete nested v1.1.8 and validates after restori
   const match = html.match(/<pre id="djAgentConfigPreview"[^>]*>([\s\S]*?)<\/pre>/);
   assert.ok(match);
   const preview = JSON.parse(match[1]);
-  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "version"]);
+  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "trackActivity", "version"]);
   assert.deepEqual(Object.keys(preview.midi).sort(), [
     "deckChannels", "device", "enabled", "filter", "mappings", "port", "releaseFade", "releaseMacro",
   ]);
@@ -55,6 +55,11 @@ test("static setup preview is complete nested v1.1.8 and validates after restori
   assert.equal(preview.syndocal.adapter, "syndocal-envelope-v3");
   assert.equal(preview.midi.releaseFade.enabled, true);
   assert.equal(preview.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
+  assert.deepEqual(preview.trackActivity.ownerSelection, {
+    mode: "titleContains",
+    titleNeedle: "人生オーバー",
+    deck1MetadataWaitMs: 1400,
+  });
   const withTokenPlaceholder = {
     ...preview,
     syndocal: { ...preview.syndocal, token: "<SYNDOCAL_ONE_TIME_TOKEN>" },
@@ -167,12 +172,17 @@ test("setup preview keeps the v1.1.8 strict schema shape with MIDI macro nesting
   });
   api.updateDjAgentConfigPreviewFromDraft();
   const preview = JSON.parse(api.getPreview());
-  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "version"]);
+  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "trackActivity", "version"]);
   assert.deepEqual(Object.keys(preview.midi).sort(), [
     "deckChannels", "device", "enabled", "filter", "mappings", "port", "releaseFade", "releaseMacro",
   ]);
   assert.equal(Object.hasOwn(preview, "releaseMacro"), false);
   assert.equal(Object.hasOwn(preview, "releaseFade"), false);
+  assert.deepEqual(preview.trackActivity.ownerSelection, {
+    mode: "titleContains",
+    titleNeedle: "人生オーバー",
+    deck1MetadataWaitMs: 1400,
+  });
   // Setup deliberately omits the secret. Restoring the documented placeholder
   // here models the operator's final external file without testing secret
   // transport or persistence in the browser.

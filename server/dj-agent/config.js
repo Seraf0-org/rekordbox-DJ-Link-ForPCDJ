@@ -130,7 +130,7 @@ function hasExactValues(value, expected) {
 // validator separate from the permissive default-off config loader: its input
 // is the raw external show file and it never returns that file or its token.
 function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
-  if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi"])) return false;
+  if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi", "trackActivity"])) return false;
   if (value.version !== "1.1.8" || value.enabled !== true) return false;
 
   const syndocal = value.syndocal;
@@ -154,6 +154,10 @@ function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder
   const pedal = value.pedal;
   if (!hasExactKeys(pedal, ["enabled", "bindings"]) || pedal.enabled !== true) return false;
   if (!hasExactValues(pedal.bindings, { release: "F13", loopHalf: "F14", filterClose: "F15" })) return false;
+
+  const trackActivity = value.trackActivity;
+  if (!hasExactKeys(trackActivity, ["ownerSelection"])) return false;
+  if (!hasExactValues(trackActivity.ownerSelection, PRODUCTION_OWNER_SELECTION_POLICY)) return false;
 
   const midi = value.midi;
   if (!hasExactKeys(midi, ["enabled", "device", "port", "mappings", "deckChannels", "filter", "releaseFade", "releaseMacro"])) return false;
@@ -204,6 +208,17 @@ function normalizeDeckChannels(value) {
 
 const STRICT_SHOW_CONFIG_DISABLED_REASON =
   "DJ Agent disabled: exact external v1.1.8 filter-then-fade-then-stop configuration is required";
+const PRODUCTION_OWNER_SELECTION_POLICY = Object.freeze({
+  // titleContains is selection only. A matching track is sent as v3 text
+  // identity only after both title and artist exist; artist-missing matches
+  // remain fail-closed rather than changing the v3 payload contract.
+  mode: "titleContains",
+  titleNeedle: "人生オーバー",
+  // Reserve the final 100 ms of the v3 1500-ms freshness bound for timer
+  // dispatch. The configured wait is therefore intentionally 1400 ms, not a
+  // misleading promise that a delayed JavaScript callback can send stale data.
+  deck1MetadataWaitMs: 1400,
+});
 const RUNTIME_SHOW_OVERRIDE_KEYS = Object.freeze([
   "DJ_AGENT_CONFIG",
   "DJ_AGENT_ENABLED",
@@ -257,6 +272,9 @@ function disabledDjAgentConfig() {
       bindings: normalizeBindings({}),
       moduleName: "uiohook-napi",
     },
+    trackActivity: {
+      ownerSelection: { mode: "content-first" },
+    },
     midi: {
       enabled: false,
       moduleName: "@julusian/midi",
@@ -304,6 +322,9 @@ function strictShowConfig(source) {
       enabled: true,
       bindings: { ...source.pedal.bindings },
       moduleName: "uiohook-napi",
+    },
+    trackActivity: {
+      ownerSelection: { ...source.trackActivity.ownerSelection },
     },
     midi: {
       enabled: true,
@@ -393,6 +414,7 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, repositoryRoot = REP
 }
 
 module.exports = {
+  PRODUCTION_OWNER_SELECTION_POLICY,
   STRICT_SHOW_CONFIG_DISABLED_REASON,
   RUNTIME_SHOW_OVERRIDE_KEYS,
   REPOSITORY_ROOT,

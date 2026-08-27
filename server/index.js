@@ -1060,7 +1060,9 @@ const hookUdpProvider = createHookUdpProvider({
   port: HOOK_UDP_PORT,
 });
 
-const djAgentDetector = createTrackActivityDetector();
+const djAgentDetector = createTrackActivityDetector({
+  ownerSelectionPolicy: DJ_AGENT_CONFIG.trackActivity.ownerSelection,
+});
 const djAgentSyndocalClient = createSyndocalClient({
   enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.syndocal.enabled,
   host: DJ_AGENT_CONFIG.syndocal.host,
@@ -1826,6 +1828,9 @@ function buildDjAgentSetupSnapshot() {
       pedal: {
         enabled: true,
         bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" },
+      },
+      trackActivity: {
+        ownerSelection: { ...DJ_AGENT_CONFIG.trackActivity.ownerSelection },
       },
       midi: {
         enabled: true,

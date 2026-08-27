@@ -29,6 +29,11 @@ test("bundled v1.1.8 template is token-free and matches the strict filter-then-f
   assert.equal(config.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
   assert.equal(config.midi.releaseFade.enabled, true);
   assert.equal(config.midi.mappings.releaseFade.cc, 17);
+  assert.deepEqual(config.trackActivity.ownerSelection, {
+    mode: "titleContains",
+    titleNeedle: "人生オーバー",
+    deck1MetadataWaitMs: 1400,
+  });
   assert.equal(TARGET_PATH, String.raw`C:\SyndocalShow\dj-agent-v1.1.8.json`);
 });
 
@@ -42,6 +47,8 @@ test("strict v1.1.8 validator rejects every retired sequence or mapping alternat
     (config) => { config.midi.releaseMacro.filter.endValue = 126; },
     (config) => { config.midi.mappings.stop.note = 38; },
     (config) => { config.midi.deckChannels[2] = 3; },
+    (config) => { config.trackActivity.ownerSelection.titleNeedle = "人生オーバー "; },
+    (config) => { config.trackActivity.ownerSelection.deck1MetadataWaitMs = 1399; },
   ];
 
   assert.equal(validateFilterThenFadeThenStopShowConfig(template, { allowTokenPlaceholder: true }), true);

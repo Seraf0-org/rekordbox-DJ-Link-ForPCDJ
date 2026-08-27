@@ -92,7 +92,7 @@ test("DJ Agent setup snapshot is localhost-only, token-free, and macro-safe", as
   assert.equal(local.body.enabled, false);
   assert.equal(local.body.tokenConfigured, false);
   assert.equal(Object.hasOwn(local.body.configTemplate.syndocal, "token"), false);
-  assert.deepEqual(Object.keys(local.body.configTemplate).sort(), ["enabled", "midi", "pedal", "syndocal", "version"]);
+  assert.deepEqual(Object.keys(local.body.configTemplate).sort(), ["enabled", "midi", "pedal", "syndocal", "trackActivity", "version"]);
   assert.deepEqual(Object.keys(local.body.configTemplate.midi).sort(), [
     "deckChannels", "device", "enabled", "filter", "mappings", "port", "releaseFade", "releaseMacro",
   ]);

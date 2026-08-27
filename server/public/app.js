@@ -124,6 +124,13 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
       filterClose: "F15",
     },
   },
+  trackActivity: {
+    ownerSelection: {
+      mode: "titleContains",
+      titleNeedle: "人生オーバー",
+      deck1MetadataWaitMs: 1400,
+    },
+  },
 };
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
@@ -628,6 +635,13 @@ function normalizeDjAgentConfigTemplate(template) {
         : {}),
       enabled: true,
       sequence: "filter-then-fade-then-stop",
+    },
+  };
+  safe.trackActivity = {
+    ownerSelection: {
+      mode: "titleContains",
+      titleNeedle: "人生オーバー",
+      deck1MetadataWaitMs: 1400,
     },
   };
   // Root-level releaseMacro/releaseFade were retired in v1.1.8. Never promote
