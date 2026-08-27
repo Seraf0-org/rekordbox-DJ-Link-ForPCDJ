@@ -6,6 +6,7 @@ const { EventEmitter } = require("node:events");
 
 const { createShowEventRouter } = require("../server/dj-agent/showEventRouter");
 const { createTrackActivityDetector } = require("../server/dj-agent/trackActivityDetector");
+const { createRekordboxMidi } = require("../server/dj-agent/rekordboxMidi");
 const {
   validateFilterThenFadeThenStopShowConfig,
 } = require("../server/dj-agent/config");
@@ -182,6 +183,106 @@ test("F13 routes one DJ_RELEASE at the HPF edge, then performs HPF -> ChannelFad
   assert.equal(fixture.sentEvents.filter((event) => event.type === "DJ_RELEASE").length, 1);
   assert.equal(fixture.router.getStatus().lastReleaseReset.state, "completed");
   fixture.router.stop();
+});
+
+test("router F13 release sends the complete non-Master deck 2 MIDI byte sequence through the real adapter", () => {
+  const timer = createManualTimer();
+  let nowMs = 0;
+  const intervals = [];
+  const messages = [];
+  const sentEvents = [];
+  const output = {
+    getPortCount: () => 1,
+    getPortName: () => "CustomMIDI1",
+    openPort: () => true,
+    closePort: () => {},
+    destroy: () => {},
+    sendMessage: (message) => messages.push([...message]),
+  };
+  const midi = createRekordboxMidi({
+    enabled: true,
+    device: "CustomMIDI1",
+    port: 0,
+    deckChannels: { "1": 1, "2": 2 },
+    mappings: {
+      filter: { channel: 1, messageType: "controlChange", cc: 16 },
+      releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+      stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+    },
+    filter: FILTER,
+    releaseFade: FADE,
+    outputFactory: () => output,
+    now: () => nowMs,
+    setIntervalImpl: (callback, delayMs) => {
+      const handle = { callback, delayMs, cleared: false };
+      intervals.push(handle);
+      return handle;
+    },
+    clearIntervalImpl: (handle) => { handle.cleared = true; },
+  });
+  const client = createClient(sentEvents);
+  const detector = createTrackActivityDetector({ idFactory: () => "f13-deck-2-candidate" });
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseFade: FADE,
+    releaseMacro: MACRO,
+    timerApi: timer,
+  });
+
+  midi.start();
+  assert.equal(midi.getStatus().ok, true);
+  const observedAt = new Date().toISOString();
+  let candidate = null;
+  const observe = (event) => {
+    if (event.type === "DJ_TRACK_ACTIVE" && event.payload.deck === 2) candidate = event;
+  };
+  detector.on("event", observe);
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: observedAt,
+    deckNowPlaying: [{ deck: 2, contentId: "f13-deck-2", title: "F13", artist: "Test" }],
+    deckPlaybacks: [{ deck: 2, isPlaying: false, positionSec: 1, bpm: 120, positionRevision: 1, positionObservedAt: observedAt }],
+  });
+  detector.onSnapshot({
+    explicitMasterDeck: 1,
+    explicitMasterUpdatedAt: observedAt,
+    deckNowPlaying: [{ deck: 2, contentId: "f13-deck-2", title: "F13", artist: "Test" }],
+    deckPlaybacks: [{ deck: 2, isPlaying: true, positionSec: 2, bpm: 120, positionRevision: 2, positionObservedAt: observedAt }],
+  });
+  detector.off("event", observe);
+  assert.ok(candidate, "expected a deck-2 track candidate");
+  assert.equal(detector.getState().explicitMasterDeck, 1);
+  assert.equal(detector.getState().currentMasterDeck, 1);
+  client.emit("delivery", {
+    eventId: candidate.eventId,
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
+
+  const pending = router.triggerAction("release");
+  assert.equal(pending.targetDeck, 2);
+  assert.equal(sentEvents.filter((event) => event.type === "DJ_RELEASE").length, 1);
+
+  nowMs = 1_000;
+  intervals.at(-1).callback();
+  nowMs = 2_000;
+  intervals.at(-1).callback();
+  timer.runNext();
+  assert.deepEqual(messages, [
+    [0xb1, 16, 64],
+    [0xb1, 16, 127],
+    [0xb1, 17, 127],
+    [0xb1, 17, 0],
+    [0x91, 37, 127],
+    [0xb1, 16, 64],
+    [0xb1, 17, 127],
+  ]);
+  assert.equal(router.getStatus().lastReleaseReset.state, "completed");
+  router.stop();
 });
 
 test("Syndocal release delivery is independent of local MIDI failures and remains exactly once", () => {

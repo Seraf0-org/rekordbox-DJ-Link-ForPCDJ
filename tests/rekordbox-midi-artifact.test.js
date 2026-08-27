@@ -53,7 +53,7 @@ test("bundled CustomMIDI1 mapping matches the reviewed rekordbox setup contract"
   assert.deepEqual(mappings.get("LoopHalf").slice(4, 6), ["9024", "9124"]);
 });
 
-test("release fade sends the reviewed CC17 127-to-0 ramp and restores CC17 127", () => {
+test("MIDI adapter sends the reviewed CC17 127-to-0 ramp and restores CC17 127", () => {
   let nowMs = 0;
   const messages = [];
   const intervals = [];
@@ -116,5 +116,87 @@ test("release fade sends the reviewed CC17 127-to-0 ramp and restores CC17 127",
   const reset = midi.resetReleaseFade({ targetDeck: 1 });
   assert.equal(reset.ok, true);
   assert.deepEqual(messages.at(-1), [0xb0, 17, 127]);
+  midi.stop();
+});
+
+test("MIDI adapter sends the complete deck 2 CC16/CC17/Stop/reset byte sequence", () => {
+  let nowMs = 0;
+  const messages = [];
+  const intervals = [];
+  const output = {
+    getPortCount: () => 1,
+    getPortName: () => "CustomMIDI1",
+    openPort: () => true,
+    closePort: () => {},
+    destroy: () => {},
+    sendMessage: (message) => messages.push([...message]),
+  };
+  const midi = createRekordboxMidi({
+    enabled: true,
+    device: "CustomMIDI1",
+    port: 0,
+    deckChannels: { "1": 1, "2": 2 },
+    mappings: {
+      filter: { channel: 1, messageType: "controlChange", cc: 16 },
+      releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+      stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+    },
+    filter: { startValue: 64, endValue: 127, durationMs: 1_000, updateIntervalMs: 50 },
+    releaseFade: {
+      enabled: true,
+      mappingName: "releaseFade",
+      target: "deck",
+      startValue: 127,
+      endValue: 0,
+      durationMs: 1_000,
+      updateIntervalMs: 50,
+      resetAfterStop: true,
+      resetValue: 127,
+      resetDelayMs: 0,
+    },
+    outputFactory: () => output,
+    now: () => nowMs,
+    setIntervalImpl: (callback, delayMs) => {
+      const handle = { callback, delayMs, cleared: false };
+      intervals.push(handle);
+      return handle;
+    },
+    clearIntervalImpl: (handle) => { handle.cleared = true; },
+  });
+
+  midi.start();
+  assert.equal(midi.getStatus().ok, true);
+  const filter = midi.startFilterRamp({
+    targetDeck: 2,
+    durationMs: 1_000,
+    updateIntervalMs: 50,
+  });
+  assert.equal(filter.started, true);
+  assert.equal(filter.targetChannel, 2);
+
+  nowMs = 1_000;
+  intervals.at(-1).callback();
+  const fade = midi.startReleaseFade({
+    targetDeck: 2,
+    durationMs: 1_000,
+    updateIntervalMs: 50,
+  });
+  assert.equal(fade.started, true);
+  assert.equal(fade.targetChannel, 2);
+
+  nowMs = 2_000;
+  intervals.at(-1).callback();
+  assert.equal(midi.sendMapping("stop", { targetDeck: 2 }), true);
+  assert.equal(midi.sendMapping("filter", { targetDeck: 2, value: 64 }), true);
+  assert.equal(midi.resetReleaseFade({ targetDeck: 2, value: 127 }).ok, true);
+  assert.deepEqual(messages, [
+    [0xb1, 16, 64],
+    [0xb1, 16, 127],
+    [0xb1, 17, 127],
+    [0xb1, 17, 0],
+    [0x91, 37, 127],
+    [0xb1, 16, 64],
+    [0xb1, 17, 127],
+  ]);
   midi.stop();
 });
