@@ -1,6 +1,7 @@
 const dgram = require("node:dgram");
 const { EventEmitter } = require("node:events");
 const { normalizeLoopState, upsertLoopState } = require("../loopState");
+const { applyDeckTrackLoadIdentity } = require("../trackIdentityTransition");
 const { projectMeasuredLoopBeats } = require("./loopBeatProjection");
 
 function normalizePlaybackSeconds(rawValue) {
@@ -786,7 +787,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       }
       const deck = resolvedDeck.deck;
       updateDeckState(deck, (data) => {
-        data.trackBrowserId = contentId;
+        applyDeckTrackLoadIdentity(data, contentId);
       });
       markDeckSignal(deck, "track-load");
       emitter.emit("track-loaded", {
@@ -906,15 +907,17 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         data.totalTime = value;
         markDeckSignal(deck, "playback");
       } else if (name === "@TrackBrowserID") {
-        data.trackBrowserId = value;
-        markDeckSignal(deck, "track-id");
+        if (Number.isFinite(value) && value > 0 && value < Number.MAX_SAFE_INTEGER) {
+          applyDeckTrackLoadIdentity(data, value);
+          markDeckSignal(deck, "track-id");
+        }
       } else if (
         /TrackBrowserID/i.test(name) ||
         /ContentID/i.test(name) ||
         /Track.*ID/i.test(name)
       ) {
         if (Number.isFinite(value) && value > 0 && value < Number.MAX_SAFE_INTEGER) {
-          data.trackBrowserId = value;
+          applyDeckTrackLoadIdentity(data, value);
           markDeckSignal(deck, "track-id");
         }
       } else if (isPlayStateName) {

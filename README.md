@@ -339,6 +339,18 @@ title positiveが複数なら、fresh/playingかつtransport-validなDeck 1を�
 transport-valid positiveを選びます。identity不足、stale、停止、相関不能はこの
 arbitrationの候補にならずfail-closedです。
 
+2026-08-28のsource checkpointでは、Demo Track 2のロード時に新しい
+`contentId=235403562`が届いた一方、直前の
+`More One Night × 動く、動く (Agate Trance&Makina bootleg)`のtitleが
+残る不整合を修正しました。`track_load`と有効なOLVC content-ID ingress
+（`@TrackBrowserID`/`@ContentID`）で、異なる非空IDへの遷移を検出した時点で、
+deckおよびglobal now-playingのtrack-bound metadataをsnapshot公開前に消去します。
+同一IDのreplayと、nullからIDへのenrichmentは保持し、owner selectionが古いtitleを
+再利用・再admitすることはありません。focused `node --test
+tests/track-identity-transition.test.js` は **5/5** pass、これはsource-onlyの
+checkpointです。対象DJ PCのpull/restart/reverify、mapped track、pedal、hardware、
+installer/tag/public releaseは未確認・未主張です。
+
 exact external v1.1.9 config が無い場合は Syndocal接続、MIDI、global-hotkey adapterを起動せず、
 SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、HTTP APIは
 継続します。拡張を有効にした場合も、/api/dj-agent/actions/loop-half、

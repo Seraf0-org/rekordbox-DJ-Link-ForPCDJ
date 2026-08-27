@@ -122,6 +122,22 @@ launcher/READMEを再監査してP0/P1/P2なしの**GO**でした。これはsou
 主張しません。Stage 2 trancheでは`transitionHoldActive`をstrict-v3の診断値として受信し、
 F13を現在のauthoritative loopを解除するabsolute loop-offへ置換します。
 
+### 2026-08-28 CURRENT content-identity transition checkpoint
+
+ライブ確認でDemo Track 2をロードした際、新しい`contentId=235403562`が届いたのに、
+直前の`More One Night × 動く、動く (Agate Trance&Makina bootleg)`のtitleが残った。
+これは曲のadmit条件ではなく、track identity replacement時の古いdeck/global
+now-playing metadataのmerge漏れだった。current sourceは`track_load`と有効なOLVC
+content-ID ingress（`@TrackBrowserID`/`@ContentID`）で、異なる非空IDへの遷移を検出すると
+新しいsnapshotを公開する前にtrack-bound metadataを消去する。同一ID replayとnull→ID
+enrichmentは保持し、owner selectionが古いtitleから再admitすることはない。
+
+新しいfocused `node --test tests/track-identity-transition.test.js` は**5/5 pass**、
+最終`npm test`は**470 total / 468 pass / 0 fail / 2 skip**。
+この節はsource/test checkpointだけを記録し、DJ PCはまだpull/restart/reverify
+していない。mapped track、Rekordbox MIDI、physical pedal、wired LAN、real ACK、
+installer/tag/public releaseは未確認・未主張です。
+
 ### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
 
 以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。

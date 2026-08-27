@@ -63,6 +63,7 @@ const {
   isLocalSetupRequest,
 } = require("./dj-agent/httpSecurity");
 const { buildPublicLookupDiagnostic } = require("./publicDiagnostics");
+const { applyNowPlayingIdentityPatch } = require("./trackIdentityTransition");
 const { enumerateMidiOutputs } = require("./dj-agent/midiPorts");
 const { validateCustomMidiCsv } = require("./dj-agent/rekordboxMapping");
 const { SYNDOCAL_ADAPTERS, buildSetupChecklist } = require("./dj-agent/setupChecklist");
@@ -1317,10 +1318,10 @@ hookUdpProvider.on("snapshot", (snapshot) => {
     };
   }
   if (snapshot.nowPlayingPatch) {
-    state.nowPlaying = {
-      ...(state.nowPlaying || {}),
-      ...snapshot.nowPlayingPatch,
-    };
+    state.nowPlaying = applyNowPlayingIdentityPatch(
+      state.nowPlaying,
+      snapshot.nowPlayingPatch
+    );
     if (snapshot.nowPlayingPatch.contentId) {
       setNowPlayingMethod("hook-track-load", "nowPlayingPatch");
     }

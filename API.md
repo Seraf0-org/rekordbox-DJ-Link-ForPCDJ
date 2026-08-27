@@ -156,6 +156,19 @@ duplicate, reordered, foreign, or cross-identity samples fail closed.
 The first emitted ACTIVE freezes that session's one-of wire identity; late
 metadata enrichment is diagnostic only and cannot alter later ACTIVE or SYNC.
 
+On a definite transition between two nonempty content IDs, `track_load` and a
+valid OLVC content-ID ingress (`@TrackBrowserID` or `@ContentID`) clear the old
+deck and global now-playing track-bound metadata before the replacement snapshot
+is published. This prevents a new ID from being paired with a stale title or
+artist, including the 2026-08-28 observation where `contentId=235403562` was
+paired with the previous `More One Night × 動く、動く (Agate Trance&Makina
+bootleg)` title while Demo Track 2 was loading. Same-ID replay and null-to-ID
+enrichment preserve existing metadata; owner selection never re-admits from the
+cleared old title. The source checkpoint's focused
+`node --test tests/track-identity-transition.test.js` is **5/5**. DJ-PC
+pull/restart/reverification and physical, mapped-track, or pedal acceptance
+remain unverified.
+
 The sole current/production adapter is `syndocal-envelope-v3`.
 Every frame has exactly `{v:3,type,agentId,sessionId,sequence,eventId,payload}`.
 Flat, v1, and v2 frames, retired adapter names, aliases, and unknown names are
