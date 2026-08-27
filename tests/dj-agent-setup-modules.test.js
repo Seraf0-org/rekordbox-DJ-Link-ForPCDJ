@@ -308,7 +308,7 @@ test("setup readiness is pure, token-free, and allows only validated active gate
     pedal: { enabled: true, ready: true },
     midi: { enabled: true, ready: true, selected: true, nameVerified: true },
     syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true },
-    macro: { enabled: true, sequence: "filter-then-stop", ready: true },
+    macro: { enabled: true, sequence: "filter-then-fade-then-stop", ready: true },
     token: secret,
     syndocalToken: secret,
   });
@@ -436,7 +436,7 @@ test("malformed or contradictory gate records never become disabled or ready", (
     pedal: { enabled: true, ready: true, available: false },
     midi: { enabled: true, ready: true, available: false, selected: true },
     syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true, available: false },
-    macro: { enabled: true, sequence: "filter-then-stop", ready: true, valid: false },
+    macro: { enabled: true, sequence: "filter-then-fade-then-stop", ready: true, valid: false },
   });
 
   assert.equal(result.state, "blocked");
@@ -456,7 +456,7 @@ test("a disabled root denies every gate without inspecting child readiness", () 
     pedal: { enabled: true, ready: true },
     midi: { enabled: true, ready: true, selected: true },
     syndocal: { enabled: true, adapter: "syndocal-envelope-v3", connected: true },
-    macro: { enabled: true, sequence: "filter-then-stop", ready: true },
+    macro: { enabled: true, sequence: "filter-then-fade-then-stop", ready: true },
   });
 
   assert.equal(result.state, "disabled");
@@ -477,7 +477,7 @@ test("macro and releaseMacro cannot be supplied simultaneously", () => {
     midi: { enabled: false },
     syndocal: { enabled: false },
     macro: { enabled: false },
-    releaseMacro: { enabled: true, sequence: "filter-then-stop", ready: true },
+    releaseMacro: { enabled: true, sequence: "filter-then-fade-then-stop", ready: true },
   });
   assert.equal(result.gates.macro.state, "blocked");
   assert.equal(result.gates.macro.reason, "macro-configuration-conflict");

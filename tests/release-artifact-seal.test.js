@@ -24,7 +24,7 @@ const {
 
 const REPO_ROOT = path.join(__dirname, "..");
 const VERIFIER = path.join(REPO_ROOT, "scripts", "verify-release-artifacts.js");
-const VERSION = "1.1.7";
+const VERSION = "1.1.8";
 const TAG = `v${VERSION}`;
 
 function tempRoot(t) {
@@ -178,15 +178,15 @@ function rewriteReleaseManifest(fixture, mutate) {
   writeCanonical(path.join(fixture.dist, "release-manifest.json"), next);
 }
 
-test("release artifact seal accepts only the exact v1.1.7 fixture", (t) => {
+test("release artifact seal accepts only the exact v1.1.8 fixture", (t) => {
   const fixture = createFixture(t);
   const result = runSeal(fixture.root);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /"releaseTag": "v1\.1\.7"/);
+  assert.match(result.stdout, /"releaseTag": "v1\.1\.8"/);
 
   const wrongTag = runSeal(fixture.root, "v1.1.3");
   assert.notEqual(wrongTag.status, 0);
-  assert.match(wrongTag.stderr, /release tag must be exactly v1.1.7/);
+  assert.match(wrongTag.stderr, /release tag must be exactly v1.1.8/);
 });
 
 test("release artifact seal rejects a missing, mutated, or extra upload artifact", (t) => {

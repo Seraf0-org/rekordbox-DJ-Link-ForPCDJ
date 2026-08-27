@@ -249,18 +249,60 @@
 
           <section class="dj-agent-setup-section" aria-labelledby="djAgentConfigTitle">
             <h2 id="djAgentConfigTitle">Token-free config preview</h2>
-            <pre id="djAgentConfigPreview" class="dj-agent-config-preview" aria-label="Token-free DJ Agent config preview">{
+              <pre id="djAgentConfigPreview" class="dj-agent-config-preview" aria-label="Token-free DJ Agent config preview">{
+  "version": "1.1.8",
   "enabled": true,
-  "syndocal": { "host": "", "nic": "", "adapter": "", "path": "/dj-link" },
-  "midi": { "device": "CustomMIDI1", "port": null },
-  "pedal": { "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" } },
-  "releaseMacro": { "enabled": true, "sequence": "filter-then-stop" }
+  "syndocal": {
+    "enabled": true,
+    "host": "192.168.50.1",
+    "port": 9100,
+    "path": "/dj-link",
+    "nic": "192.168.50.2",
+    "adapter": "syndocal-envelope-v3",
+    "heartbeatMs": 5000
+  },
+  "pedal": {
+    "enabled": true,
+    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
+  },
+  "midi": {
+    "enabled": true,
+    "device": "CustomMIDI1",
+    "port": 1,
+    "mappings": {
+      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
+      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
+      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
+      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
+    },
+    "deckChannels": { "1": 1, "2": 2 },
+    "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50 },
+    "releaseFade": {
+      "enabled": true,
+      "mapping": "releaseFade",
+      "target": "deck",
+      "startValue": 127,
+      "endValue": 0,
+      "durationMs": 1000,
+      "updateIntervalMs": 50,
+      "resetAfterStop": true,
+      "resetValue": 127,
+      "resetDelayMs": 0
+    },
+    "releaseMacro": {
+      "enabled": true,
+      "sequence": "filter-then-fade-then-stop",
+      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
+      "resetAfterStop": true,
+      "resetDelayMs": 0
+    }
+  }
 }</pre>
             <div class="dj-agent-setup-actions">
               <button id="djAgentConfigDownload" type="button">Download config preview</button>
               <button id="djAgentConfigCopy" type="button">Copy config preview</button>
             </div>
-            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.7 configuration.</p>
+            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.8 configuration.</p>
           </section>
         </div>
 
@@ -273,7 +315,7 @@
                 <tr><th scope="col">Pedal</th><th scope="col">Stage 1</th><th scope="col">Stage 2</th></tr>
               </thead>
               <tbody>
-                <tr><th scope="row">F13</th><td>Local HPF Filter ramp → planned Cue/Stop, then one DJ_RELEASE</td><td>−4 bars BeatJump; no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F13</th><td>Local HPF start + correlated DJ_RELEASE at the same edge → ChannelFader fade → Cue/Stop</td><td>−4 bars BeatJump; no Rekordbox MIDI</td></tr>
                 <tr><th scope="row">F14</th><td>Local LoopHalf MIDI and DJ_LOOP_STATE</td><td>Absolute loop set from authoritative loopActive; no Rekordbox MIDI</td></tr>
                 <tr><th scope="row">F15</th><td>Inactive</td><td>+4 bars BeatJump; only while authoritative timeline is running</td></tr>
               </tbody>

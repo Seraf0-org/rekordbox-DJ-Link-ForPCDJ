@@ -19,7 +19,7 @@ const NOW = Date.parse("2026-08-25T00:00:00.000Z");
 const ENVELOPE_FIELDS = ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"];
 const EXACT_RELEASE_MACRO = Object.freeze({
   enabled: true,
-  sequence: "filter-then-stop",
+  sequence: "filter-then-fade-then-stop",
   filter: Object.freeze({
     startValue: 64,
     endValue: 127,
@@ -28,6 +28,18 @@ const EXACT_RELEASE_MACRO = Object.freeze({
     resetValue: 64,
   }),
   resetAfterStop: true,
+  resetDelayMs: 0,
+});
+const EXACT_RELEASE_FADE = Object.freeze({
+  enabled: true,
+  mappingName: "releaseFade",
+  target: "deck",
+  startValue: 127,
+  endValue: 0,
+  durationMs: 1_000,
+  updateIntervalMs: 50,
+  resetAfterStop: true,
+  resetValue: 127,
   resetDelayMs: 0,
 });
 
@@ -2017,10 +2029,15 @@ function createFakeRouter() {
     sendMapping(mapping) { this.sent.push(mapping); return true; },
     startFilterRamp(options) {
       this.sent.push("filterRamp");
-      options.onComplete?.({ targetDeck: options.targetDeck, targetChannel: 1 });
       return { started: true, ok: true, targetDeck: options.targetDeck, targetChannel: 1 };
     },
+    startReleaseFade(options) {
+      this.sent.push("releaseFade");
+      return { started: true, ok: true, targetDeck: options.targetDeck, targetChannel: 1 };
+    },
+    resetReleaseFade() { return { ok: true, value: 127 }; },
     cancelFilterRamp() {},
+    cancelReleaseFade() {},
     getStatus: () => ({}),
     start() {},
     stop() {},
@@ -2032,6 +2049,7 @@ function createFakeRouter() {
     midi,
     pedal,
     releaseMacro: EXACT_RELEASE_MACRO,
+    releaseFade: EXACT_RELEASE_FADE,
     timerApi,
     now: () => NOW,
   });
@@ -2300,7 +2318,7 @@ test("pedal ownership changes only after correlated release and late sync cannot
   assert.deepEqual(midi.sent, ["loopHalf"]);
 
   const release = router.triggerAction("release");
-  assert.equal(release.phase, "filter-ramp");
+  assert.equal(release.phase, "handoff-pending", "DJ_RELEASE is routed at the F13 edge before local MIDI completion");
   timerApi.runNext();
   assert.equal(router.getStatus().mode, "handoff-pending");
   const releaseDelivery = router.getStatus().lastAction.delivery;
@@ -2337,6 +2355,70 @@ test("pedal ownership changes only after correlated release and late sync cannot
     type: "DJ_TIMELINE_STATE",
   });
   assert.equal(router.getStatus().mode, "timeline-control");
+});
+
+test("DJ_RELEASE stays pending across reconnect retry until the correlated timeline snapshot", () => {
+  const { detector, client, router, timerApi } = createFakeRouter();
+  const candidate = strictCandidateTrackPayload();
+  detector.emit("event", {
+    type: "DJ_TRACK_ACTIVE",
+    eventId: "release-reconnect-active",
+    payload: candidate,
+  });
+  client.emit("delivery", {
+    eventId: "release-reconnect-active",
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
+  client.emit("timeline-state", {
+    ...strictTimelineState({ playSessionId: candidate.playSessionId }).payload,
+    type: "DJ_TIMELINE_STATE",
+  });
+
+  router.triggerAction("release");
+  const releaseEvent = client.sent.find((event) => event.type === "DJ_RELEASE");
+  const releaseEventId = router.getStatus().lastAction.releaseEventId;
+  assert.ok(releaseEvent && releaseEventId);
+  client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
+  client.emit("delivery", {
+    eventId: releaseEventId,
+    type: "DJ_RELEASE",
+    state: "retrying",
+    ackState: "retrying",
+    ok: false,
+    reason: "connection-closed",
+  });
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  assert.equal(router.getStatus().releaseMacroPhase, "handoff-pending");
+  assert.equal(router.getStatus().lastAction.delivery.state, "retrying");
+
+  // The physical tail continues while the same durable event is queued for
+  // replay; retrying must not clear the handoff correlation key.
+  timerApi.runNext();
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
+  client.emit("delivery", {
+    eventId: releaseEventId,
+    type: "DJ_RELEASE",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+    ack: { outcome: "accepted" },
+  });
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  assert.equal(router.getStatus().lastAction.delivery.state, "acknowledged");
+  client.emit("timeline-state", {
+    ...strictTimelineState({
+      playSessionId: candidate.playSessionId,
+      pedalOwner: "timeline",
+      releaseEventId,
+    }).payload,
+    type: "DJ_TIMELINE_STATE",
+  });
+  assert.equal(router.getStatus().mode, "timeline-control");
+  assert.equal(router.getStatus().releaseMacroPhase, "complete");
+  assert.equal(router.getStatus().lastAction.delivery.state, "acknowledged");
+  router.stop();
 });
 
 test("strict v3 capabilities and typed encoders exclude DJ_MASTER_CHANGED entirely", () => {

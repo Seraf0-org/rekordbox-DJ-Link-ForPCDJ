@@ -90,6 +90,7 @@ function normalizeMidiMappings(mappings) {
     loopHalf: ["loopHalf", "loop_half"],
     stop: ["stop", "release"],
     filter: ["filter", "filterClose", "filter_close"],
+    releaseFade: ["releaseFade"],
     masterLevel: ["masterLevel", "master_level"],
     loopOff: ["loopOff", "loop_off"],
     filterReset: ["filterReset", "filter_reset"],
@@ -105,7 +106,7 @@ function normalizeMidiMappings(mappings) {
 }
 
 function normalizeReleaseMacroSequence(value) {
-  return value === "filter-then-stop" ? "filter-then-stop" : null;
+  return value === "filter-then-fade-then-stop" ? "filter-then-fade-then-stop" : null;
 }
 
 function isPlainRecord(value) {
@@ -128,9 +129,9 @@ function hasExactValues(value, expected) {
 // The controlled source launcher accepts exactly one show schema.  Keep this
 // validator separate from the permissive default-off config loader: its input
 // is the raw external show file and it never returns that file or its token.
-function validateFilterThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
+function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
   if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi"])) return false;
-  if (value.version !== "1.1.7" || value.enabled !== true) return false;
+  if (value.version !== "1.1.8" || value.enabled !== true) return false;
 
   const syndocal = value.syndocal;
   if (!hasExactKeys(syndocal, ["enabled", "host", "port", "path", "nic", "token", "adapter", "heartbeatMs"])) return false;
@@ -157,16 +158,32 @@ function validateFilterThenStopShowConfig(value, { allowTokenPlaceholder = false
   const midi = value.midi;
   if (!hasExactKeys(midi, ["enabled", "device", "port", "mappings", "deckChannels", "filter", "releaseFade", "releaseMacro"])) return false;
   if (midi.enabled !== true || midi.device !== "CustomMIDI1" || !Number.isInteger(midi.port) || midi.port < 0 || midi.port > 4096) return false;
-  if (!hasExactKeys(midi.mappings, ["loopHalf", "stop", "filter"])) return false;
+  if (!hasExactKeys(midi.mappings, ["loopHalf", "stop", "filter", "releaseFade"])) return false;
   if (!hasExactValues(midi.mappings.loopHalf, { channel: 1, messageType: "noteOn", note: 36, value: 127 })) return false;
   if (!hasExactValues(midi.mappings.stop, { channel: 1, messageType: "noteOn", note: 37, value: 127 })) return false;
   if (!hasExactValues(midi.mappings.filter, { channel: 1, messageType: "controlChange", cc: 16 })) return false;
+  if (!hasExactValues(midi.mappings.releaseFade, { channel: 1, messageType: "controlChange", cc: 17 })) return false;
   if (!hasExactValues(midi.deckChannels, { 1: 1, 2: 2 })) return false;
   const filter = { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 };
   if (!hasExactValues(midi.filter, filter)) return false;
-  if (!hasExactValues(midi.releaseFade, { enabled: false })) return false;
+  if (!hasExactKeys(midi.releaseFade, [
+    "enabled", "mapping", "target", "startValue", "endValue", "durationMs",
+    "updateIntervalMs", "resetAfterStop", "resetValue", "resetDelayMs",
+  ])) return false;
+  if (!hasExactValues(midi.releaseFade, {
+    enabled: true,
+    mapping: "releaseFade",
+    target: "deck",
+    startValue: 127,
+    endValue: 0,
+    durationMs: 1000,
+    updateIntervalMs: 50,
+    resetAfterStop: true,
+    resetValue: 127,
+    resetDelayMs: 0,
+  })) return false;
   if (!hasExactKeys(midi.releaseMacro, ["enabled", "sequence", "filter", "resetAfterStop", "resetDelayMs"])) return false;
-  if (midi.releaseMacro.enabled !== true || midi.releaseMacro.sequence !== "filter-then-stop") return false;
+  if (midi.releaseMacro.enabled !== true || midi.releaseMacro.sequence !== "filter-then-fade-then-stop") return false;
   if (!hasExactValues(midi.releaseMacro.filter, { ...filter, resetValue: 64 })) return false;
   return midi.releaseMacro.resetAfterStop === true && midi.releaseMacro.resetDelayMs === 0;
 }
@@ -186,7 +203,7 @@ function normalizeDeckChannels(value) {
 }
 
 const STRICT_SHOW_CONFIG_DISABLED_REASON =
-  "DJ Agent disabled: exact external v1.1.7 filter-then-stop configuration is required";
+  "DJ Agent disabled: exact external v1.1.8 filter-then-fade-then-stop configuration is required";
 const RUNTIME_SHOW_OVERRIDE_KEYS = Object.freeze([
   "DJ_AGENT_CONFIG",
   "DJ_AGENT_ENABLED",
@@ -248,6 +265,11 @@ function disabledDjAgentConfig() {
       deckChannels: {},
       mappings: {},
       filter: {},
+      releaseFade: {
+        enabled: false,
+        mappingName: "releaseFade",
+        target: "deck",
+      },
       releaseMacro: {
         enabled: false,
         sequence: null,
@@ -293,11 +315,24 @@ function strictShowConfig(source) {
         loopHalf: { ...source.midi.mappings.loopHalf },
         stop: { ...source.midi.mappings.stop },
         filter: { ...source.midi.mappings.filter },
+        releaseFade: { ...source.midi.mappings.releaseFade },
       },
       filter: { ...source.midi.filter },
+      releaseFade: {
+        enabled: true,
+        mappingName: source.midi.releaseFade.mapping,
+        target: source.midi.releaseFade.target,
+        startValue: source.midi.releaseFade.startValue,
+        endValue: source.midi.releaseFade.endValue,
+        durationMs: source.midi.releaseFade.durationMs,
+        updateIntervalMs: source.midi.releaseFade.updateIntervalMs,
+        resetAfterStop: source.midi.releaseFade.resetAfterStop,
+        resetValue: source.midi.releaseFade.resetValue,
+        resetDelayMs: source.midi.releaseFade.resetDelayMs,
+      },
       releaseMacro: {
         enabled: true,
-        sequence: "filter-then-stop",
+        sequence: "filter-then-fade-then-stop",
         filter: { ...source.midi.releaseMacro.filter },
         resetAfterStop: true,
         resetDelayMs: 0,
@@ -351,7 +386,7 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, repositoryRoot = REP
   if (!externalPath) return disabledDjAgentConfig();
 
   const fileResult = readConfigFile(externalPath, fsApi);
-  if (fileResult.warning || !validateFilterThenStopShowConfig(fileResult.config)) {
+  if (fileResult.warning || !validateFilterThenFadeThenStopShowConfig(fileResult.config)) {
     return disabledDjAgentConfig();
   }
   return strictShowConfig(fileResult.config);
@@ -374,5 +409,5 @@ module.exports = {
   parseJson,
   readConfigFile,
   strictShowConfig,
-  validateFilterThenStopShowConfig,
+  validateFilterThenFadeThenStopShowConfig,
 };

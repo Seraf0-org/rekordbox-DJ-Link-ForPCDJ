@@ -4,6 +4,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
+const { validateFilterThenFadeThenStopShowConfig } = require("../server/dj-agent/config");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "server", "public");
 const html = fs.readFileSync(path.join(PUBLIC_DIR, "index.html"), "utf8");
@@ -34,9 +36,33 @@ test("first-run setup card is always present and exposes read-only setup surface
   assert.match(card, /F13/);
   assert.match(card, /F14/);
   assert.match(card, /F15/);
-  assert.match(card, /releaseMacro[^]*enabled[^]*true[^]*filter-then-stop/);
+  assert.match(card, /releaseMacro[^]*enabled[^]*true[^]*filter-then-fade-then-stop/);
   assert.match(card, /does not install drivers/);
   assert.match(card, /not persisted, sent to the server, or stored in localStorage/);
+});
+
+test("static setup preview is complete nested v1.1.8 and validates after restoring only the token placeholder", () => {
+  const match = html.match(/<pre id="djAgentConfigPreview"[^>]*>([\s\S]*?)<\/pre>/);
+  assert.ok(match);
+  const preview = JSON.parse(match[1]);
+  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "version"]);
+  assert.deepEqual(Object.keys(preview.midi).sort(), [
+    "deckChannels", "device", "enabled", "filter", "mappings", "port", "releaseFade", "releaseMacro",
+  ]);
+  assert.equal(Object.hasOwn(preview, "releaseMacro"), false);
+  assert.equal(Object.hasOwn(preview, "releaseFade"), false);
+  assert.equal(preview.version, "1.1.8");
+  assert.equal(preview.syndocal.adapter, "syndocal-envelope-v3");
+  assert.equal(preview.midi.releaseFade.enabled, true);
+  assert.equal(preview.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
+  const withTokenPlaceholder = {
+    ...preview,
+    syndocal: { ...preview.syndocal, token: "<SYNDOCAL_ONE_TIME_TOKEN>" },
+  };
+  assert.equal(
+    validateFilterThenFadeThenStopShowConfig(withTokenPlaceholder, { allowTokenPlaceholder: true }),
+    true,
+  );
 });
 
 test("setup client uses only local GET, handles remote/403 gracefully, and has no setup persistence", () => {
@@ -99,6 +125,59 @@ test("setup preview remains empty for an unselected MIDI pair", () => {
   assert.match(previewBlock, /device:\s*midiDevice/);
   assert.match(previewBlock, /port:\s*midiPort/);
   assert.match(previewBlock, /adapter: djAgentSetupDraft\.adapter/);
+});
+
+test("setup preview keeps the v1.1.8 strict schema shape with MIDI macro nesting", () => {
+  const sourceStart = app.indexOf("const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE");
+  const sourceEnd = app.indexOf("async function fetchDjAgentSetup");
+  assert.ok(sourceStart >= 0 && sourceEnd > sourceStart);
+  const previewElement = { textContent: "" };
+  const api = vm.runInNewContext(
+    `${app.slice(sourceStart, sourceEnd)}
+;({
+  normalizeDjAgentConfigTemplate,
+  setTemplate(value) { djAgentSetupTemplate = value; },
+  setDraft(value) { Object.assign(djAgentSetupDraft, value); },
+  updateDjAgentConfigPreviewFromDraft,
+  getPreview() { return djAgentConfigPreviewEl.textContent; },
+})`,
+    { djAgentConfigPreviewEl: previewElement },
+  );
+  const template = JSON.parse(fs.readFileSync(
+    path.join(__dirname, "..", "config", "dj-agent-v1.1.8.example.json"),
+    "utf8",
+  ));
+  const legacyRoot = {
+    ...template,
+    releaseMacro: { enabled: true, sequence: "filter-then-stop" },
+    releaseFade: { enabled: true, mapping: "releaseFade", target: "deck" },
+  };
+  const normalizedLegacy = api.normalizeDjAgentConfigTemplate(legacyRoot);
+  assert.equal(Object.hasOwn(normalizedLegacy, "releaseMacro"), false);
+  assert.equal(Object.hasOwn(normalizedLegacy, "releaseFade"), false);
+  assert.equal(normalizedLegacy.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
+
+  api.setTemplate(template);
+  api.setDraft({
+    host: template.syndocal.host,
+    nic: template.syndocal.nic,
+    adapter: template.syndocal.adapter,
+    midiDevice: template.midi.device,
+    midiPort: String(template.midi.port),
+  });
+  api.updateDjAgentConfigPreviewFromDraft();
+  const preview = JSON.parse(api.getPreview());
+  assert.deepEqual(Object.keys(preview).sort(), ["enabled", "midi", "pedal", "syndocal", "version"]);
+  assert.deepEqual(Object.keys(preview.midi).sort(), [
+    "deckChannels", "device", "enabled", "filter", "mappings", "port", "releaseFade", "releaseMacro",
+  ]);
+  assert.equal(Object.hasOwn(preview, "releaseMacro"), false);
+  assert.equal(Object.hasOwn(preview, "releaseFade"), false);
+  // Setup deliberately omits the secret. Restoring the documented placeholder
+  // here models the operator's final external file without testing secret
+  // transport or persistence in the browser.
+  preview.syndocal.token = "<SYNDOCAL_ONE_TIME_TOKEN>";
+  assert.equal(validateFilterThenFadeThenStopShowConfig(preview, { allowTokenPlaceholder: true }), true);
 });
 
 test("setup styling keeps normal hit targets and provides responsive/internal flow", () => {

@@ -46,12 +46,27 @@ const {
 } = require("../server/dj-agent/httpSecurity");
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
-function exactFilterThenStopMacro() {
+function exactReleaseMacro() {
   return {
     enabled: true,
-    sequence: "filter-then-stop",
+    sequence: "filter-then-fade-then-stop",
     filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
     resetAfterStop: true,
+    resetDelayMs: 0,
+  };
+}
+
+function exactReleaseFade() {
+  return {
+    enabled: true,
+    mappingName: "releaseFade",
+    target: "deck",
+    startValue: 127,
+    endValue: 0,
+    durationMs: 1000,
+    updateIntervalMs: 50,
+    resetAfterStop: true,
+    resetValue: 127,
     resetDelayMs: 0,
   };
 }
@@ -67,10 +82,25 @@ function createReleaseTimers() {
       },
     },
     runPlannedCompletion() {
-      const index = pending.findIndex((pendingTimer) => pendingTimer.delayMs === 1000);
-      const completion = index >= 0 ? pending.splice(index, 1)[0]?.callback : null;
-      assert.ok(completion, "release macro must schedule its planned completion");
-      completion();
+      let completed = false;
+      // A current release has two planned one-second boundaries (HPF then
+      // ChannelFader) followed by the zero-delay reset. Drain that bounded
+      // local tail so callers can inspect the terminal action deterministically.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const index = pending.findIndex((pendingTimer) => pendingTimer.delayMs === 1000);
+        if (index < 0) break;
+        const completion = pending.splice(index, 1)[0]?.callback;
+        if (typeof completion === "function") {
+          completed = true;
+          completion();
+        }
+      }
+      const resetIndex = pending.findIndex((pendingTimer) => pendingTimer.delayMs === 0);
+      if (resetIndex >= 0) {
+        const reset = pending.splice(resetIndex, 1)[0]?.callback;
+        if (typeof reset === "function") reset();
+      }
+      assert.ok(completed, "release macro must schedule its planned completion");
     },
   };
 }
@@ -569,11 +599,12 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     },
     releaseMacro: {
       enabled: true,
-      sequence: "filter-then-stop",
+      sequence: "filter-then-fade-then-stop",
       filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
       resetAfterStop: true,
       resetDelayMs: 0,
     },
+    releaseFade: exactReleaseFade(),
   });
 
   detector.onSnapshot({
@@ -718,7 +749,8 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
@@ -831,7 +863,8 @@ test("an unacknowledged replacement cannot take a released Stage 2 owner", () =>
   const blocked = router.triggerAction("loop-half");
   assert.equal(blocked.reason, "handoff-pending");
   assert.equal(blocked.midiSent, false);
-  assert.deepEqual(midiCalls, ["stop"]);
+  assert.deepEqual(midiCalls.filter((name) => name === "stop"), ["stop"]);
+  assert.equal(midiCalls.filter((name) => name === "filter").length, 1, "completed release resets HPF");
   router.stop();
 });
 
@@ -947,7 +980,8 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
@@ -1318,7 +1352,8 @@ test("release handoff failures never stick in handoff-pending and running wins t
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
@@ -1404,7 +1439,8 @@ test("release handoff failures never stick in handoff-pending and running wins t
   assert.equal(router.getStatus().mode, "timeline-control");
   assert.equal(router.getStatus().releaseMacroPhase, "complete");
   assert.equal(router.getStatus().lastAction.phase, "complete");
-  assert.deepEqual(midiCalls, ["stop", "stop", "stop"]);
+  assert.deepEqual(midiCalls.filter((name) => name === "stop"), ["stop", "stop", "stop"]);
+  assert.equal(midiCalls.filter((name) => name === "filter").length, 3, "each completed release resets HPF");
   router.stop();
 });
 
@@ -1437,7 +1473,8 @@ test("synchronous DJ_RELEASE send failure returns to dj-control and remains retr
       stop() {},
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
@@ -1481,7 +1518,8 @@ test("Stage 1 release routes physical DJ_RELEASE when planned Stop MIDI fails", 
       stop() {},
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
@@ -1489,7 +1527,8 @@ test("Stage 1 release routes physical DJ_RELEASE when planned Stop MIDI fails", 
   router.triggerAction("release");
   releaseTimers.runPlannedCompletion();
   const result = router.getStatus().lastAction;
-  assert.equal(result.reason, "local-midi-stop-failed");
+  assert.equal(result.reason, result.localFailure);
+  assert.ok(result.localFailure, "the first local ramp/stop failure remains visible");
   assert.equal(result.midiSent, false);
   assert.equal(result.ok, false);
   assert.equal(result.delivery.state, "acknowledged");
@@ -3265,7 +3304,8 @@ test("router correlates release timeout back to the same action event", async (t
     syndocalClient: client,
     midi,
     pedal,
-    releaseMacro: exactFilterThenStopMacro(),
+    releaseFade: exactReleaseFade(),
+    releaseMacro: exactReleaseMacro(),
     timerApi: releaseTimers.timerApi,
   });
   const routedEvents = [];

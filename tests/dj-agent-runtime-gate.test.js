@@ -15,7 +15,7 @@ const SERVER_ENTRY = path.join(REPO_ROOT, "server", "index.js");
 
 function strictShowConfig() {
   return {
-    version: "1.1.7",
+    version: "1.1.8",
     enabled: true,
     syndocal: {
       enabled: true,
@@ -36,13 +36,25 @@ function strictShowConfig() {
         loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
         stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
         filter: { channel: 1, messageType: "controlChange", cc: 16 },
+        releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
       },
       deckChannels: { 1: 1, 2: 2 },
       filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 },
-      releaseFade: { enabled: false },
+      releaseFade: {
+        enabled: true,
+        mapping: "releaseFade",
+        target: "deck",
+        startValue: 127,
+        endValue: 0,
+        durationMs: 1000,
+        updateIntervalMs: 50,
+        resetAfterStop: true,
+        resetValue: 127,
+        resetDelayMs: 0,
+      },
       releaseMacro: {
         enabled: true,
-        sequence: "filter-then-stop",
+        sequence: "filter-then-fade-then-stop",
         filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
         resetAfterStop: true,
         resetDelayMs: 0,
@@ -140,7 +152,7 @@ test("source-direct server from another cwd rejects a checkout-internal show sou
   const { port, child } = await startDisabledSourceServer(t, {
     cwd: otherCwd,
     env: {
-      DJ_AGENT_CONFIG_PATH: path.join(REPO_ROOT, "config", "dj-agent-v1.1.7.example.json"),
+      DJ_AGENT_CONFIG_PATH: path.join(REPO_ROOT, "config", "dj-agent-v1.1.8.example.json"),
     },
   });
   const status = await getJson(port, "/api/dj-agent/status");

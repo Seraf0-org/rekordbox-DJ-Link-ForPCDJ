@@ -20,12 +20,27 @@ const { loadDjAgentConfig } = require("../server/dj-agent/config");
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
-function exactFilterThenStopMacro() {
+function exactReleaseMacro() {
   return {
     enabled: true,
-    sequence: "filter-then-stop",
+    sequence: "filter-then-fade-then-stop",
     filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
     resetAfterStop: true,
+    resetDelayMs: 0,
+  };
+}
+
+function exactReleaseFade() {
+  return {
+    enabled: true,
+    mappingName: "releaseFade",
+    target: "deck",
+    startValue: 127,
+    endValue: 0,
+    durationMs: 1000,
+    updateIntervalMs: 50,
+    resetAfterStop: true,
+    resetValue: 127,
     resetDelayMs: 0,
   };
 }
@@ -446,7 +461,8 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
     midi,
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
     loopFallback: { responseWindowMs: 250, timerApi: timers },
-    releaseMacro: exactFilterThenStopMacro(),
+     releaseFade: exactReleaseFade(),
+     releaseMacro: exactReleaseMacro(),
     timerApi: timers,
   });
   detector.emit("event", {
@@ -482,7 +498,7 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
   assert.equal(timers.size(), 1);
   const release = router.triggerAction("release");
   assert.equal(release.midiSent, false);
-  assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 0);
+  assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 1);
   timers.runAll();
   assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 1);
   assert.equal(sent.filter((event) => event.type === "DJ_LOOP_FALLBACK").length, 1);
@@ -564,7 +580,8 @@ test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fa
       stop() {},
     },
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
-    releaseMacro: exactFilterThenStopMacro(),
+     releaseFade: exactReleaseFade(),
+     releaseMacro: exactReleaseMacro(),
     timerApi: timers,
   });
   detector.emit("event", { type: "DJ_TRACK_ACTIVE", eventId: "active-1", payload: candidateTrack() });

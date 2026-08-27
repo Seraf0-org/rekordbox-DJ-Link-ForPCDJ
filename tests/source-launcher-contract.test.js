@@ -99,8 +99,8 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /fs\.lstatSync\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
-  assert.match(source, /validateFilterThenStopShowConfig\(source\)/);
-  assert.match(source, /releaseMacro\.enabled=true, sequence=filter-then-stop, releaseFade disabled/i);
+  assert.match(source, /validateFilterThenFadeThenStopShowConfig\(source\)/);
+  assert.match(source, /releaseMacro\.enabled=true, sequence=filter-then-fade-then-stop, CC16 HPF plus CC17 ChannelFader fade/i);
   assert.doesNotMatch(source, /web server already running/i);
   assert.doesNotMatch(
     source,
@@ -148,7 +148,7 @@ test(
     const validPath = path.join(tempRoot, "valid.json");
     const macroPath = path.join(tempRoot, "fade-enabled.json");
     const valid = {
-      version: "1.1.7",
+      version: "1.1.8",
       enabled: true,
       syndocal: {
         enabled: true,
@@ -169,13 +169,25 @@ test(
           loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
           stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
           filter: { channel: 1, messageType: "controlChange", cc: 16 },
+          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
         },
         deckChannels: { 1: 1, 2: 2 },
         filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 },
-        releaseFade: { enabled: false },
+        releaseFade: {
+          enabled: true,
+          mapping: "releaseFade",
+          target: "deck",
+          startValue: 127,
+          endValue: 0,
+          durationMs: 1000,
+          updateIntervalMs: 50,
+          resetAfterStop: true,
+          resetValue: 127,
+          resetDelayMs: 0,
+        },
         releaseMacro: {
           enabled: true,
-          sequence: "filter-then-stop",
+          sequence: "filter-then-fade-then-stop",
           filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
           resetAfterStop: true,
           resetDelayMs: 0,

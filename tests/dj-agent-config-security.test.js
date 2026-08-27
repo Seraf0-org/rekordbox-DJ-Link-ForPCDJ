@@ -14,7 +14,7 @@ const {
   loadDjAgentConfig,
   readConfigFile,
   resolveStrictExternalShowPath,
-  validateFilterThenStopShowConfig,
+  validateFilterThenFadeThenStopShowConfig,
 } = require("../server/dj-agent/config");
 const { validToken } = require("../server/dj-agent/tokenValidation");
 const { createTrackActivityDetector } = require("../server/dj-agent/trackActivityDetector");
@@ -27,7 +27,7 @@ const PRIVATE_PATH = "C:\\Users\\alice\\Documents\\dj-agent-secret.json";
 
 function strictShowConfig(token = TEST_TOKEN) {
   return {
-    version: "1.1.7",
+    version: "1.1.8",
     enabled: true,
     syndocal: {
       enabled: true,
@@ -48,13 +48,25 @@ function strictShowConfig(token = TEST_TOKEN) {
         loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
         stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
         filter: { channel: 1, messageType: "controlChange", cc: 16 },
+        releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
       },
       deckChannels: { 1: 1, 2: 2 },
       filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 },
-      releaseFade: { enabled: false },
+      releaseFade: {
+        enabled: true,
+        mapping: "releaseFade",
+        target: "deck",
+        startValue: 127,
+        endValue: 0,
+        durationMs: 1000,
+        updateIntervalMs: 50,
+        resetAfterStop: true,
+        resetValue: 127,
+        resetDelayMs: 0,
+      },
       releaseMacro: {
         enabled: true,
-        sequence: "filter-then-stop",
+        sequence: "filter-then-fade-then-stop",
         filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
         resetAfterStop: true,
         resetDelayMs: 0,
@@ -89,14 +101,14 @@ test("config read failure exposes only a generic public warning", () => {
   assert.equal(result.warning.includes("alice"), false);
 });
 
-test("runtime enables only the exact external v1.1.7 show source", () => {
+test("runtime enables only the exact external v1.1.8 show source", () => {
   const config = loadExternalShow();
   assert.equal(config.enabled, true);
   assert.equal(config.warning, null);
   assert.equal(config.syndocal.token, TEST_TOKEN);
   assert.deepEqual(config.midi.mappings, strictShowConfig().midi.mappings);
-  assert.equal(config.midi.releaseMacro.sequence, "filter-then-stop");
-  assert.equal(Object.hasOwn(config.midi, "releaseFade"), false);
+  assert.equal(config.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
+  assert.equal(config.midi.releaseFade.mappingName, "releaseFade");
 });
 
 test("source-direct and packaged-equivalent roots share the exact activation gate", (t) => {
@@ -146,7 +158,7 @@ test("module checkout root, not process cwd, defines the direct-entry external b
   assert.equal(loadedFromDifferentCwd.enabled, true);
   assert.equal(
     resolveStrictExternalShowPath(
-      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.7.example.json"),
+      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.8.example.json"),
       fs,
       REPOSITORY_ROOT,
     ),
@@ -174,7 +186,7 @@ test("strict validator and runtime share exact whitespace/control/token bounds",
   ]) {
     const source = strictShowConfig(token);
     assert.equal(validToken(token), false);
-    assert.equal(validateFilterThenStopShowConfig(source), false);
+    assert.equal(validateFilterThenFadeThenStopShowConfig(source), false);
     assertDisabled(loadExternalShow(source));
   }
 });
@@ -243,6 +255,7 @@ test("strict external config composes production MIDI/client/router through F13 
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseFade: config.midi.releaseFade,
     releaseMacro: config.midi.releaseMacro,
     timerApi,
   });
@@ -302,7 +315,7 @@ test("strict external config composes production MIDI/client/router through F13 
   planned.callback();
   const releaseFrame = socket.sent.find((frame) => frame.type === "DJ_RELEASE");
   assert.ok(releaseFrame);
-  assert.deepEqual(messages.slice(0, 2), [[0xb0, 16, 64], [0x90, 37, 127]]);
+  assert.deepEqual(messages.slice(0, 2), [[0xb0, 16, 64], [0xb0, 17, 127]]);
 
   socket.emit("message", JSON.stringify({
     v: 3,

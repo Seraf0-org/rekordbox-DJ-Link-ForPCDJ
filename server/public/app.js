@@ -96,6 +96,7 @@ let stateFetchInFlight = null;
 let djAgentSetupFetchInFlight = null;
 
 const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
+  version: "1.1.8",
   enabled: false,
   syndocal: {
     host: "",
@@ -106,6 +107,15 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
   midi: {
     device: "",
     port: null,
+    releaseFade: {
+      enabled: true,
+      mapping: "releaseFade",
+      target: "deck",
+    },
+    releaseMacro: {
+      enabled: true,
+      sequence: "filter-then-fade-then-stop",
+    },
   },
   pedal: {
     bindings: {
@@ -114,16 +124,12 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
       filterClose: "F15",
     },
   },
-  releaseMacro: {
-    enabled: true,
-    sequence: "filter-then-stop",
-  },
 };
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.7.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.7.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.8.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.8.csv",
   valid: null,
 };
 const djAgentSetupDraft = {
@@ -349,8 +355,8 @@ function renderDjAgentStatus(status) {
       : agent.timelineLoopActive ? "ON" : "OFF";
   }
   if (djAgentReleaseMacroEl) {
-    const sequence = agent.releaseMacroSequence === "filter-then-stop"
-      ? "filter-then-stop"
+    const sequence = agent.releaseMacroSequence === "filter-then-fade-then-stop"
+      ? "filter-then-fade-then-stop"
       : "unavailable";
     const phase = agent.releaseMacroPhase || "idle";
     const reason = agent.releaseMacroReason || "";
@@ -603,12 +609,32 @@ function normalizeDjAgentConfigTemplate(template) {
   if (!safe || typeof safe !== "object" || Array.isArray(safe)) {
     return removeSensitiveConfigFields(DEFAULT_DJ_AGENT_CONFIG_TEMPLATE);
   }
-  safe.releaseMacro = {
-    ...(safe.releaseMacro && typeof safe.releaseMacro === "object" && !Array.isArray(safe.releaseMacro)
-      ? safe.releaseMacro
-      : {}),
-    enabled: true,
+  const midi = safe.midi && typeof safe.midi === "object" && !Array.isArray(safe.midi)
+    ? safe.midi
+    : {};
+  safe.midi = {
+    ...midi,
+    releaseFade: {
+      ...(midi.releaseFade && typeof midi.releaseFade === "object" && !Array.isArray(midi.releaseFade)
+        ? midi.releaseFade
+        : {}),
+      enabled: true,
+      mapping: "releaseFade",
+      target: "deck",
+    },
+    releaseMacro: {
+      ...(midi.releaseMacro && typeof midi.releaseMacro === "object" && !Array.isArray(midi.releaseMacro)
+        ? midi.releaseMacro
+        : {}),
+      enabled: true,
+      sequence: "filter-then-fade-then-stop",
+    },
   };
+  // Root-level releaseMacro/releaseFade were retired in v1.1.8. Never promote
+  // them into the nested MIDI schema; removing them keeps the token-free
+  // preview fail-closed against the strict external config validator.
+  delete safe.releaseMacro;
+  delete safe.releaseFade;
   return safe;
 }
 
@@ -761,8 +787,14 @@ function updateDjAgentConfigPreviewFromDraft() {
     ...midi,
     device: midiDevice,
     port: midiPort,
+    releaseMacro: {
+      ...(midi.releaseMacro && typeof midi.releaseMacro === "object" && !Array.isArray(midi.releaseMacro)
+        ? midi.releaseMacro
+        : {}),
+      enabled: true,
+      sequence: "filter-then-fade-then-stop",
+    },
   };
-  safe.releaseMacro = { ...(safe.releaseMacro || {}), enabled: true, sequence: "filter-then-stop" };
   renderDjAgentConfigTemplate(safe);
 }
 

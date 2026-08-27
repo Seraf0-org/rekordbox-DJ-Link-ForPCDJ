@@ -1,6 +1,6 @@
 [Setup]
 AppName=DJLinkForPCDJ
-AppVersion=1.1.7
+AppVersion=1.1.8
 AppPublisher=DJLinkForPCDJ
 DefaultDirName={autopf}\DJLinkForPCDJ
 DefaultGroupName=DJLinkForPCDJ

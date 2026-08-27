@@ -61,7 +61,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.7.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.8.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -190,7 +190,7 @@ const state = {
       timelineSnapshotReady: false,
       lastTimelineAction: null,
       lastTimelineWarning: null,
-      releaseMacroSequence: "filter-then-stop",
+      releaseMacroSequence: "filter-then-fade-then-stop",
       releaseMacroPhase: "idle",
       releaseMacroReason: null,
       releaseMacroActive: false,
@@ -1054,6 +1054,7 @@ const djAgentMidi = createRekordboxMidi({
   deckChannels: DJ_AGENT_CONFIG.midi.deckChannels,
   mappings: DJ_AGENT_CONFIG.midi.mappings,
   filter: DJ_AGENT_CONFIG.midi.filter,
+  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
 });
 let djAgentRouter = null;
 const djAgentPedal = createPedalController({
@@ -1067,6 +1068,7 @@ djAgentRouter = createShowEventRouter({
   syndocalClient: djAgentSyndocalClient,
   midi: djAgentMidi,
   pedal: djAgentPedal,
+  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
   releaseMacro: DJ_AGENT_CONFIG.midi.releaseMacro,
 });
 
@@ -1773,9 +1775,8 @@ function buildDjAgentSetupSnapshot() {
     midiPorts,
     mappingArtifact,
     configTemplate: {
-      schemaVersion: 1,
+      version: "1.1.8",
       enabled: true,
-      allowRemoteActions: false,
       syndocal: {
         enabled: true,
         host: configuredHost,
@@ -1799,20 +1800,31 @@ function buildDjAgentSetupSnapshot() {
       },
       midi: {
         enabled: true,
-        moduleName: "@julusian/midi",
         device: matchingPort?.name || "",
         port: matchingPort?.port ?? null,
         deckChannels: { "1": 1, "2": 2 },
-        mappings: {
-          loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
-          stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
-          filter: { channel: 1, messageType: "controlChange", cc: 16 },
-        },
+          mappings: {
+            loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
+            stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+            filter: { channel: 1, messageType: "controlChange", cc: 16 },
+            releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+          },
         filter: { startValue: 64, endValue: 127, durationMs: 1_000, updateIntervalMs: 50 },
-        releaseFade: { enabled: false },
+        releaseFade: {
+          enabled: true,
+          mapping: "releaseFade",
+          target: "deck",
+          startValue: 127,
+          endValue: 0,
+          durationMs: 1_000,
+          updateIntervalMs: 50,
+          resetAfterStop: true,
+          resetValue: 127,
+          resetDelayMs: 0,
+        },
         releaseMacro: {
           enabled: true,
-          sequence: "filter-then-stop",
+          sequence: "filter-then-fade-then-stop",
           filter: {
             startValue: 64,
             endValue: 127,
@@ -1859,7 +1871,7 @@ function handleDjAgentAction(action, _req, res) {
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
-      error: "DJ Agent extension is disabled; exact external v1.1.7 filter-then-stop configuration is required",
+      error: "DJ Agent extension is disabled; exact external v1.1.8 filter-then-fade-then-stop configuration is required",
     });
     return;
   }

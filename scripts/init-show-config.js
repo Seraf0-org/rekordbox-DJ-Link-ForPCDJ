@@ -2,11 +2,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { validateFilterThenStopShowConfig } = require("../server/dj-agent/config");
+const { validateFilterThenFadeThenStopShowConfig } = require("../server/dj-agent/config");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.7.example.json");
-const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.7.json`;
+const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.8.example.json");
+const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.8.json`;
 const TOKEN_PLACEHOLDER = "<SYNDOCAL_ONE_TIME_TOKEN>";
 
 class ShowConfigInitializationError extends Error {
@@ -44,12 +44,12 @@ function parseAndValidateTemplate(raw) {
   }
 
   const valid = config?.syndocal?.token === TOKEN_PLACEHOLDER &&
-    validateFilterThenStopShowConfig(config, { allowTokenPlaceholder: true });
+    validateFilterThenFadeThenStopShowConfig(config, { allowTokenPlaceholder: true });
 
   if (!valid) {
     throw new ShowConfigInitializationError(
       "TEMPLATE_CONTRACT_MISMATCH",
-      "bundled show config template does not match the strict v1.1.7 filter-then-stop contract",
+      "bundled show config template does not match the strict v1.1.8 filter-then-fade-then-stop contract",
     );
   }
   return config;

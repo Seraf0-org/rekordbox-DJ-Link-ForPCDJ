@@ -15,6 +15,7 @@ const VALID_CSV = [
   "@file,1,CustomMIDI1",
   "CFXParameterCH1,,KnobSlider,B010,,,,,,,,,,Fast;,",
   "CFXParameterCH2,,KnobSlider,B110,,,,,,,,,,Fast;,",
+  "ChannelFader,,KnobSlider,,B011,B111,,,,,,,,Fast;,",
   "Cue,,Button,,9025,9125,,,,9025,9125,,,Fast;Blink=500;Priority=50;,",
   "LoopHalf,,Button,,9024,9124,,,,9024,9124,,,Fast;,",
 ].join("\r\n") + "\r\n";

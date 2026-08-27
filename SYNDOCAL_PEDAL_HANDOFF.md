@@ -2,23 +2,23 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-27 current v1.1.7 any-deck strict show-sync v3
+## 2026-08-27 current v1.1.8 any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.7`です。v1.1.7のinstaller、tag、public release、または
+product source versionは`1.1.8`です。v1.1.8のinstaller、tag、public release、または
 hardware acceptanceはこの文書で主張しません。current/next operator routeはtracked
-`config/dj-agent-v1.1.7.example.json`と
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.7.csv`を使います。exact
+`config/dj-agent-v1.1.8.example.json`と
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.8.csv`を使います。exact
 `start-all.bat --init-config`は存在しない場合だけ
-`C:\SyndocalShow\dj-agent-v1.1.7.json`を作成し、deployed historical
+`C:\SyndocalShow\dj-agent-v1.1.8.json`を作成し、deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
 
-v1.1.7 controlled-source changeのbaselineはdocs tip
-`789f7724a699324cd87171ef835b69486bcd4e70`であり、そのruntime checkpointは
-`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`です。v1.1.7はsoftware-reviewed
-source candidateであり、対象DJ PCへの配備とphysical HW-4 12項目は未受入です。
+v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.8
+controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
+trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
+physical HW-4 12項目の受入を主張しません。
 
 exact mappingに一致した**任意の実再生Rekordbox deck**がshow-control candidateです。
 `DJ_TRACK_ACTIVE`はdeck/deckId/playSessionIdごとに一度だけ、`contentId`またはexact
@@ -37,8 +37,11 @@ F14の物理意図はRekordbox MIDI送信より先にresponse windowを開始し
 `DJ_LOOP_FALLBACK`を送ります。
 profileは`8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64`で、2では
 止まりません。不正・stale・矛盾応答はfallbackをfail-closedで抑止し、late fresh測定は
-predictionを上書き・rebaseします。F13 ReleaseはStop MIDI結果から分離され、Stop送信失敗
-でもadmitted owner sessionへ相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。
+predictionを上書き・rebaseします。F13 Releaseは、owner-deck HPF開始と同じ初期edgeで
+相関済み`DJ_RELEASE`を一度だけSyndocalへ送ります。これはfade/Stop/resetなど
+ローカルMIDI結果から独立しています。初期edge後のローカル順序はHPF
+（CC16 64→127/1000ms）→ ChannelFader（CC17 127→0/1000ms）→ Cue/Stop Note37で、
+Stop後にFilter 64とFader 127へresetします。
 fallbackは単調増加する`pedalIntentId`と、発行時点の
 `baseMeasuredLoopRevision`/`baseLoopDivision`を必須で持ちます。実測wireは
 `payload.loop`へ正規にネストし、旧flat shapeは受信側でfail-closedです。
@@ -49,7 +52,7 @@ wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12*
 ### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
 
 以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。
-provenanceのため保持しますが、current/next operator guidance、v1.1.7 config/CSV、または
+provenanceのため保持しますが、current/next operator guidance、v1.1.8 config/CSV、または
 any-deck authorityとして実行・再利用・解釈してはいけません。
 
 このcheckpointはtracked token-free template
@@ -75,7 +78,7 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 `syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
 指定時に拒否していました。全frameは当時
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
-現行authorityは本書冒頭のv1.1.7 any-deck/v3だけです。
+現行authorityは本書冒頭のv1.1.8 any-deck/v3だけです。
 
 この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
 任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
@@ -115,7 +118,7 @@ runtime event contractを現行環境へ設定してはいけません。
 
 当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
 `syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
-DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.7 any-deck/v3 authorityと、
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.8 any-deck/v3 authorityと、
 READMEの独立したcurrent source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
@@ -374,12 +377,13 @@ branch/commitは削除していない。
 `origin/beta-v1.1.2`と同一です。既存の他ファイルのdirty/untracked状態は保持し、
 このsupport laneではcommit/pushを行いません。
 
-## SUPERSEDED / HISTORICAL — strict-v2 wire契約(2026-08-25)
+## SUPERSEDED / HISTORICAL — strict-v2 wire契約(2026-08-25; 次のCURRENT見出し直前まで)
 
-この節以下のstrict-v2 runbookは過去の設計証拠であり、**実行・設定コピー禁止**です。
-現在形・命令形で残る記述も当時の契約を正確に保存するための引用範囲で、現行DJ PC、
-launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用してはいけません。現行authorityは
-本書冒頭のv1.1.7 any-deck strict-v3節だけです。この履歴範囲にはcurrent operator linkを置きません。
+この見出しから次のCURRENT見出し直前までのstrict-v2 runbookは過去の設計証拠であり、
+**実行・設定コピー禁止**です。現在形・命令形で残る記述も当時の契約を正確に保存するための
+引用範囲で、現行DJ PC、launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用しては
+いけません。現行authorityは本書冒頭と次節以降のv1.1.8 any-deck strict-v3だけです。
+この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
 全frameは`{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定、
@@ -398,7 +402,7 @@ durable physical eventId台帳を消費せず、再接続時にはreplayしま�
 新しいTRACK_SYNCを待ち、旧socket/sessionはfenceします。ACTIVE/LOOP/RELEASE等の
 physical eventはACK対象です。
 
-## 接続と状態同期
+## CURRENT v1.1.8 / strict-v3 接続と状態同期
 
 WebSocket接続後、クライアントは順に`DJ_AGENT_HELLO`、`DJ_STATE_SYNC`、
 `DJ_TIMELINE_STATE_REQUEST`を送信します。再接続・再起動後も同じ順序で、
@@ -410,7 +414,7 @@ Syndocalは現在の権威状態を`DJ_TIMELINE_STATE`で返してください�
 
 ```json
 {
-  "v": 2,
+  "v": 3,
   "type": "DJ_TIMELINE_STATE",
   "agentId": "syndocal",
   "sessionId": "syndocal-session",
@@ -438,16 +442,16 @@ Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、�
 pendingまたはfailedとして記録し、snapshot待ちを理由にローカル操作を止めません。
 Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時までfail-closedです。
 
-## Stage 1: Rekordbox操作とhandoff
+## CURRENT v1.1.8 / Stage 1: Rekordbox操作とhandoff
 
-v1.1.7 controlled sourceは`releaseMacro.enabled:true`かつ
-`sequence:"filter-then-stop"`だけを受理します。Stage 1のF13はadmitted owner deckへ
-Filter HPF（CC16、64→127、1000ms、50ms間隔）だけをrampし、開始時に予定完了時刻を
-確定します。その時刻でCue/Stopを一度だけ試行し、Filter/Stopのローカル成否とは独立に
-相関済み`DJ_RELEASE`を一度だけrouteして`handoff-pending`へ移ります。Filter MIDIが
-開始・途中で失敗してもfailureを表示したまま予定完了まで進み、StopとReleaseを省略しません。
-fade MIDI、別sequence、またはdirect-Stop fallbackはありません。
-resetはReleaseの後にbest-effortとして記録され、reset失敗はReleaseをblock・duplicateしません。
+v1.1.8 controlled sourceは`releaseMacro.enabled:true`かつ
+`sequence:"filter-then-fade-then-stop"`だけを受理します。Stage 1のF13はadmitted
+owner deckのFilter HPF（CC16、64→127、1000ms、50ms間隔）を同期開始し、同じ初期edgeで
+相関済み`DJ_RELEASE`を一度だけrouteします。ReleaseはFilter/fade/Stop/resetなどの
+ローカルMIDI成否から独立し、その後のローカル順序はHPF完了→ChannelFader（CC17、
+127→0、1000ms、50ms間隔）→Cue/Stop Note37です。Filter/fade/Stop/resetのfailureは
+表示したまま、Releaseを省略・duplicateしません。Stop後だけFilter 64とFader 127へ
+best-effort resetします。別sequence、direct-Stop fallback、fadeなし経路はありません。
 F13のACK/rejected/timed-out/send-failedとlocal failureは同じcanonical eventIdで別々に
 表示し、失敗を成功へ昇格させません。ACKだけではStage 2に入りません。F14は従来の
 LoopHalf、F15はStage 1ではinactive（MIDIもSyndocalも送信しない）です。
@@ -459,15 +463,26 @@ LoopHalf、F15はStage 1ではinactive（MIDIもSyndocalも送信しない）で
 | LoopHalf | CH1 Note36 (`0x90 0x24 0x7f`) | `deckChannels`設定時CH2 Note36 (`0x91 0x24 0x7f`) |
 | Cue/Stop | CH1 Note37 (`0x90 0x25 0x7f`) | `deckChannels`設定時CH2 Note37 (`0x91 0x25 0x7f`) |
 | Filter HP | CH1 CC16 (`B010`) | `deckChannels`設定時CH2 CC16 (`B110`) |
+| ChannelFader fade | CH1 CC17 (`B011`) | `deckChannels`設定時CH2 CC17 (`B111`) |
 
-v1.1.7 CSVはChannelFaderを含まず、strict launcherもfade mapping、enabled fade、
-別duration/value/deck-channelをrejectします。実機のLearn結果が異なる場合、この
+v1.1.8 CSVはChannelFader CC17（`B011`/`B111`）を含み、strict launcherはFilter
+CC16、fade CC17、enabled fade、exact duration/value/deck-channelを要求します。実機のLearn結果が異なる場合、この
 controlled sourceを推測で別CCへ切り替えず、fail-closedで新しいevidence trancheを開始します。
 
-## Stage 2: timeline control
+### showEventRouterの分割境界
 
-`running`後は物理キーを次へ切り替えます。すべてACK対象で、Stage 2では
-Rekordbox MIDIを一切呼びません。
+公演前の今回のtrancheでは`showEventRouter.js`の大規模な抽出を延期します。
+authority、delivery、play-session、shutdown generation、public action emissionが同じ
+経路で結合しており、deadline前の分割はNO-GOです。将来の低リスク抽出先は
+`server/dj-agent/releaseMacro.js`とし、ramp/timer/local-failure/Stop-reset/generation
+だけを所有します。routerはauthority、delivery、session fence、public emission、shutdownを
+保持し、Stage 2 timeline-controlの意味は変更しません。
+
+## CURRENT v1.1.8 / Stage 2: timeline control（別境界・±4は未受入）
+
+`running`後のtimeline-controlは現行v1.1.8の別境界です。すべてACK対象で、Stage 2では
+Rekordbox MIDIを一切呼びません。±4 beat-jumpを含むこのStage 2物理受入はStage 1の
+Release実機証跡とは別で、現時点では未受入です。
 
 | Pedal | outbound | payload |
 | --- | --- | --- |
@@ -490,14 +505,14 @@ ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` bro
 待ちます。time signatureとbar gridはSyndocal側が決定し、`bars`は音楽的な
 小節数（秒数ではない）です。
 
-## eventId / ACK / 順序
+## CURRENT v1.1.8 / v3 eventId・ACK・順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
-eventIdで冪等処理し、同じIDを二重適用しません。v2 ACKは次の7フィールド固定です。
+eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次の7フィールド固定です。
 
 ```json
 {
-  "v": 2,
+  "v": 3,
   "type": "ACK",
   "eventId": "...",
   "sequence": 42,
@@ -511,16 +526,20 @@ eventIdで冪等処理し、同じIDを二重適用しません。v2 ACKは次�
 `accepted`と`duplicate`のみ成功扱いです。それ以外の形式・未知outcomeは
 拒否しwarningにします。
 
-送信直後は`pending`であり、`ok:true`ではありません。最終deliveryは
-`acknowledged`、`rejected`、`timed-out`、`send-failed`のいずれかです。
-UI/APIはpending・success・failureを同じaction eventIdで表示します。
+送信直後は`pending`であり、`ok:true`ではありません。`retrying`と`disconnected`は
+再接続/replay待ちのnon-terminal状態です。最終deliveryは`acknowledged`、`rejected`、
+`timed-out`、`send-failed`のいずれかです。UI/APIはpending・success・failureを同じ
+action eventIdで表示します。
 
 典型的な順序は次です。
 
-1. `DJ_RELEASE`受理（ただしmodeはまだ`handoff-pending`）。
-2. Syndocalがtimelineを開始。
-3. `DJ_TIMELINE_STATE(state:"running")`をbroadcast。
-4. `timeline-control`へ切替後、F13/F14/F15を送信。
+1. Syndocal側ですでに対象timelineが再生中であり、DJ PCは権威の
+   `DJ_TIMELINE_STATE(state:"running")` snapshotを受け取る（rb-outputがtimelineを開始しない）。
+2. F13の初期edgeでowner-deck HPFを開始し、同じedgeの相関済み`DJ_RELEASE`を一度だけ送る。
+3. Syndocalは`DJ_RELEASE`に対してTimeline loopをOFFにし、DJ clock ownershipを relinquish
+   して現在bar位置から自然継続する。即時のstart/play/seek/jump/advance/stopは行わない。
+4. 相関済み`DJ_TIMELINE_STATE`が`timeline-control`を確定した後だけ、Stage 2のF13/F14/F15を
+   送信する。±4 beat-jumpは別の未受入Stage 2境界である。
 5. 終演・停止・resetを`DJ_TIMELINE_STATE`でbroadcastし、`dj-control`へ戻す。
 
 切断・ACK timeout・不正state・bar grid不一致は成功扱いにせず、warningと
