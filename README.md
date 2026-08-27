@@ -548,6 +548,25 @@ same admitted deck, deckId, and playSessionId. An unmapped, foreign, stale, or
 conflicting candidate must fail closed without mutating the owner. These remain
 hardware acceptance observations; this document does not claim that acceptance.
 
+#### Token-free HW-4 status evidence
+
+With the source server already running on the controlled DJ PC, capture one
+bounded, read-only status snapshot without starting or stopping any process:
+
+```powershell
+node scripts/dj-agent-hw4-evidence.js > hw4-evidence.json
+node scripts/dj-agent-hw4-evidence.js --watch 12 --interval-ms 1000 > hw4-evidence-watch.json
+```
+
+The recorder performs only `GET` requests to the literal-loopback
+`/api/dj-agent/status` and the localhost-only `/api/dj-agent/setup`. Its allowlisted JSON omits setup
+configuration, track text, messages, and credential material; a
+secret-shaped key or value fails closed before output. `--watch` is bounded to
+2..120 samples; without `--watch` exactly one sample is captured, and each
+sample has an independent wall-clock deadline. A nonzero exit produces no evidence JSON. This is status
+evidence only and does not prove physical Rekordbox, MIDI, pedal, LAN, or
+Syndocal acceptance.
+
 #### Source launcherの動作
 
 プロジェクトルートにある**唯一のsource launcher**を実行してください。引数は付けません。
