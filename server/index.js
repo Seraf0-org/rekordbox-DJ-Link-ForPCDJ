@@ -41,6 +41,11 @@ const { createPythonBridge } = require("./providers/pythonBridge");
 const { createAbletonLinkProvider } = require("./providers/abletonLinkProvider");
 const { createHookUdpProvider } = require("./providers/hookUdpProvider");
 const { upsertLoopState } = require("./loopState");
+const {
+  metadataMatchesContentId,
+  metadataConsistentWithDeckPlayback,
+  trackNeedsMetadataHydration,
+} = require("./trackMetadataHydration");
 const { loadDjAgentConfig } = require("./dj-agent/config");
 const { createSyndocalClient } = require("./dj-agent/syndocalClient");
 const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetector");
@@ -822,35 +827,6 @@ function markFailedCandidate(contentId) {
   failedContentCandidates.set(key, Date.now());
 }
 
-function isMetadataConsistentWithDeck(deck, metadata) {
-  if (!metadata) {
-    return false;
-  }
-  const deckPlayback = state.deckPlaybacks.find((item) => Number(item?.deck) === Number(deck));
-  const deckTotal = Number(deckPlayback?.totalSec);
-  const deckBpm = Number(deckPlayback?.bpm);
-  const trackDuration = Number(metadata.durationSec);
-  const trackBpm = Number(metadata.trackBpm);
-  if (
-    Number.isFinite(deckTotal) &&
-    Number.isFinite(trackDuration) &&
-    deckTotal > 30 &&
-    deckTotal < 1200
-  ) {
-    const delta = Math.abs(deckTotal - trackDuration);
-    if (delta > 8) {
-      return false;
-    }
-  }
-  if (Number.isFinite(deckBpm) && Number.isFinite(trackBpm) && deckBpm > 60 && trackBpm > 60) {
-    const bpmDelta = Math.abs(deckBpm - trackBpm);
-    if (bpmDelta > 20.0) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function applyMasterNowPlayingFromDecks() {
   const activeDeck = Number(state.playback?.deck);
   const active = Number.isFinite(activeDeck)
@@ -912,12 +888,13 @@ function hydrateDeckNowPlayingMetadata() {
     if (!entry) {
       continue;
     }
-    const hasMetadata =
-      Boolean(entry.title) || Boolean(entry.artist) || Number.isFinite(Number(entry.durationSec));
+    const hasMetadata = Boolean(entry.title) || Boolean(entry.artist) ||
+      isPositiveFinite(entry.durationSec) || isPositiveFinite(entry.trackBpm);
     if (!hasMetadata) {
       continue;
     }
-    if (isMetadataConsistentWithDeck(entry.deck, entry)) {
+    const playback = state.deckPlaybacks.find((item) => Number(item?.deck) === Number(entry.deck));
+    if (metadataConsistentWithDeckPlayback(playback, entry)) {
       continue;
     }
     pushDebugLog(
@@ -942,17 +919,7 @@ function hydrateDeckNowPlayingMetadata() {
       if (!entry?.contentId) {
         return false;
       }
-      const key = String(entry.contentId);
-      if (contentMetadataCache.has(key)) {
-        return false;
-      }
-      return (
-        !entry.title ||
-        !entry.artist ||
-        !isPositiveFinite(entry.trackBpm) ||
-        !isPositiveFinite(entry.durationSec) ||
-        !entry.waveform
-      );
+      return trackNeedsMetadataHydration(entry);
     })
     .map(async (entry) => {
       const key = String(entry.contentId);
@@ -964,6 +931,14 @@ function hydrateDeckNowPlayingMetadata() {
       const resolvedMetadata = metadata || (await resolveDeckMetadataBySignature(entry.deck));
       if (!resolvedMetadata) {
         markFailedCandidate(key);
+        return;
+      }
+      if (!metadataMatchesContentId(key, resolvedMetadata)) {
+        markFailedCandidate(key);
+        pushDebugLog("metadata-identity-conflict", `Deck ${entry.deck}: metadata identity conflict rejected`, {
+          deck: Number(entry.deck),
+          contentId: key,
+        });
         return;
       }
       const current = state.deckNowPlaying.find((item) => Number(item?.deck) === Number(entry.deck));

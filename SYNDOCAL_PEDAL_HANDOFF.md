@@ -47,6 +47,18 @@ runtimeの`/api/status`はversion `1.1.8`、generatedAt
 `2026-08-27T07:46:25.894Z`、`provenance.status=dev-unverified`、`gitCommit=null`
 だったため、この観測を特定commitへcryptographically bindしない。
 
+同じlive sessionでDeck 1/2の表示を連続採取したところ、Hookのtitle/artist付き
+metadataが約300 msごとに`db-signature-refresh`のnull identityへ交互に消え、Deck 2
+の曲名が点滅した。原因は`durationSec=null`を`Number(null)=0`として正のdeck尺と
+矛盾扱いしたことと、Content ID cache hit時に欠損metadataの再適用をskipしたこと。
+source fixはmetadata整合判定とhydration eligibilityを小さいpure helperへ分割し、
+null/欠損値を比較対象外、正のduration/BPM矛盾を引き続きreject、cacheを同じ
+Content IDにだけ再適用する。直接Content ID lookup失敗後のsignature fallbackも、
+resolved Content IDがcaptured/current IDと完全一致しない限りmerge/adoptしない。
+focused helper + smokeは**67/67** pass。これはsource-onlyであり、対象DJ PCへ
+再配備して点滅停止・waveform復帰を観測するまでhardware fixを主張しない。Deck 2の
+大きなseek戻りは採取時に実測loopがONで、そのloop範囲のwrap自体は正常だった。
+
 v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.8
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
 trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
