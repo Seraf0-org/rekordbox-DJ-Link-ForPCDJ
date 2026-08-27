@@ -26,6 +26,27 @@ fail-closedです。equal-revision duration競合を含むsmokeは**63/63**、�
 GOです。full `npm test`、対象DJ PCへの再配備、実DB lookup、real Syndocal ACK、
 physical hardware acceptanceは未確認です。first-party warningは**0**です。
 
+### 2026-08-27 live Stage 1 observation (partial hardware evidence)
+
+DJ PCのcontrolled source restart後、Rekordbox Deck 1で`Demo Track 2` / `Loopmasters`
+を実再生した。Agentは`ownerDeck=1`、`ownerDeckId=rekordbox-deck-1`、新しい
+`playSessionId=75539d72-4463-4a60-a405-971a744db720`をadmitし、Syndocalは
+Timeline 1を`running`、loop `false`として開始した。wire identityは既存exact
+title+artistであり、internal trackは`contentId=235403562`へenrichされた。このため
+この観測は新しいsignature-identity proof経路そのものの実機受入ではない。
+
+同じsessionでF13を1回押した結果、`DJ_RELEASE`
+`93b117d8-4e4a-4431-9100-271487f6e875`は1 attemptで送信され、22 ms後に
+`outcome=accepted`、`stateGeneration=2`を受信した。ローカルMIDIはFilter CC16
+64→127/1000 ms、ChannelFader CC17 127→0/1000 ms、Cue/Stop Note37を完了し、
+Filter 64/Fader 127へresetした。Agentは`timeline-control`、release phase
+`complete`へ移り、Timelineは`running`、loop `false`を維持した。これはStage 1の
+track admit→Release handoffの部分実機証跡であり、全12項目、reconnect/restart、
+Stage 2、signature proof、installer/identity-bound artifactのacceptanceは閉じない。
+runtimeの`/api/status`はversion `1.1.8`、generatedAt
+`2026-08-27T07:46:25.894Z`、`provenance.status=dev-unverified`、`gitCommit=null`
+だったため、この観測を特定commitへcryptographically bindしない。
+
 v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.8
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
 trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
