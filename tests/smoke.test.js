@@ -29,6 +29,10 @@ const {
   finiteNumber,
 } = require("../server/dj-agent/trackActivityDetector");
 const {
+  composeSignatureIdentityProof,
+  createSignaturePlaybackProof,
+} = require("../server/dj-agent/signatureIdentityProof");
+const {
   createSyndocalClient,
   resolveAdapter,
   resolveWebSocketImplementation,
@@ -184,6 +188,40 @@ function strictDetectorPlayback(deck, positionRevision, overrides = {}) {
     positionObservedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function signatureIdentityProof({
+  deck = 1,
+  playSessionId,
+  startedAt,
+  signatureProofGeneration = 0,
+  positionRevision,
+  positionObservedAt,
+  bpm = 120,
+  totalSec = 128.05,
+  metadata = {
+    contentId: "signature-content",
+    title: "Signature Track",
+    artist: "Signature Artist",
+    trackBpm: bpm,
+    durationSec: 128,
+  },
+} = {}) {
+  const playbackProof = createSignaturePlaybackProof({
+    deck,
+    playSessionId,
+    startedAt,
+    signatureProofGeneration,
+    playback: {
+      deck,
+      isPlaying: true,
+      bpm,
+      totalSec,
+      positionRevision,
+      positionObservedAt,
+    },
+  });
+  return composeSignatureIdentityProof(playbackProof, metadata);
 }
 
 let admittedCandidateCounter = 0;
@@ -1643,6 +1681,224 @@ test("contentId enrichment after fallback metadata does not duplicate one play s
   assert.equal(state.track.contentId, "content-42");
   assert.equal(state.playSessionId, firstState.playSessionId);
   assert.equal(state.startedAt, firstState.startedAt);
+});
+
+function createIdentitylessSignatureFixture() {
+  let id = 0;
+  const clock = { value: 1_000 };
+  const detector = createTrackActivityDetector({
+    idFactory: () => `signature-id-${++id}`,
+    now: () => clock.value,
+  });
+  const events = [];
+  detector.on("event", (event) => events.push(event));
+  const playback = (positionRevision, overrides = {}) => strictDetectorPlayback(1, positionRevision, {
+    positionSec: positionRevision,
+    positionObservedAt: new Date(clock.value).toISOString(),
+    totalSec: 128.05,
+    ...overrides,
+  });
+  detector.onSnapshot({
+    deckPlaybacks: [playback(1, { isPlaying: false, positionSec: 0 })],
+  });
+  clock.value = 2_000;
+  detector.onSnapshot({
+    deckPlaybacks: [playback(2)],
+  });
+  const started = detector.getState().decks[1];
+  assert.ok(started.playSessionId, "fixture requires an observed identityless start edge");
+  assert.equal(started.track, null);
+  return {
+    clock,
+    detector,
+    events,
+    playback,
+    proof(overrides = {}) {
+      const current = detector.getState().decks[1];
+      return signatureIdentityProof({
+        playSessionId: current.playSessionId,
+        startedAt: current.startedAt,
+        signatureProofGeneration: current.signatureProofGeneration,
+        positionRevision: current.playback.positionRevision,
+        positionObservedAt: current.playback.positionObservedAt,
+        bpm: current.playback.bpm,
+        totalSec: current.playback.totalSec,
+        ...overrides,
+      });
+    },
+  };
+}
+
+test("unique signature proof adopts exactly the observed identityless session once", () => {
+  const fixture = createIdentitylessSignatureFixture();
+  const before = fixture.detector.getState().decks[1];
+  const proof = fixture.proof();
+
+  const active = fixture.detector.onSignatureIdentityProof(proof);
+  const after = fixture.detector.getState().decks[1];
+  assert.equal(active.type, "DJ_TRACK_ACTIVE");
+  assert.equal(after.playSessionId, before.playSessionId);
+  assert.equal(after.startedAt, before.startedAt);
+  assert.equal(after.track.contentId, "signature-content");
+  assert.equal(after.wireIdentity.contentId, "signature-content");
+  assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_LOADED").length, 1);
+  assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+  assert.equal(fixture.detector.onSignatureIdentityProof(proof), null);
+  assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+});
+
+test("signature proof accepts only an exact or explicitly newer matching playback relation", () => {
+  const fixture = createIdentitylessSignatureFixture();
+  const proof = fixture.proof();
+  fixture.clock.value = 3_000;
+  fixture.detector.onSnapshot({
+    deckPlaybacks: [fixture.playback(3)],
+  });
+
+  const active = fixture.detector.onSignatureIdentityProof(proof);
+  assert.equal(active.type, "DJ_TRACK_ACTIVE");
+  assert.equal(active.payload.positionRevision, 3);
+  assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+});
+
+test("equal-revision signature conflicts invalidate pending proof adoption until a new proof is captured", () => {
+  const conflictingFields = [
+    { label: "isPlaying", overrides: { isPlaying: false } },
+    { label: "bpm", overrides: { bpm: 121 } },
+    { label: "totalSec", overrides: { totalSec: 129.05 } },
+    { label: "positionSec", overrides: { positionSec: 99 } },
+  ];
+  for (const { label, overrides } of conflictingFields) {
+    const fixture = createIdentitylessSignatureFixture();
+    const oldProof = fixture.proof();
+    fixture.clock.value = 3_000;
+    fixture.detector.onSnapshot({
+      deckPlaybacks: [fixture.playback(2, overrides)],
+    });
+    const conflicted = fixture.detector.getState().decks[1];
+    assert.equal(
+      conflicted.signatureProofConflictRevision,
+      2,
+      `${label} conflict must explicitly block identityless signature adoption`
+    );
+    assert.equal(conflicted.signatureProofGeneration, 1);
+    assert.equal(fixture.detector.onSignatureIdentityProof(oldProof), null);
+    assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+  }
+
+  const reviewerRepro = createIdentitylessSignatureFixture();
+  const staleProof = reviewerRepro.proof();
+  reviewerRepro.clock.value = 3_000;
+  reviewerRepro.detector.onSnapshot({
+    deckPlaybacks: [reviewerRepro.playback(2, { totalSec: 129.05 })],
+  });
+  // mergePlaybackSample intentionally retains the old equal-revision sample;
+  // the conflict generation is what makes that retained signature unusable.
+  assert.equal(reviewerRepro.detector.getState().decks[1].playback.totalSec, 128.05);
+  assert.equal(reviewerRepro.detector.onSignatureIdentityProof(staleProof), null);
+
+  reviewerRepro.clock.value = 4_000;
+  reviewerRepro.detector.onSnapshot({ deckPlaybacks: [reviewerRepro.playback(3)] });
+  const recovered = reviewerRepro.detector.getState().decks[1];
+  assert.equal(recovered.signatureProofConflictRevision, null);
+  assert.equal(recovered.signatureProofGeneration, 1);
+  assert.equal(reviewerRepro.detector.onSignatureIdentityProof(staleProof), null);
+  const currentProof = reviewerRepro.proof();
+  assert.equal(reviewerRepro.detector.onSignatureIdentityProof(currentProof).type, "DJ_TRACK_ACTIVE");
+  assert.equal(reviewerRepro.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+});
+
+test("generic or incomplete metadata cannot adopt an identityless playing session", () => {
+  const fixture = createIdentitylessSignatureFixture();
+  fixture.clock.value = 3_000;
+  fixture.detector.onSnapshot({
+    deckNowPlaying: [{ deck: 1, contentId: "unproven", title: "Unproven", artist: "Metadata" }],
+    deckPlaybacks: [fixture.playback(3)],
+  });
+  const generic = fixture.detector.getState().decks[1];
+  assert.equal(generic.playSessionId, null);
+  assert.equal(generic.awaitingPlayConfirmation, true);
+  assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+
+  const incomplete = createIdentitylessSignatureFixture();
+  assert.equal(
+    incomplete.detector.onSignatureIdentityProof({
+      version: 1,
+      source: "content-lookup-signature",
+      deck: 1,
+      playSessionId: incomplete.detector.getState().decks[1].playSessionId,
+      startedAt: incomplete.detector.getState().decks[1].startedAt,
+      signature: { bpm: 120, totalSec: 128.05 },
+      metadata: { contentId: "missing-playback", trackBpm: 120, durationSec: 128 },
+    }),
+    null
+  );
+  assert.equal(incomplete.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+});
+
+test("signature proof rejects stale, changed, replacement, stopped, and replaced-session states", () => {
+  const stale = createIdentitylessSignatureFixture();
+  const staleProof = stale.proof();
+  stale.clock.value = 3_600;
+  assert.equal(stale.detector.onSignatureIdentityProof(staleProof), null);
+
+  const lowerRevision = createIdentitylessSignatureFixture();
+  const lowerState = lowerRevision.detector.getState().decks[1];
+  const futureProof = lowerRevision.proof({
+    positionRevision: lowerState.playback.positionRevision + 1,
+    positionObservedAt: new Date(lowerRevision.clock.value + 100).toISOString(),
+  });
+  lowerRevision.clock.value += 500;
+  assert.equal(lowerRevision.detector.onSignatureIdentityProof(futureProof), null);
+
+  for (const changed of [{ bpm: 121 }, { totalSec: 129.05 }]) {
+    const fixture = createIdentitylessSignatureFixture();
+    const proof = fixture.proof();
+    fixture.clock.value = 3_000;
+    fixture.detector.onSnapshot({ deckPlaybacks: [fixture.playback(3, changed)] });
+    assert.equal(fixture.detector.onSignatureIdentityProof(proof), null);
+    assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+  }
+
+  const pendingReplacement = createIdentitylessSignatureFixture();
+  const pendingProof = pendingReplacement.proof();
+  pendingReplacement.detector.onTrackLoaded({
+    deck: 1,
+    contentId: "replacement",
+    title: "Replacement",
+    artist: "Track",
+  });
+  assert.equal(pendingReplacement.detector.onSignatureIdentityProof(pendingProof), null);
+
+  const stopped = createIdentitylessSignatureFixture();
+  const stoppedProof = stopped.proof();
+  stopped.clock.value = 3_000;
+  stopped.detector.onSnapshot({ deckPlaybacks: [stopped.playback(3, { isPlaying: false })] });
+  assert.equal(stopped.detector.onSignatureIdentityProof(stoppedProof), null);
+
+  const newSession = createIdentitylessSignatureFixture();
+  const oldProof = newSession.proof();
+  newSession.clock.value = 3_000;
+  newSession.detector.onSnapshot({ deckPlaybacks: [newSession.playback(3, { isPlaying: false })] });
+  newSession.clock.value = 4_000;
+  newSession.detector.onSnapshot({ deckPlaybacks: [newSession.playback(4)] });
+  assert.notEqual(newSession.detector.getState().decks[1].playSessionId, oldProof.playSessionId);
+  assert.equal(newSession.detector.onSignatureIdentityProof(oldProof), null);
+
+  const mismatchedDeck = createIdentitylessSignatureFixture();
+  const wrongDeckProof = mismatchedDeck.proof({ deck: 2 });
+  assert.equal(mismatchedDeck.detector.onSignatureIdentityProof(wrongDeckProof), null);
+
+  for (const fixture of [
+    stale,
+    lowerRevision,
+    pendingReplacement,
+    stopped,
+    newSession,
+    mismatchedDeck,
+  ]) {
+    assert.equal(fixture.events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+  }
 });
 
 test("a preloaded track with stale isPlaying waits for explicit play transition", () => {

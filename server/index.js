@@ -44,6 +44,10 @@ const { upsertLoopState } = require("./loopState");
 const { loadDjAgentConfig } = require("./dj-agent/config");
 const { createSyndocalClient } = require("./dj-agent/syndocalClient");
 const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetector");
+const {
+  composeSignatureIdentityProof,
+  createSignaturePlaybackProof,
+} = require("./dj-agent/signatureIdentityProof");
 const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
@@ -633,7 +637,11 @@ function resolveDeckMetadataBySignature(deck) {
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
     });
-    child.on("close", () => {
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
       const raw = stdout.trim();
       if (!raw) {
         resolve(null);
@@ -663,6 +671,44 @@ function resolveDeckMetadataBySignature(deck) {
 
   contentLookupInFlight.set(sigKey, lookup);
   return lookup;
+}
+
+function captureIdentitylessSessionSignatureProof(deck) {
+  if (!DJ_AGENT_CONFIG.enabled) {
+    return null;
+  }
+  const deckNumber = Number(deck);
+  if (!Number.isSafeInteger(deckNumber) || deckNumber < 1 || deckNumber > 4) {
+    return null;
+  }
+  const detectorDeck = djAgentDetector.getState().decks[deckNumber];
+  if (
+    !detectorDeck ||
+    !detectorDeck.playSessionId ||
+    !detectorDeck.startedAt ||
+    detectorDeck.track ||
+    detectorDeck.wireIdentity ||
+    detectorDeck.pendingTrackChange ||
+    detectorDeck.signatureProofConflictRevision !== null ||
+    detectorDeck.awaitingPlayConfirmation
+  ) {
+    return null;
+  }
+  return createSignaturePlaybackProof({
+    deck: deckNumber,
+    playSessionId: detectorDeck.playSessionId,
+    startedAt: detectorDeck.startedAt,
+    signatureProofGeneration: detectorDeck.signatureProofGeneration,
+    playback: detectorDeck.playback,
+  });
+}
+
+function adoptSignatureResolvedIdentity(playbackProof, metadata) {
+  const proof = composeSignatureIdentityProof(playbackProof, metadata);
+  if (!proof) {
+    return null;
+  }
+  return djAgentDetector.onSignatureIdentityProof(proof);
 }
 
 function mergeDeckEntryMetadata(entry, metadata) {
@@ -914,6 +960,7 @@ function hydrateDeckNowPlayingMetadata() {
         return;
       }
       const metadata = getRecentTrackMetadata(key) || (await resolveContentMetadata(key));
+      const signatureProof = metadata ? null : captureIdentitylessSessionSignatureProof(entry.deck);
       const resolvedMetadata = metadata || (await resolveDeckMetadataBySignature(entry.deck));
       if (!resolvedMetadata) {
         markFailedCandidate(key);
@@ -924,6 +971,9 @@ function hydrateDeckNowPlayingMetadata() {
         return;
       }
       upsertDeckNowPlayingEntry(entry.deck, mergeDeckEntryMetadata(current, resolvedMetadata));
+      if (signatureProof && !metadata) {
+        adoptSignatureResolvedIdentity(signatureProof, resolvedMetadata);
+      }
     });
   if (pending.length === 0 && Array.isArray(state.deckPlaybacks) && state.deckPlaybacks.length > 0) {
     const missingDecks = state.deckPlaybacks
@@ -934,6 +984,7 @@ function hydrateDeckNowPlayingMetadata() {
         return !existing || (!existing.title && !existing.artist);
       });
     for (const deck of missingDecks) {
+      const signatureProof = captureIdentitylessSessionSignatureProof(deck);
       pending.push(
         resolveDeckMetadataBySignature(deck).then((metadata) => {
           if (!metadata) {
@@ -954,6 +1005,9 @@ function hydrateDeckNowPlayingMetadata() {
               metadata
             )
           );
+          if (signatureProof) {
+            adoptSignatureResolvedIdentity(signatureProof, metadata);
+          }
         })
       );
     }

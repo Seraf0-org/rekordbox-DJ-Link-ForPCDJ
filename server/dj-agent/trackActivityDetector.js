@@ -1,5 +1,9 @@
 const { EventEmitter } = require("node:events");
 const crypto = require("node:crypto");
+const {
+  currentPlaybackMatchesSignatureProof,
+  normalizeSignatureIdentityProof,
+} = require("./signatureIdentityProof");
 
 function defaultIdFactory() {
   return typeof crypto.randomUUID === "function"
@@ -118,6 +122,7 @@ function normalizePlayback(entry = {}) {
     isPlaying: typeof entry.isPlaying === "boolean" ? entry.isPlaying : null,
     positionSec: finiteNumber(entry.positionSec),
     bpm: finiteNumber(entry.bpm),
+    totalSec: finiteNumber(entry.totalSec),
     positionObservedAt:
       typeof entry.positionObservedAt === "string" && entry.positionObservedAt.trim()
         ? entry.positionObservedAt
@@ -170,6 +175,28 @@ function mergePlaybackSample(previous, reported) {
     };
   }
   return { ...previous, ...reported };
+}
+
+function hasEqualRevisionSignatureConflict(previous, reported) {
+  if (!previous || !reported || previous.positionRevision !== reported.positionRevision) {
+    return false;
+  }
+  if (!Number.isSafeInteger(previous.positionRevision) || previous.positionRevision < 1) {
+    return false;
+  }
+  const finiteConflict = (left, right) =>
+    Number.isFinite(left) && Number.isFinite(right) && left !== right;
+  return (
+    (typeof previous.isPlaying === "boolean" &&
+      typeof reported.isPlaying === "boolean" &&
+      previous.isPlaying !== reported.isPlaying) ||
+    finiteConflict(previous.bpm, reported.bpm) ||
+    finiteConflict(previous.totalSec, reported.totalSec) ||
+    finiteConflict(previous.positionSec, reported.positionSec) ||
+    (typeof previous.positionObservedAt === "string" &&
+      typeof reported.positionObservedAt === "string" &&
+      previous.positionObservedAt !== reported.positionObservedAt)
+  );
 }
 
 function normalizeMeasuredLoop(entry, { nowMs, maxSampleAgeMs }) {
@@ -256,6 +283,8 @@ function createTrackActivityDetector({
         lastTrackLoadedKey: null,
         awaitingPlayConfirmation: false,
         pendingTrackChange: false,
+        signatureProofGeneration: 0,
+        signatureProofConflictRevision: null,
         loop: null,
         lastLoopEventRevision: null,
       };
@@ -633,6 +662,11 @@ function createTrackActivityDetector({
       const reportedTrack = tracks.get(deck);
       const nextTrack = mergeTrackIdentity(previousTrack, reportedTrack);
       const reportedPlayback = playbacks.get(deck) || null;
+      const previousPlaybackRevision = state.playback?.positionRevision;
+      const equalRevisionSignatureConflict = hasEqualRevisionSignatureConflict(
+        state.playback,
+        reportedPlayback
+      );
       const nextPlayback = mergePlaybackSample(state.playback, reportedPlayback);
       const trackChanged =
         Boolean(nextTrack && previousTrack && !tracksRepresentSame(nextTrack, previousTrack)) ||
@@ -642,6 +676,16 @@ function createTrackActivityDetector({
       const nextIsPlaying = nextPlayback?.isPlaying ?? null;
       state.track = nextTrack;
       state.playback = nextPlayback;
+      if (equalRevisionSignatureConflict) {
+        state.signatureProofGeneration += 1;
+        state.signatureProofConflictRevision = previousPlaybackRevision;
+      } else if (
+        Number.isSafeInteger(state.signatureProofConflictRevision) &&
+        Number.isSafeInteger(nextPlayback?.positionRevision) &&
+        nextPlayback.positionRevision > state.signatureProofConflictRevision
+      ) {
+        state.signatureProofConflictRevision = null;
+      }
       if (measuredLoops.has(deck)) {
         const measured = measuredLoops.get(deck);
         if (!state.loop || measured.revision > state.loop.revision) {
@@ -670,6 +714,10 @@ function createTrackActivityDetector({
         state.lastCandidateActiveSessionId = null;
         state.lastCandidateSyncPositionRevision = null;
         state.lastLoopEventRevision = null;
+        if (!equalRevisionSignatureConflict) {
+          state.signatureProofGeneration = 0;
+          state.signatureProofConflictRevision = null;
+        }
         emitEvent("DJ_TRACK_PLAY_STARTED", diagnosticTrackPayload(deck, state));
       } else if (stopped) {
         emitEvent("DJ_TRACK_PLAY_STOPPED", diagnosticTrackPayload(deck, state));
@@ -739,6 +787,46 @@ function createTrackActivityDetector({
     return loadedEvent;
   }
 
+  function onSignatureIdentityProof(rawProof = {}) {
+    const proof = normalizeSignatureIdentityProof(rawProof);
+    if (!proof) {
+      return null;
+    }
+    const state = decks.get(proof.deck);
+    if (!state) {
+      return null;
+    }
+    const candidateTrack = normalizeTrack(proof.metadata);
+    if (
+      !candidateTrack ||
+      state.playSessionId !== proof.playSessionId ||
+      state.startedAt !== proof.startedAt ||
+      state.track ||
+      state.wireIdentity ||
+      state.pendingTrackChange ||
+      state.signatureProofGeneration !== proof.signatureProofGeneration ||
+      state.signatureProofConflictRevision !== null ||
+      state.awaitingPlayConfirmation ||
+      state.lastCandidateActiveSessionId ||
+      !currentPlaybackMatchesSignatureProof(proof, state.playback, {
+        now: now(),
+        maxSampleAgeMs: boundedMaxSampleAgeMs,
+      })
+    ) {
+      return null;
+    }
+    state.track = candidateTrack;
+    state.lastTrackLoadedKey = candidateTrack.identity;
+    emitEvent("DJ_TRACK_LOADED", {
+      deck: proof.deck,
+      contentId: candidateTrack.contentId,
+      title: candidateTrack.title,
+      artist: candidateTrack.artist,
+      trackBpm: candidateTrack.trackBpm,
+    });
+    return maybeEmitCandidateActive(proof.deck, state);
+  }
+
   function onMasterChange(rawEvent = {}) {
     const deck = normalizeDeckNumber(rawEvent.logicalDeck || rawEvent.deck);
     if (!deck) {
@@ -799,6 +887,8 @@ function createTrackActivityDetector({
         lastCandidateSyncPositionRevision: state.lastCandidateSyncPositionRevision,
         awaitingPlayConfirmation: state.awaitingPlayConfirmation,
         pendingTrackChange: state.pendingTrackChange,
+        signatureProofGeneration: state.signatureProofGeneration,
+        signatureProofConflictRevision: state.signatureProofConflictRevision,
         loop: state.loop ? { ...state.loop } : null,
         lastLoopEventRevision: state.lastLoopEventRevision,
       };
@@ -833,6 +923,7 @@ function createTrackActivityDetector({
     getState,
     onMasterChange,
     onSnapshot,
+    onSignatureIdentityProof,
     onTrackLoaded,
     requestMeasuredLoopForSession,
     requestCurrentTrackCandidates,

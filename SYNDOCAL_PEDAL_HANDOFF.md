@@ -15,17 +15,16 @@ hardware acceptanceはこの文書で主張しません。current/next operator 
 `C:\SyndocalShow\dj-agent-v1.1.8.json`を作成し、deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
 
-このcheckpointのsource worktreeはbranch `beta-v1.1.2`、base HEAD
-`0f3e8c6851857c8542c132a89a7d44289002b1f5`で、変更は未commit/未pushです。
-`node --check server/dj-agent/syndocalClient.js`、`node --check
-server/dj-agent/showEventRouter.js`、`node --check tests/syndocal-envelope-v3.test.js`、
-focused envelope **48/48**、smoke
-**60/60**、full `npm test` **424 pass / 0 fail / 2 intentional pkg-smoke
-skips**、および`git diff --check`を完了しました。first-party warningは**0**です。
-`git diff --check`のLF→CRLF表示はGitのline-ending noticeであり、diff failureや
-first-party warningではありません。dirty filesは本書、`README.md`、`API.md`、
-`server/dj-agent/syndocalClient.js`、`server/dj-agent/showEventRouter.js`、
-`tests/syndocal-envelope-v3.test.js`だけです。
+branch `beta-v1.1.2`の再接続ABA fenceはcommit
+`eb9d131f7b57c29231bdf605f498c877180ad553`としてpush済みです。この次の
+controlled-source checkpointは、missed track-load時のidentityless再生sessionに対し、
+一意なDB signature resultを同一deck/session/startedAt、fresh revision/observedAt、
+BPM、duration、proof generationがすべて一致する場合だけ採用します。generic/preload、
+stale/equal-conflicting sample、停止・別session・別deck・曖昧lookupは引き続き
+fail-closedです。equal-revision duration競合を含むsmokeは**63/63**、変更4 JSの
+`node --check`と`git diff --check`はpassし、独立Terra xHigh adversarial reviewも
+GOです。full `npm test`、対象DJ PCへの再配備、実DB lookup、real Syndocal ACK、
+physical hardware acceptanceは未確認です。first-party warningは**0**です。
 
 v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.8
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
