@@ -3,6 +3,10 @@ const { createStage1LoopFallback } = require("./stage1LoopFallback");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
+// Retain retired v3 session IDs for the lifetime of a connection generation.
+// Never evict at the high-water: accepting an evicted ID would reopen an ABA
+// path that could roll back authoritative timeline ownership.
+const TIMELINE_SESSION_FENCE_MAX_RETIRED = 64;
 const DEFAULT_TIMER_API = Object.freeze({
   setTimeout(callback, delayMs) {
     return setTimeout(callback, delayMs);
@@ -505,16 +509,22 @@ function createShowEventRouter({
       return;
     }
     if (!timelineStateFence || timelineStateFence.connectionGeneration !== generation) {
-      timelineStateFence = { connectionGeneration: generation, sessionId: null, sequence: 0 };
+      timelineStateFence = {
+        connectionGeneration: generation,
+        sessionId: null,
+        sequence: 0,
+        retiredSessionIds: new Set(),
+      };
     }
   }
 
   // Returns true when the frame may mutate router state. A frame is rejected
-  // without any mutation only when it provably replays the same session at a
-  // stale or equal sequence. Frames lacking provable identity cannot be
-  // fenced; no synthetic timestamps or defaults are invented for them. A new
-  // sessionId is a session replacement with its own sequence space, so the
-  // fence re-keys instead of comparing across sessions.
+  // without any mutation when it replays the same session at a stale/equal
+  // sequence or any session ID retired in this connection generation. Frames
+  // lacking provable identity cannot be fenced; no synthetic timestamps or
+  // defaults are invented for them. A new sessionId is a session replacement
+  // with its own sequence space, while retired IDs remain rejected to prevent
+  // an ABA re-key.
   function timelineStateFenceAccepts(state) {
     const sessionId = typeof state.sessionId === "string" && state.sessionId.length > 0
       ? state.sessionId
@@ -533,10 +543,22 @@ function createShowEventRouter({
       timelineStateFence.sequence = sequence;
       return true;
     }
+    const retiredSessionIds = timelineStateFence?.retiredSessionIds || new Set();
+    if (
+      retiredSessionIds.has(sessionId) ||
+      retiredSessionIds.size >= TIMELINE_SESSION_FENCE_MAX_RETIRED
+    ) {
+      emitWarning("Retired DJ_TIMELINE_STATE session ignored", "syndocal");
+      return false;
+    }
+    if (timelineStateFence?.sessionId) {
+      retiredSessionIds.add(timelineStateFence.sessionId);
+    }
     timelineStateFence = {
       connectionGeneration: timelineStateFence?.connectionGeneration ?? null,
       sessionId,
       sequence,
+      retiredSessionIds,
     };
     return true;
   }

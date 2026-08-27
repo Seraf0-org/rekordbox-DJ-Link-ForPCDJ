@@ -28,11 +28,27 @@ const PHYSICAL_EVENT_TYPES = new Set([
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
 ]);
+// Reconnect replay is deliberately fail-closed: only a release handoff may
+// survive a socket teardown. All other physical commands are relative to the
+// state that the next connection's sync/snapshot will establish.
+const RECONNECT_REPLAY_EVENT_TYPES = new Set(["DJ_RELEASE"]);
 const TRANSIENT_TELEMETRY_TYPES = new Set(["DJ_TRACK_SYNC"]);
 const ACK_OUTCOMES = new Set(["accepted", "duplicate", "no_mapping", "rejected", "busy"]);
+// Control ACK codes are deliberately allowlisted before they can reach user
+// visible status/events. Never reflect arbitrary adapter/native text.
+const TIMELINE_STATE_REQUEST_ACK_CODES = new Set([
+  "project_mapping_not_loaded",
+  "no_mapping",
+  "busy",
+  "rejected",
+]);
 const DEFAULT_DELIVERY_HISTORY_MAX = 256;
 const DEFAULT_MAX_PENDING_ACKS = 256;
 const DEFAULT_PHYSICAL_EVENT_ID_REGISTRY_MAX = 262_144;
+// A v3 connection may observe a bounded number of session replacements. Once
+// this high-water is reached, fail closed rather than evicting a retired ID
+// and reopening an ABA path within the same socket generation.
+const TIMELINE_SESSION_FENCE_MAX_RETIRED = 64;
 const MAX_STRING_UTF8_BYTES = 256;
 let processControlIdCounter = 0;
 
@@ -860,6 +876,8 @@ function createSyndocalClient({
   const deliveryHistory = new Map();
   const physicalEventIdRegistry = new Set();
   const socketCleanups = [];
+  let timelineStateFence = null;
+  let timelineStateRequestCorrelation = null;
 
   function updateStatus(patch) {
     status = {
@@ -997,7 +1015,13 @@ function createSyndocalClient({
     pending.retryTimer = null;
   }
 
-  function finalizeDelivery(eventId, state, extra = {}, expected = null) {
+  function finalizeDelivery(
+    eventId,
+    state,
+    extra = {},
+    expected = null,
+    { includeAckResult = true } = {},
+  ) {
     const pending = pendingAcks.get(eventId);
     if (!pending) {
       return null;
@@ -1022,6 +1046,7 @@ function createSyndocalClient({
       ...extra,
     });
     const ackResult =
+      includeAckResult &&
       (delivery.ackRequired || ["rejected", "timed-out", "send-failed"].includes(state)) &&
       state !== "pending"
         ? {
@@ -1044,6 +1069,189 @@ function createSyndocalClient({
       emitter.emit("ack-timeout", { eventId: delivery.eventId, type: delivery.type, delivery: snapshot });
     }
     return snapshot;
+  }
+
+  function acceptTimelineState(timelineState, generation) {
+    if (
+      adapterObject?.name !== "syndocal-envelope-v3" ||
+      !timelineState ||
+      !Number.isSafeInteger(timelineState.sequence) ||
+      timelineState.sequence < 1 ||
+      typeof timelineState.sessionId !== "string" ||
+      !timelineState.sessionId
+    ) {
+      return true;
+    }
+    if (!timelineStateFence || timelineStateFence.generation !== generation) {
+      timelineStateFence = {
+        generation,
+        sessionId: timelineState.sessionId,
+        sequence: timelineState.sequence,
+        retiredSessionIds: new Set(),
+      };
+      return true;
+    }
+    if (timelineStateFence.sessionId === timelineState.sessionId) {
+      if (timelineState.sequence <= timelineStateFence.sequence) {
+        return false;
+      }
+      timelineStateFence.sequence = timelineState.sequence;
+      return true;
+    }
+    if (
+      timelineStateFence.retiredSessionIds.has(timelineState.sessionId) ||
+      timelineStateFence.retiredSessionIds.size >= TIMELINE_SESSION_FENCE_MAX_RETIRED
+    ) {
+      return false;
+    }
+    timelineStateFence.retiredSessionIds.add(timelineStateFence.sessionId);
+    timelineStateFence = {
+      generation,
+      sessionId: timelineState.sessionId,
+      sequence: timelineState.sequence,
+      retiredSessionIds: timelineStateFence.retiredSessionIds,
+    };
+    return true;
+  }
+
+  function finalizeCorrelatedRelease(timelineState, candidate, generation) {
+    if (
+      timelineState?.state !== "running" ||
+      timelineState.pedalOwner !== "timeline" ||
+      typeof timelineState.releaseEventId !== "string" ||
+      !timelineState.releaseEventId ||
+      typeof timelineState.timelineId !== "string" ||
+      !timelineState.timelineId ||
+      typeof timelineState.playSessionId !== "string" ||
+      !timelineState.playSessionId
+    ) {
+      return null;
+    }
+    const pending = pendingAcks.get(timelineState.releaseEventId);
+    const payload = pending?.type === "DJ_RELEASE" ? pending.event?.payload : null;
+    if (
+      !pending ||
+      pending.socket !== candidate ||
+      pending.generation !== generation ||
+      !payload ||
+      payload.state !== "released" ||
+      payload.timelineId !== timelineState.timelineId ||
+      payload.playSessionId !== timelineState.playSessionId
+    ) {
+      return null;
+    }
+    return finalizeDelivery(
+      timelineState.releaseEventId,
+      "acknowledged",
+      { reason: "timeline-state-correlated" },
+      { pending, generation, socket: candidate },
+      { includeAckResult: false },
+    );
+  }
+
+  function normalizeTimelineStateRequestAckCode(value) {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const normalized = value.trim().toLowerCase();
+    return TIMELINE_STATE_REQUEST_ACK_CODES.has(normalized) ? normalized : null;
+  }
+
+  function clearCurrentTimelineStateRequestCorrelation(candidate, generation) {
+    if (
+      timelineStateRequestCorrelation &&
+      timelineStateRequestCorrelation.socket === candidate &&
+      timelineStateRequestCorrelation.generation === generation
+    ) {
+      timelineStateRequestCorrelation = null;
+    }
+  }
+
+  function handleTimelineStateRequestAck(message, validation, candidate, generation) {
+    if (adapterObject?.name !== "syndocal-envelope-v3") {
+      return false;
+    }
+    const correlation = timelineStateRequestCorrelation;
+    if (
+      !correlation ||
+      correlation.eventId !== validation.eventId ||
+      correlation.sequence !== message.sequence ||
+      correlation.socket !== candidate ||
+      correlation.generation !== generation
+    ) {
+      return false;
+    }
+
+    const safeCode = normalizeTimelineStateRequestAckCode(message.code);
+    const requestAccepted =
+      (validation.outcome === "accepted" || validation.outcome === "duplicate") &&
+      message.code === null;
+    const visibleMessage = requestAccepted
+      ? "Syndocal timeline state request accepted; awaiting authoritative timeline state"
+      : safeCode
+        ? `Syndocal timeline state request failed: ${safeCode}`
+        : `Syndocal timeline state request failed (${validation.outcome})`;
+    const receivedAt = new Date(now()).toISOString();
+    const ackResult = {
+      eventId: validation.eventId,
+      type: "DJ_TIMELINE_STATE_REQUEST",
+      sequence: message.sequence,
+      ok: requestAccepted,
+      state: requestAccepted ? "accepted" : "rejected",
+      message: visibleMessage,
+      outcome: validation.outcome,
+      code: safeCode,
+      stateGeneration: message.stateGeneration,
+      receivedAt,
+    };
+    lastAckResult = ackResult;
+    status.lastAckAt = receivedAt;
+    if (!requestAccepted) {
+      // A rejected request cannot produce the authoritative response this
+      // correlation represents. Fence later copies until the next request.
+      timelineStateRequestCorrelation = null;
+    }
+    updateStatus({
+      lastAckAt: receivedAt,
+      lastAckResult,
+      lastError: requestAccepted ? null : visibleMessage,
+      message: visibleMessage,
+    });
+    const safeAck = {
+      v: ENVELOPE_V3_PROTOCOL_VERSION,
+      type: "ACK",
+      eventId: validation.eventId,
+      sequence: message.sequence,
+      outcome: validation.outcome,
+      code: safeCode,
+      stateGeneration: message.stateGeneration,
+    };
+    emitter.emit("ack", {
+      eventId: validation.eventId,
+      ok: requestAccepted,
+      control: true,
+      message: safeAck,
+      delivery: null,
+    });
+    if (!requestAccepted) {
+      const failure = {
+        kind: "timeline-state-request",
+        reason: "control-ack-failed",
+        eventId: validation.eventId,
+        sequence: message.sequence,
+        outcome: validation.outcome,
+        code: safeCode,
+        message: visibleMessage,
+      };
+      emitter.emit("control-failure", failure);
+      emitter.emit("warning", {
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        reason: failure.reason,
+        code: safeCode,
+        message: visibleMessage,
+      });
+    }
+    return true;
   }
 
   function finalizeAllPending(state, extra = {}) {
@@ -1224,6 +1432,9 @@ function createSyndocalClient({
         return;
       }
       const { eventId, outcome } = validation;
+      if (handleTimelineStateRequestAck(message, validation, candidate, generation)) {
+        return;
+      }
       const pending = eventId ? pendingAcks.get(eventId) : null;
       if (
         !eventId ||
@@ -1286,6 +1497,23 @@ function createSyndocalClient({
         updateStatus({ lastError: warning });
         emitter.emit("warning", { message: warning, type: "DJ_TIMELINE_STATE", raw: message });
         return;
+      }
+      // The router has its own timeline-state fence, but the client must not
+      // consume or forward a stale correlated snapshot before that event
+      // reaches it. In particular, a retired session ID must not re-key the
+      // router and terminalize a pending Release through an ABA replay.
+      const timelineStateAccepted = adapterObject.name !== "syndocal-envelope-v3" ||
+        acceptTimelineState(timelineState, generation);
+      if (!timelineStateAccepted) {
+        emitter.emit("warning", {
+          message: "Stale duplicate DJ_TIMELINE_STATE ignored",
+          type: "DJ_TIMELINE_STATE",
+        });
+        return;
+      }
+      if (timelineStateAccepted) {
+        clearCurrentTimelineStateRequestCorrelation(candidate, generation);
+        finalizeCorrelatedRelease(timelineState, candidate, generation);
       }
       emitter.emit("timeline-state", timelineState);
       return;
@@ -1443,145 +1671,87 @@ function createSyndocalClient({
     return sent;
   }
 
-  function sendTimelineStateRequest() {
+  function sendTimelineStateRequest({ returnEventResult = false } = {}) {
+    const eventResult = ({
+      eventId = null,
+      sequence = null,
+      sent = false,
+      reason = sent ? undefined : "not-sent",
+    }) => {
+      if (!returnEventResult) {
+        return sent;
+      }
+      const delivery = {
+        eventId,
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        state: sent ? "acknowledged" : "send-failed",
+        ackState: sent ? "acknowledged" : "send-failed",
+        ok: sent,
+        sent,
+        ackRequired: false,
+        attempts: 1,
+        busyRetries: 0,
+        createdAt: new Date(now()).toISOString(),
+        updatedAt: new Date(now()).toISOString(),
+      };
+      if (reason !== undefined) {
+        delivery.reason = reason;
+      }
+      publishDelivery(delivery);
+      return {
+        eventId,
+        sequence,
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        sent,
+        ackRequired: false,
+        ok: sent,
+        state: delivery.state,
+        ackState: delivery.ackState,
+        awaitingAck: false,
+        delivery: { ...delivery },
+      };
+    };
+
     if (typeof adapterObject?.encodeTimelineStateRequest !== "function") {
-      return false;
+      return eventResult({ reason: "timeline-state-request-unsupported" });
     }
     const envelope = nextControlEnvelope();
     if (!envelope) {
-      return reportControlEnvelopeFailure("timeline-state-request");
-    }
-    const message = adapterObject.encodeTimelineStateRequest(envelope);
-    return sendRaw(message, { kind: "timeline-state-request" });
-  }
-
-  function sendControlEvent(type, source, requestedId) {
-    if (requestedId) {
-      return {
-        eventId: requestedId,
-        type,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-event-id-not-accepted",
-      };
-    }
-    const hasSequence = Object.hasOwn(source, "sequence");
-    const controlEventSequence = hasSequence ? source.sequence : wireSequence + 1;
-    if (!hasSequence && wireSequence >= Number.MAX_SAFE_INTEGER) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-sequence-overflow",
-      };
-    }
-    if (!Number.isSafeInteger(controlEventSequence) || controlEventSequence < 1) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "invalid-sequence",
-      };
-    }
-    if (hasSequence && controlEventSequence <= wireSequence) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "sequence-rollback",
-      };
-    }
-    const eventId = requestedId || makeControlId();
-    if (!eventId) {
-      return {
-        eventId: null,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-id-generation-failed",
-      };
+      reportControlEnvelopeFailure("timeline-state-request");
+      return eventResult({ reason: "control-sequence-overflow" });
     }
     let message;
     try {
-      message = adapterObject.encodeEvent
-        ? adapterObject.encodeEvent({
-            type,
-            eventId,
-            sequence: controlEventSequence,
-            payload: Object.hasOwn(source, "payload") ? source.payload : {},
-          })
-        : null;
+      message = adapterObject.encodeTimelineStateRequest(envelope);
     } catch {
       message = null;
     }
     if (!message || typeof message !== "object" || Array.isArray(message)) {
-      return {
-        eventId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "invalid-payload",
-      };
+      reportControlEnvelopeFailure("timeline-state-request-encode");
+      return eventResult({ eventId: envelope.eventId, sequence: envelope.sequence, reason: "invalid-payload" });
     }
-    wireSequence = controlEventSequence;
-    const delivery = {
-      eventId,
-      type,
-      state: "pending",
-      ackState: "pending",
-      ok: false,
-      sent: false,
-      ackRequired: false,
-      attempts: 1,
-      busyRetries: 0,
-      createdAt: new Date(now()).toISOString(),
-      updatedAt: new Date(now()).toISOString(),
-    };
-    const sent = sendRaw(message, { kind: "control-event", type, eventId });
-    delivery.sent = sent;
-    delivery.state = sent ? "acknowledged" : "send-failed";
-    delivery.ackState = delivery.state;
-    delivery.ok = sent;
-    delivery.reason = sent ? undefined : "not-sent";
-    publishDelivery(delivery);
-    return {
-      eventId,
-      sequence: controlEventSequence,
-      type,
+    const correlation = adapterObject.name === "syndocal-envelope-v3"
+      ? {
+          eventId: envelope.eventId,
+          sequence: envelope.sequence,
+          socket,
+          generation: socketGeneration,
+        }
+      : null;
+    timelineStateRequestCorrelation = correlation;
+    const sent = sendRaw(message, {
+      kind: "timeline-state-request",
+      eventId: envelope.eventId,
+      generation: socketGeneration,
+    });
+    if (!sent && timelineStateRequestCorrelation === correlation) {
+      timelineStateRequestCorrelation = null;
+    }
+    return eventResult({
+      eventId: envelope.eventId,
+      sequence: envelope.sequence,
       sent,
-      ackRequired: false,
-      ok: delivery.ok,
-      state: delivery.state,
-      ackState: delivery.ackState,
-      awaitingAck: false,
-      delivery: { ...delivery },
-    };
+    });
   }
 
   function sendPhysicalEncodedEvent({ eventId, type, sequence: eventSequence, message, requiresAck, event }) {
@@ -1776,7 +1946,7 @@ function createSyndocalClient({
           reason: "invalid-payload",
         };
       }
-      return sendControlEvent(type, source, requestedId);
+      return sendTimelineStateRequest({ returnEventResult: true });
     }
     if (!transientTelemetry && requestedId && physicalEventIdRegistry.has(requestedId)) {
       return {
@@ -1951,10 +2121,17 @@ function createSyndocalClient({
     const closingSocket = candidate || socket;
     clearHeartbeat();
     clearSocketListeners();
+    timelineStateRequestCorrelation = null;
     socket = null;
     socketGeneration = 0;
-    for (const pending of pendingAcks.values()) {
+    // Finalization removes entries from pendingAcks, so iterate over a stable
+    // snapshot. Only the named reconnect allowlist may remain pending.
+    for (const [eventId, pending] of [...pendingAcks.entries()]) {
       clearPendingTimers(pending);
+      if (!RECONNECT_REPLAY_EVENT_TYPES.has(pending.type)) {
+        finalizeDelivery(eventId, "send-failed", { reason }, { pending });
+        continue;
+      }
       pending.socket = null;
       pending.generation = 0;
       pending.delivery.state = "retrying";
@@ -1985,6 +2162,8 @@ function createSyndocalClient({
     if (!isCurrentSocket(candidate, generation)) {
       return;
     }
+    timelineStateFence = null;
+    timelineStateRequestCorrelation = null;
     reconnectDelay = Math.max(50, reconnectMinMs);
     updateStatus({ state: "connected", message: "Syndocal connected", lastError: null });
     startHeartbeat();
@@ -2144,6 +2323,7 @@ function createSyndocalClient({
     clearHeartbeat();
     const closingSocket = socket;
     clearSocketListeners();
+    timelineStateRequestCorrelation = null;
     socket = null;
     socketGeneration = 0;
     finalizeAllPending("send-failed", { reason: "stopped" });

@@ -161,10 +161,15 @@ Every frame has exactly `{v:3,type,agentId,sessionId,sequence,eventId,payload}`.
 Flat, v1, and v2 frames, retired adapter names, aliases, and unknown names are
 rejected visibly; there is no compatibility adapter or fallback. The transport
 provides reconnect, heartbeat, event IDs, monotonically increasing wire
-sequence values, ACK tracking, and DJ_STATE_SYNC. An unacknowledged physical
-event is retried after reconnect with the same eventId and semantic payload
-(including playSessionId), a fresh connection sessionId, and a new monotonic
-wire sequence; duplicate ACK outcome is success.
+sequence values, ACK tracking, and DJ_STATE_SYNC. Reconnect replay is fail-closed:
+only a pending, exactly correlated `DJ_RELEASE` may survive a socket close/error.
+That release retains its eventId and semantic payload (including playSessionId)
+while it waits for a matching current-socket ACK or an exact authoritative running
+timeline snapshot (`pedalOwner:"timeline"`, matching timelineId/playSessionId, and
+matching releaseEventId); replay uses a fresh connection sessionId and a new
+monotonic wire sequence. Every other pending physical event is finalized immediately
+as `send-failed` with the teardown reason and is never replayed. Duplicate ACK
+outcome is success.
 The generic State Sync payload is exactly `{released}` when no session is
 admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
 three owner-correlation fields are present. Rekordbox MASTER is never encoded
@@ -182,6 +187,23 @@ fallback/release delivery remains visible and is never queued as a successful
 Syndocal action. Stage 2 remains fail-closed until an authoritative timeline
 snapshot is received, and stale pedal events are not replayed after
 reconnection.
+The correlated `DJ_RELEASE` is the exception to ACK-only completion: an exact
+current authoritative running snapshot can terminalize that release without
+fabricating an ACK result.
+Within one connection generation, an accepted timeline session replacement
+retires the prior session ID permanently for that generation; later frames from
+that ID are rejected even with a higher sequence, preventing ABA re-keying.
+The retired-session fence is reset only when a replacement connection generation
+is accepted.
+
+`DJ_TIMELINE_STATE_REQUEST` is a control-only request and never enters the physical
+pending/replay registry. The automatic request after hello and a public request use
+the same current eventId/sequence/socket-generation correlation. An exact current
+`accepted`/`duplicate` ACK means only that the request was accepted; it does not make
+the timeline snapshot ready. A current `rejected`/`no_mapping`/`busy` ACK, or a
+current ACK carrying a code, updates sanitized `lastError`/`message` and emits a
+visible timeline warning/control failure. Foreign, stale, and old-socket ACKs are
+ignored. A valid current `DJ_TIMELINE_STATE` response clears the request correlation.
 
 `GET /api/dj-agent/status` also exposes the handoff state machine:
 `mode` is `dj-control`, `handoff-pending`, or `timeline-control`; `timelineState`

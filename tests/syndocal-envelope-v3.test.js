@@ -1554,7 +1554,7 @@ function waitForEvent(emitter, name, predicate, { timeoutMs = 500, label = name 
   });
 }
 
-test("ACK reconnect retry preserves eventId/playSession exactly once and uses a fresh v3 session", async (t) => {
+test("pending ACTIVE fails closed on socket close and is not replayed", async (t) => {
   V3WebSocket.instances = [];
   const client = createSyndocalClient({
     enabled: true,
@@ -1568,6 +1568,8 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
     stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
   });
   t.after(() => client.stop());
+  const ignoredAcks = [];
+  client.on("ack-ignored", (ack) => ignoredAcks.push(ack));
   client.start();
   await flush();
   const first = V3WebSocket.instances[0];
@@ -1583,20 +1585,13 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
     client,
     "connected",
     (event) => event?.generation === 2,
-    { label: "ACK retry reconnect" },
+    { label: "ACTIVE reconnect" },
   );
   first.readyState = 3;
   first.emit("close", 1006, "test-reconnect");
-  assert.equal(client.getStatus().lastDelivery.state, "retrying");
-  await reconnect;
-  const second = V3WebSocket.instances[1];
-  const replay = second.sent.find((frame) => frame.eventId === "active-reconnect");
-  assertV3Frame(replay, "DJ_TRACK_ACTIVE");
-  assert.notEqual(replay.sessionId, firstFrame.sessionId);
-  assert.notEqual(replay.sequence, firstFrame.sequence);
-  assert.equal(replay.payload.playSessionId, firstFrame.payload.playSessionId);
-  assert.deepEqual(replay.payload, firstFrame.payload);
-
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+  assert.equal(client.getStatus().lastDelivery.reason, "connection-closed");
   first.emit("message", JSON.stringify({
     v: 3,
     type: "ACK",
@@ -1606,18 +1601,22 @@ test("ACK reconnect retry preserves eventId/playSession exactly once and uses a 
     code: null,
     stateGeneration: 1,
   }));
-  assert.equal(client.getStatus().pendingAcks, 1);
+  assert.equal(client.getStatus().pendingAcks, 0, "a late ACK from the closed socket cannot revive ACTIVE");
+  await reconnect;
+  const second = V3WebSocket.instances[1];
   second.emit("message", JSON.stringify({
     v: 3,
     type: "ACK",
     eventId: "active-reconnect",
-    sequence: replay.sequence,
-    outcome: "duplicate",
+    sequence: firstFrame.sequence,
+    outcome: "accepted",
     code: null,
-    stateGeneration: 2,
+    stateGeneration: 1,
   }));
+  assert.equal(ignoredAcks.at(-1).reason, "unknown-or-stale");
   assert.equal(client.getStatus().pendingAcks, 0);
-  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
+  assert.equal(second.sent.some((frame) => frame.type === "DJ_TRACK_ACTIVE"), false);
+  assert.equal(second.sent.some((frame) => frame.eventId === "active-reconnect"), false);
 });
 
 test("candidate ACTIVE is ACK-tracked while candidate SYNC is transient telemetry", async (t) => {
@@ -1669,7 +1668,7 @@ test("candidate ACTIVE is ACK-tracked while candidate SYNC is transient telemetr
   assert.ok(syncFrame.eventId.startsWith("telemetry-"));
 });
 
-test("reconnect replay of a queued timeline command keeps its originally bound playSessionId", async (t) => {
+test("pending beat jump fails closed on socket close and is not replayed", async (t) => {
   V3WebSocket.instances = [];
   let currentSession = "play-session-a";
   const client = createSyndocalClient({
@@ -1684,12 +1683,16 @@ test("reconnect replay of a queued timeline command keeps its originally bound p
     stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: currentSession }),
   });
   t.after(() => client.stop());
+  const ignoredAcks = [];
+  client.on("ack-ignored", (ack) => ignoredAcks.push(ack));
   client.start();
   await flush();
   const first = V3WebSocket.instances[0];
   const boundPayload = { bars: -4, timelineId: "life-over", playSessionId: currentSession };
   const queued = client.sendEvent({ type: "DJ_TIMELINE_BEAT_JUMP", payload: boundPayload });
   assert.equal(queued.state, "pending");
+  const firstFrame = first.sent.find((frame) => frame.eventId === queued.eventId);
+  assertV3Frame(firstFrame, "DJ_TIMELINE_BEAT_JUMP");
   currentSession = "play-session-b";
   const reconnect = waitForEvent(
     client,
@@ -1699,13 +1702,569 @@ test("reconnect replay of a queued timeline command keeps its originally bound p
   );
   first.readyState = 3;
   first.emit("close", 1006, "session-replacement");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+  assert.equal(client.getStatus().lastDelivery.reason, "connection-closed");
+  first.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: queued.eventId,
+    sequence: firstFrame.sequence,
+    outcome: "accepted",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(client.getStatus().pendingAcks, 0, "a late ACK from the closed socket cannot revive a beat jump");
   await reconnect;
   const second = V3WebSocket.instances.at(-1);
-  const replay = second.sent.find((frame) => frame.eventId === queued.eventId);
-  assertV3Frame(replay, "DJ_TIMELINE_BEAT_JUMP");
-  assert.deepEqual(replay.payload, boundPayload);
-  assert.equal(replay.payload.playSessionId, "play-session-a");
-  assert.notEqual(replay.payload.playSessionId, currentSession);
+  second.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: queued.eventId,
+    sequence: firstFrame.sequence,
+    outcome: "accepted",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(ignoredAcks.at(-1).reason, "unknown-or-stale");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(second.sent.some((frame) => frame.type === "DJ_TIMELINE_BEAT_JUMP"), false);
+  assert.equal(second.sent.some((frame) => frame.eventId === queued.eventId), false);
+});
+
+test("DJ_RELEASE reconnect retry preserves eventId/payload and fresh v3 session until terminal ACK", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 2_000,
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  const ignoredAcks = [];
+  client.on("ack-ignored", (ack) => ignoredAcks.push(ack));
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const payload = { state: "released", timelineId: "life-over", playSessionId: "play-session-1" };
+  const sent = client.sendEvent({
+    type: "DJ_RELEASE",
+    eventId: "release-reconnect",
+    payload,
+  });
+  assert.equal(sent.state, "pending");
+  const firstFrame = first.sent.find((frame) => frame.eventId === sent.eventId);
+  assertV3Frame(firstFrame, "DJ_RELEASE");
+  assert.deepEqual(firstFrame.payload, payload);
+
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "DJ_RELEASE reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "release-reconnect");
+  assert.equal(client.getStatus().pendingAcks, 1);
+  assert.equal(client.getStatus().lastDelivery.state, "retrying");
+  assert.equal(client.getStatus().lastDelivery.reason, "connection-closed");
+  await reconnect;
+
+  const second = V3WebSocket.instances[1];
+  const replay = second.sent.find((frame) => frame.eventId === sent.eventId);
+  assertV3Frame(replay, "DJ_RELEASE");
+  assert.equal(replay.eventId, firstFrame.eventId);
+  assert.deepEqual(replay.payload, firstFrame.payload);
+  assert.notEqual(replay.sessionId, firstFrame.sessionId);
+  assert.notEqual(replay.sequence, firstFrame.sequence);
+
+  // An ACK carrying the old socket's sequence after the new connection is
+  // live must not consume the release retry or alter its new correlation.
+  second.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: sent.eventId,
+    sequence: firstFrame.sequence,
+    outcome: "accepted",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(ignoredAcks.at(-1).reason, "unknown-or-stale");
+  assert.equal(client.getStatus().pendingAcks, 1);
+  assert.equal(client.getStatus().lastDelivery.state, "pending");
+
+  second.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: sent.eventId,
+    sequence: replay.sequence,
+    outcome: "duplicate",
+    code: null,
+    stateGeneration: 2,
+  }));
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
+  assert.equal(client.getStatus().lastDelivery.ack.outcome, "duplicate");
+});
+
+test("correlated timeline snapshot terminalizes DJ_RELEASE without ACK and prevents replay", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  const timelineStates = [];
+  client.on("timeline-state", (state) => timelineStates.push(state));
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const payload = { state: "released", timelineId: "life-over", playSessionId: "play-session-1" };
+  const release = client.sendEvent({ type: "DJ_RELEASE", eventId: "release-snapshot", payload });
+  assert.equal(release.state, "pending");
+
+  first.emit("message", JSON.stringify(strictTimelineState({
+    pedalOwner: "timeline",
+    timelineId: payload.timelineId,
+    playSessionId: payload.playSessionId,
+    releaseEventId: release.eventId,
+  })));
+  assert.equal(timelineStates.length, 1, "the snapshot remains available to the router");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
+  assert.equal(client.getStatus().lastDelivery.reason, "timeline-state-correlated");
+  assert.equal(Object.hasOwn(client.getStatus().lastDelivery, "ack"), false);
+  assert.equal(client.getStatus().lastAckResult, null, "snapshot correlation does not fabricate an ACK result");
+
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "snapshot-correlated reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "snapshot-correlated");
+  await reconnect;
+  const second = V3WebSocket.instances[1];
+  assert.equal(second.sent.some((frame) => frame.eventId === release.eventId), false);
+  assert.equal(second.sent.some((frame) => frame.type === "DJ_RELEASE"), false);
+});
+
+test("retired timeline session cannot terminalize DJ_RELEASE within a generation", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false }),
+  });
+  t.after(() => client.stop());
+  const timelineStates = [];
+  client.on("timeline-state", (state) => timelineStates.push(state));
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const emitTimelineState = (sessionId, sequence, overrides) => {
+    first.emit("message", JSON.stringify({
+      ...strictTimelineState(overrides),
+      sessionId,
+      sequence,
+      eventId: `timeline-${sessionId}-${sequence}`,
+    }));
+  };
+
+  emitTimelineState("session-a", 10, {
+    timelineId: "timeline-a",
+    playSessionId: "play-session-a",
+    pedalOwner: "dj",
+  });
+  emitTimelineState("session-b", 1, {
+    timelineId: "timeline-b",
+    playSessionId: "play-session-b",
+    pedalOwner: "dj",
+  });
+  assert.equal(timelineStates.length, 2);
+
+  const payload = {
+    state: "released",
+    timelineId: "timeline-a",
+    playSessionId: "play-session-a",
+  };
+  const release = client.sendEvent({ type: "DJ_RELEASE", eventId: "release-aba", payload });
+  assert.equal(release.state, "pending");
+
+  // A:9 exactly correlates with the Release, but A was retired by B:1. It
+  // must not reach the router or terminalize the pending handoff.
+  emitTimelineState("session-a", 9, {
+    timelineId: payload.timelineId,
+    playSessionId: payload.playSessionId,
+    pedalOwner: "timeline",
+    releaseEventId: release.eventId,
+  });
+  assert.equal(timelineStates.length, 2, "retired-session state is not forwarded");
+  assert.equal(client.getStatus().pendingAcks, 1);
+  assert.equal(client.getStatus().lastDelivery.state, "pending");
+
+  emitTimelineState("session-b", 2, {
+    timelineId: "timeline-b",
+    playSessionId: "play-session-b",
+    pedalOwner: "dj",
+  });
+  assert.equal(timelineStates.length, 3, "newer current-session state is accepted");
+  assert.equal(client.getStatus().pendingAcks, 1);
+
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "retired-session fence reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "retired-session-fence");
+  assert.equal(client.getStatus().pendingAcks, 1);
+  await reconnect;
+
+  // A is eligible again only because the socket generation was replaced.
+  const second = V3WebSocket.instances[1];
+  second.emit("message", JSON.stringify({
+    ...strictTimelineState({
+      timelineId: payload.timelineId,
+      playSessionId: payload.playSessionId,
+      pedalOwner: "timeline",
+      releaseEventId: release.eventId,
+    }),
+    sessionId: "session-a",
+    sequence: 1,
+    eventId: "timeline-session-a-1-reconnect",
+  }));
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.reason, "timeline-state-correlated");
+  assert.equal(timelineStates.length, 4);
+});
+
+test("mismatched and stale timeline snapshots keep DJ_RELEASE pending for replay", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const payload = { state: "released", timelineId: "life-over", playSessionId: "play-session-1" };
+  const release = client.sendEvent({ type: "DJ_RELEASE", eventId: "release-snapshot-mismatch", payload });
+  assert.equal(release.state, "pending");
+
+  const mismatched = strictTimelineState({
+    pedalOwner: "timeline",
+    timelineId: "foreign-timeline",
+    playSessionId: payload.playSessionId,
+    releaseEventId: release.eventId,
+  });
+  first.emit("message", JSON.stringify(mismatched));
+  assert.equal(client.getStatus().pendingAcks, 1);
+  assert.equal(client.getStatus().lastDelivery.state, "pending");
+
+  // Same Syndocal session/sequence is stale even though this payload now
+  // matches the release, so it cannot clear the pending handoff.
+  first.emit("message", JSON.stringify(strictTimelineState({
+    pedalOwner: "timeline",
+    timelineId: payload.timelineId,
+    playSessionId: payload.playSessionId,
+    releaseEventId: release.eventId,
+  })));
+  assert.equal(client.getStatus().pendingAcks, 1);
+
+  const reconnect = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "mismatched snapshot reconnect" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "mismatched-snapshot");
+  await reconnect;
+  const second = V3WebSocket.instances[1];
+  const replay = second.sent.find((frame) => frame.eventId === release.eventId);
+  assertV3Frame(replay, "DJ_RELEASE");
+  assert.deepEqual(replay.payload, payload);
+});
+
+test("current timeline request rejection exposes a sanitized control failure", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false }),
+  });
+  t.after(() => client.stop());
+  const warnings = [];
+  const failures = [];
+  const acks = [];
+  client.on("warning", (warning) => warnings.push(warning));
+  client.on("control-failure", (failure) => failures.push(failure));
+  client.on("ack", (ack) => acks.push(ack));
+
+  client.start();
+  await flush();
+  const socket = V3WebSocket.instances[0];
+  const physicalRegistryBefore = client.getStatus().physicalEventIdRegistrySize;
+  const publicRequest = client.sendEvent({ type: "DJ_TIMELINE_STATE_REQUEST" });
+  assert.equal(publicRequest.type, "DJ_TIMELINE_STATE_REQUEST");
+  assert.equal(publicRequest.ackRequired, false);
+  const request = socket.sent.at(-1);
+  assertV3Frame(request, "DJ_TIMELINE_STATE_REQUEST");
+  assert.equal(request.eventId, publicRequest.eventId);
+  assert.equal(request.sequence, publicRequest.sequence);
+  socket.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: request.eventId,
+    sequence: request.sequence,
+    outcome: "no_mapping",
+    code: "project_mapping_not_loaded",
+    stateGeneration: 1,
+  }));
+
+  const status = client.getStatus();
+  assert.match(status.lastError, /project_mapping_not_loaded/);
+  assert.equal(status.message, status.lastError);
+  assert.equal(status.lastAckResult.eventId, request.eventId);
+  assert.equal(status.lastAckResult.ok, false);
+  assert.equal(status.lastAckResult.code, "project_mapping_not_loaded");
+  assert.equal(warnings.at(-1).type, "DJ_TIMELINE_STATE_REQUEST");
+  assert.equal(warnings.at(-1).code, "project_mapping_not_loaded");
+  assert.equal(failures.at(-1).reason, "control-ack-failed");
+  assert.equal(failures.at(-1).code, "project_mapping_not_loaded");
+  assert.equal(acks.at(-1).control, true);
+  assert.equal(acks.at(-1).ok, false);
+  assert.equal(client.getStatus().pendingAcks, 0, "control ACKs never enter physical pending delivery");
+  assert.equal(client.getStatus().physicalEventIdRegistrySize, physicalRegistryBefore, "control IDs never enter physical identity storage");
+});
+
+test("accepted timeline request ACK waits for current state and fences stale ACKs", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false }),
+  });
+  t.after(() => client.stop());
+  const timelineStates = [];
+  const ignoredAcks = [];
+  client.on("timeline-state", (state) => timelineStates.push(state));
+  client.on("ack-ignored", (ack) => ignoredAcks.push(ack));
+
+  client.start();
+  await flush();
+  const socket = V3WebSocket.instances[0];
+  const physicalRegistryBefore = client.getStatus().physicalEventIdRegistrySize;
+  const publicRequest = client.sendEvent({ type: "DJ_TIMELINE_STATE_REQUEST" });
+  assert.equal(publicRequest.type, "DJ_TIMELINE_STATE_REQUEST");
+  assert.equal(publicRequest.ackRequired, false);
+  const request = socket.sent.at(-1);
+  assertV3Frame(request, "DJ_TIMELINE_STATE_REQUEST");
+  assert.equal(request.eventId, publicRequest.eventId);
+  assert.equal(request.sequence, publicRequest.sequence);
+  socket.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: request.eventId,
+    sequence: request.sequence,
+    outcome: "accepted",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(client.getStatus().lastAckResult.state, "accepted");
+  assert.equal(client.getStatus().message, "Syndocal timeline state request accepted; awaiting authoritative timeline state");
+  assert.equal(timelineStates.length, 0, "accepted ACK alone is not a timeline snapshot");
+
+  socket.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: request.eventId,
+    sequence: request.sequence - 1,
+    outcome: "accepted",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(ignoredAcks.at(-1).reason, "unknown-or-stale");
+  assert.equal(client.getStatus().lastAckResult.state, "accepted");
+  socket.emit("message", JSON.stringify(strictTimelineState({ pedalOwner: "dj" })));
+  assert.equal(timelineStates.length, 1, "the authoritative response reaches the router");
+
+  // The response clears the request correlation; a duplicate control ACK is
+  // now stale instead of being treated as a second current request result.
+  socket.emit("message", JSON.stringify({
+    v: 3,
+    type: "ACK",
+    eventId: request.eventId,
+    sequence: request.sequence,
+    outcome: "duplicate",
+    code: null,
+    stateGeneration: 1,
+  }));
+  assert.equal(ignoredAcks.at(-1).reason, "unknown-or-stale");
+  assert.equal(client.getStatus().lastAckResult.state, "accepted");
+  assert.equal(client.getStatus().physicalEventIdRegistrySize, physicalRegistryBefore);
+});
+
+test("pending non-release physical events fail closed across close and error teardown", async (t) => {
+  const cases = [
+    {
+      type: "DJ_LOOP_STATE",
+      payload: {
+        deck: 1,
+        deckId: "rekordbox-deck-1",
+        playSessionId: "play-session-1",
+        active: true,
+        startBeat: 32,
+        endBeat: 40,
+        lengthBeats: 8,
+        revision: 4,
+        sampleAgeMs: 3,
+        source: "rekordbox-hook-measured",
+      },
+      teardown: "close",
+      reason: "connection-closed",
+    },
+    {
+      type: "DJ_LOOP_FALLBACK",
+      payload: {
+        deck: 1,
+        deckId: "rekordbox-deck-1",
+        playSessionId: "play-session-1",
+        pedalIntentId: 1,
+        baseMeasuredLoopRevision: 4,
+        baseLoopDivision: 0,
+        targetLengthBeats: 4,
+        responseWindowMs: 500,
+        source: "pedal-no-response-predicted",
+      },
+      teardown: "close",
+      reason: "connection-closed",
+    },
+    {
+      type: "DJ_TIMELINE_LOOP_SET",
+      payload: { active: true, timelineId: "life-over", playSessionId: "play-session-1" },
+      teardown: "close",
+      reason: "connection-closed",
+    },
+    {
+      type: "DJ_TRACK_ACTIVE",
+      payload: strictTrackPayload(),
+      teardown: "error",
+      reason: "connection-error",
+    },
+  ];
+  const clients = [];
+  t.after(() => clients.forEach((client) => client.stop()));
+
+  for (const [index, testCase] of cases.entries()) {
+    V3WebSocket.instances = [];
+    const client = createSyndocalClient({
+      enabled: true,
+      token: TEST_TOKEN,
+      adapter: "syndocal-envelope-v3",
+      WebSocketImpl: V3WebSocket,
+      reconnectMinMs: 20,
+      reconnectMaxMs: 20,
+      heartbeatMs: 60_000,
+      ackTimeoutMs: 60_000,
+      stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
+    });
+    clients.push(client);
+    client.start();
+    await flush();
+    const first = V3WebSocket.instances[0];
+    const eventId = `teardown-${index}`;
+    const sent = client.sendEvent({ type: testCase.type, eventId, payload: testCase.payload });
+    assert.equal(sent.state, "pending");
+    const reconnect = waitForEvent(
+      client,
+      "connected",
+      (event) => event?.generation === 2,
+      { label: `${testCase.type} ${testCase.teardown} reconnect` },
+    );
+    first.readyState = 3;
+    if (testCase.teardown === "error") {
+      first.emit("error", new Error("test-error"));
+    } else {
+      first.emit("close", 1006, "test-close");
+    }
+    assert.equal(client.getStatus().pendingAcks, 0);
+    assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+    assert.equal(client.getStatus().lastDelivery.reason, testCase.reason);
+    await reconnect;
+    const second = V3WebSocket.instances[1];
+    assert.equal(second.sent.some((frame) => frame.eventId === eventId), false);
+    assert.equal(second.sent.some((frame) => frame.type === testCase.type), false);
+  }
+});
+
+test("stopping a pending DJ_RELEASE terminates it without reconnect replay", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 20,
+    reconnectMaxMs: 20,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false, ownerDeck: 1, ownerDeckId: "rekordbox-deck-1", activePlaySessionId: "play-session-1" }),
+  });
+  t.after(() => client.stop());
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const release = client.sendEvent({
+    type: "DJ_RELEASE",
+    eventId: "release-stop",
+    payload: { state: "released", timelineId: "life-over", playSessionId: "play-session-1" },
+  });
+  assert.equal(release.state, "pending");
+  client.stop();
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+  assert.equal(client.getStatus().lastDelivery.reason, "stopped");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(V3WebSocket.instances.length, 1);
+  assert.equal(first.sent.filter((frame) => frame.type === "DJ_RELEASE").length, 1);
 });
 
 test("durable physical event IDs are single-use and caller sequence reorder fails closed", async (t) => {
@@ -2252,6 +2811,58 @@ test("router reannounces fresh candidates only after each connection's timeline-
   client.emit("timeline-state", { state: "idle", loopActive: false });
   assert.equal(reannounceCalls, 2);
   assert.deepEqual(client.sent.map((event) => event.type), ["DJ_TRACK_ACTIVE"]);
+});
+
+test("router retires prior timeline sessions within one connection generation", () => {
+  const { client, router } = createFakeRouter();
+  const emitTimelineState = (sessionId, sequence, overrides = {}) => {
+    client.emit("timeline-state", {
+      state: "running",
+      loopActive: false,
+      timelineId: `timeline-${sessionId}`,
+      positionBars: sequence,
+      playSessionId: `play-${sessionId}`,
+      pedalOwner: "dj",
+      releaseEventId: null,
+      sessionId,
+      sequence,
+      ...overrides,
+    });
+  };
+
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 1 });
+  emitTimelineState("session-a", 10);
+  assert.equal(router.getStatus().timelineId, "timeline-session-a");
+
+  emitTimelineState("session-b", 1);
+  assert.equal(router.getStatus().timelineId, "timeline-session-b");
+  assert.equal(router.getStatus().timelinePlaySessionId, "play-session-b");
+
+  const beforeRetired = router.getStatus();
+  emitTimelineState("session-a", 9, {
+    timelineId: "timeline-a-retired-replay",
+    playSessionId: "play-a-retired-replay",
+    pedalOwner: "timeline",
+    releaseEventId: "release-aba",
+  });
+  const afterRetired = router.getStatus();
+  assert.equal(afterRetired.timelineId, beforeRetired.timelineId);
+  assert.equal(afterRetired.timelinePlaySessionId, beforeRetired.timelinePlaySessionId);
+  assert.equal(afterRetired.timelinePedalOwner, beforeRetired.timelinePedalOwner);
+  assert.equal(afterRetired.timelineReleaseEventId, beforeRetired.timelineReleaseEventId);
+
+  emitTimelineState("session-b", 2, { timelineId: "timeline-session-b-current" });
+  assert.equal(router.getStatus().timelineId, "timeline-session-b-current");
+  assert.equal(router.getStatus().timelinePositionBars, 2);
+
+  client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
+  emitTimelineState("session-a", 1, {
+    timelineId: "timeline-session-a-new-generation",
+    playSessionId: "play-session-a-new-generation",
+  });
+  assert.equal(router.getStatus().timelineId, "timeline-session-a-new-generation");
+  assert.equal(router.getStatus().timelinePositionBars, 1);
 });
 
 test("router never revives a released session during a reconnect reannouncement", () => {

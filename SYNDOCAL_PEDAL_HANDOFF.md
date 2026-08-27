@@ -15,6 +15,18 @@ hardware acceptanceはこの文書で主張しません。current/next operator 
 `C:\SyndocalShow\dj-agent-v1.1.8.json`を作成し、deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
 
+このcheckpointのsource worktreeはbranch `beta-v1.1.2`、base HEAD
+`0f3e8c6851857c8542c132a89a7d44289002b1f5`で、変更は未commit/未pushです。
+`node --check server/dj-agent/syndocalClient.js`、`node --check
+server/dj-agent/showEventRouter.js`、`node --check tests/syndocal-envelope-v3.test.js`、
+focused envelope **48/48**、smoke
+**60/60**、full `npm test` **424 pass / 0 fail / 2 intentional pkg-smoke
+skips**、および`git diff --check`を完了しました。first-party warningは**0**です。
+`git diff --check`のLF→CRLF表示はGitのline-ending noticeであり、diff failureや
+first-party warningではありません。dirty filesは本書、`README.md`、`API.md`、
+`server/dj-agent/syndocalClient.js`、`server/dj-agent/showEventRouter.js`、
+`tests/syndocal-envelope-v3.test.js`だけです。
+
 v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.8
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
 trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
@@ -410,6 +422,27 @@ Syndocalは現在の権威状態を`DJ_TIMELINE_STATE`で返してください�
 まではtimeline actionを送らず、`timeline-control`中の切断は`dj-control`へ
 自動復帰しません（安全側に停止します）。
 
+`DJ_TIMELINE_STATE_REQUEST`はcontrol-onlyで、physical pending/replay registryには
+入りません。hello後の自動requestと公開requestは、最新requestのeventId、sequence、
+socket、connection generationだけを相関します。current socketの
+`accepted`/`duplicate` ACKはrequest受理を示すだけで、snapshot readyを意味しません。
+`rejected`/`no_mapping`/`busy`またはcode付きのcurrent ACKは、固定allowlistのcodeだけを
+使ってsanitizedなlastError/messageとvisible warning/control failureへ反映します。
+foreign/stale/old-socket ACKは無視し、validなcurrent `DJ_TIMELINE_STATE`でrequest相関を
+解除します。
+
+Reconnect replayはfail-closedです。socket close/errorを越えて保持できるのは、payloadの
+`timelineId`/`playSessionId`/`state:"released"`とeventIdが一致するpending
+`DJ_RELEASE`だけです。同じeventIdとsemantic payloadのまま、current socketのmatching
+ACK（`accepted`/`duplicate`）または、`state:"running"`、`pedalOwner:"timeline"`、
+同じtimelineId/playSessionId/releaseEventIdを持つexact authoritative snapshotまで待ち、
+replay時だけ新connectionのsessionId/sequenceを使います。ACTIVE、LOOP_STATE、
+LOOP_FALLBACK、TIMELINE_BEAT_JUMP、TIMELINE_LOOP_SETなど他のphysical eventはteardown
+直後にterminal `send-failed`（connection-closed/connection-error/stopped）となり、再送しません。
+同一connection generation内でtimeline sessionがAからBへ遷移した後は、Aの
+sequenceが新しくてもAはretiredとして受理しません。これはABA再keyingとReleaseの
+誤terminal化を防ぐbounded fenceで、connection generationの置換時だけresetします。
+
 `DJ_TIMELINE_STATE`の形式は次です。
 
 ```json
@@ -527,7 +560,9 @@ eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次�
 拒否しwarningにします。
 
 送信直後は`pending`であり、`ok:true`ではありません。`retrying`と`disconnected`は
-再接続/replay待ちのnon-terminal状態です。最終deliveryは`acknowledged`、`rejected`、
+再接続/replay待ちのnon-terminal状態ですが、current v1.1.8でこの境界を越えられるのは
+相関済み`DJ_RELEASE`だけです。他のphysical eventはsocket teardown時点でterminal
+`send-failed`となり、replayしません。最終deliveryは`acknowledged`、`rejected`、
 `timed-out`、`send-failed`のいずれかです。UI/APIはpending・success・failureを同じ
 action eventIdで表示します。
 

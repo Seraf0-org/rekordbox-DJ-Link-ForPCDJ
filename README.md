@@ -57,6 +57,17 @@ revision and effective loop-division base. The strict-v3 sender nests measured
 loop truth under `payload.loop`, matching Syndocal ingress; the retired flat
 wire shape is rejected.
 
+Reconnect replay is fail-closed: only a pending, exactly correlated
+`DJ_RELEASE` may cross a socket close/error. It keeps its eventId and semantic
+payload until a matching current-socket ACK or exact authoritative running
+timeline snapshot; every other pending physical event is terminal
+`send-failed` and is never replayed. Within one connection generation, a
+timeline session ID retired by a later accepted session can never be accepted
+again, even with a higher sequence; a replacement connection resets that
+bounded fence. `DJ_TIMELINE_STATE_REQUEST` is control-only: accepted/duplicate
+means request accepted, not snapshot readiness, while current rejected/no_mapping/
+busy/code failures are surfaced with sanitized status and warning data.
+
 ## SUPERSEDED / DO NOT EXECUTE — v1.1.3 リリースノート（immutable historical release evidence）
 
 公開済みimmutable v1.1.3は履歴・provenance evidenceだけです。内部の
@@ -335,6 +346,25 @@ ACK timeoutまでpendingを維持します。HELLO/heartbeat/State Sync/timeline
 physical ID capから分離したcontrol ID/sequenceを使い、再接続時に旧physical eventを
 再送しません。timeline state requestのcaller-supplied eventIdは受け付けず、control
 IDはプロセス内で生成します。
+
+`DJ_RELEASE`だけは、同一payloadとcorrelationを持つcurrent authoritative running
+snapshotが適用を証明した場合にもterminal完了できます。このsnapshot経路はACKを
+捏造せず、他のphysical eventには適用しません。
+
+Socket close/error replay is deliberately narrower than ACK retry: only a pending,
+exactly correlated `DJ_RELEASE` may survive the teardown, retaining its eventId and
+semantic payload until a matching current-socket ACK or an exact authoritative
+correlated running `DJ_TIMELINE_STATE` snapshot proves it applied. A replay uses the
+new connection session and sequence. Every other pending physical event
+(`DJ_TRACK_ACTIVE`, `DJ_LOOP_STATE`, `DJ_LOOP_FALLBACK`, `DJ_TIMELINE_BEAT_JUMP`, or
+`DJ_TIMELINE_LOOP_SET`) is immediately terminal `send-failed` with the teardown
+reason and is never replayed. `DJ_TIMELINE_STATE_REQUEST` is control-only: the
+automatic and public request paths share current eventId/sequence/socket-generation
+correlation. A current `accepted`/`duplicate` ACK only means the request was
+accepted; it does not establish snapshot readiness. Current `rejected`, `no_mapping`,
+`busy`, or coded ACKs surface a sanitized status/message and visible timeline warning
+or control failure; foreign, stale, and old-socket ACKs are ignored. A valid current
+timeline state clears the request correlation.
 
 State Sync providerがthrow、null、undefined、またはKDMX strict-v3 validationに失敗した
 場合は、空snapshotへ置換せず、state-sync-error/send-failedとstatusへ記録してState
