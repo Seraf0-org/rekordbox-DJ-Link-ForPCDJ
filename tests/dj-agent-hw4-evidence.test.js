@@ -30,6 +30,25 @@ const PROVIDER_SECRETS = [
   `xoxs-${"4".repeat(24)}`,
 ];
 const TIMESTAMP = "2026-08-28T00:00:00.000Z";
+const RECORDER_PRODUCTION_MODULES = [
+  "dj-agent-hw4-evidence.js",
+  "dj-agent-hw4-evidence-safety.js",
+  "dj-agent-hw4-evidence-projection.js",
+  "dj-agent-hw4-evidence-http.js",
+];
+const READ_ONLY_FORBIDDEN_PATTERNS = [
+  ["process-control import", /require\(["']node:(?:child_process|net|dgram|cluster|worker_threads)["']\)/],
+  ["process-control call", /\b(?:spawn|exec|fork|execFile|execSync|spawnSync)\s*\(/],
+  ["process termination", /\.\s*(?:kill|disconnect)\s*\(/],
+  ["mutating HTTP method", /method:\s*["'](?:POST|PUT|PATCH|DELETE)["']/i],
+  ["action route", /\/api\/dj-agent\/actions\//],
+];
+
+function assertReadOnlyRecorderSource(source, label) {
+  for (const [description, pattern] of READ_ONLY_FORBIDDEN_PATTERNS) {
+    assert.doesNotMatch(source, pattern, `${label} contains ${description}`);
+  }
+}
 
 function statusFixture() {
   return {
@@ -406,14 +425,25 @@ test("endpoint validation rejects credentials, query strings, and non-diagnostic
   );
 });
 
-test("recorder source has no process-control or action-request implementation", () => {
-  const source = fs.readFileSync(
-    path.join(__dirname, "..", "scripts", "dj-agent-hw4-evidence.js"),
-    "utf8",
-  );
-  assert.doesNotMatch(source, /require\(["']node:(?:child_process|net)["']\)/);
-  assert.doesNotMatch(source, /\b(?:spawn|exec|fork)\s*\(/);
-  assert.doesNotMatch(source, /\.kill\s*\(/);
-  assert.doesNotMatch(source, /method:\s*["'](?:POST|PUT|PATCH|DELETE)["']/i);
-  assert.doesNotMatch(source, /\/api\/dj-agent\/actions\//);
+test("all recorder production modules have no process-control or action-request implementation", () => {
+  for (const moduleName of RECORDER_PRODUCTION_MODULES) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "scripts", moduleName), "utf8");
+    assertReadOnlyRecorderSource(source, moduleName);
+  }
+});
+
+test("read-only source guard rejects forbidden child-module operations", () => {
+  for (const [description, source] of [
+    ["process-control import", 'require("node:child_process")'],
+    ["process-control call", "spawn(command)"],
+    ["process termination", "child.kill()"],
+    ["mutating HTTP method", 'method: "POST"'],
+    ["action route", '"/api/dj-agent/actions/release"'],
+  ]) {
+    assert.throws(
+      () => assertReadOnlyRecorderSource(source, `synthetic ${description}`),
+      assert.AssertionError,
+      description,
+    );
+  }
 });
