@@ -99,10 +99,8 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.match(source, /fs\.lstatSync\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(process\.cwd\(\)\)/);
-  assert.match(source, /c\.syndocal\.adapter!==['"]syndocal-envelope-v3['"]/);
-  assert.match(source, /c\.syndocal\.heartbeatMs!==5000/);
-  assert.match(source, /c\.midi\.device!==['"]CustomMIDI1['"]/);
-  assert.match(source, /c\.midi\.releaseMacro\.enabled/);
+  assert.match(source, /validateFilterThenStopShowConfig\(source\)/);
+  assert.match(source, /releaseMacro\.enabled=true, sequence=filter-then-stop, releaseFade disabled/i);
   assert.doesNotMatch(source, /web server already running/i);
   assert.doesNotMatch(
     source,
@@ -148,8 +146,9 @@ test(
   () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rb-output-launcher-"));
     const validPath = path.join(tempRoot, "valid.json");
-    const macroPath = path.join(tempRoot, "macro-enabled.json");
+    const macroPath = path.join(tempRoot, "fade-enabled.json");
     const valid = {
+      version: "1.1.7",
       enabled: true,
       syndocal: {
         enabled: true,
@@ -161,12 +160,26 @@ test(
         adapter: "syndocal-envelope-v3",
         heartbeatMs: 5000,
       },
-      pedal: { enabled: true },
+      pedal: { enabled: true, bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" } },
       midi: {
         enabled: true,
         device: "CustomMIDI1",
         port: 1,
-        releaseMacro: { enabled: false },
+        mappings: {
+          loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
+          stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+          filter: { channel: 1, messageType: "controlChange", cc: 16 },
+        },
+        deckChannels: { 1: 1, 2: 2 },
+        filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 },
+        releaseFade: { enabled: false },
+        releaseMacro: {
+          enabled: true,
+          sequence: "filter-then-stop",
+          filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
+          resetAfterStop: true,
+          resetDelayMs: 0,
+        },
       },
     };
     fs.writeFileSync(validPath, JSON.stringify(valid), "utf8");
@@ -174,7 +187,7 @@ test(
       macroPath,
       JSON.stringify({
         ...valid,
-        midi: { ...valid.midi, releaseMacro: { enabled: true } },
+        midi: { ...valid.midi, releaseFade: { enabled: true } },
       }),
       "utf8",
     );

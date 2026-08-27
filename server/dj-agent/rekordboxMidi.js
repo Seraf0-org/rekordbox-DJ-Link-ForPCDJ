@@ -87,10 +87,11 @@ function createRekordboxMidi({
   mappings = {},
   filter = {},
   deckChannels = {},
-  releaseFade = {},
   midiModule = null,
   outputFactory = null,
   now = () => Date.now(),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
 } = {}) {
   const emitter = new EventEmitter();
   const normalizedMappings = {};
@@ -104,9 +105,8 @@ function createRekordboxMidi({
   let output = null;
   let opened = false;
   let rampTimer = null;
+  let rampGeneration = 0;
   let rampStartedAt = 0;
-  let releaseFadeTimer = null;
-  let releaseFadeStartedAt = 0;
   let status = {
     enabled: Boolean(enabled),
     ok: false,
@@ -115,8 +115,6 @@ function createRekordboxMidi({
     device: device || null,
     port: port,
     deckChannels: { ...normalizedDeckChannels },
-    releaseFadeConfigured: false,
-    releaseFadeActive: false,
     updatedAt: new Date(now()).toISOString(),
     rampActive: false,
   };
@@ -294,7 +292,7 @@ function createRekordboxMidi({
       : baseMapping?.channel ?? (name === "filter" ? normalizeChannel(filter.channel, 1) : null);
     return {
       targetDeck: deck,
-      targetChannel: configuredChannel || fallbackChannel || null,
+      targetChannel: deck == null ? fallbackChannel || null : configuredChannel || null,
     };
   }
 
@@ -322,6 +320,10 @@ function createRekordboxMidi({
     }
     const { targetDeck, ...mappingOverride } = override && typeof override === "object" ? override : {};
     const target = resolveTarget(name, targetDeck, base, mappingOverride.channel);
+    if (target.targetDeck != null && target.targetChannel == null) {
+      emitter.emit("mapping-target-unavailable", { name, targetDeck: target.targetDeck });
+      return false;
+    }
     const mapping = normalizeMapping({
       ...base,
       ...mappingOverride,
@@ -343,6 +345,9 @@ function createRekordboxMidi({
     }
     if (!opened || !output) {
       return { started: false, ok: false, reason: "midi-not-connected", ...target };
+    }
+    if (target.targetDeck != null && target.targetChannel == null) {
+      return { started: false, ok: false, reason: "filter-target-channel-missing", ...target };
     }
     const mapping = normalizedMappings.filter || normalizeMapping({
       messageType: "controlChange",
@@ -371,13 +376,19 @@ function createRekordboxMidi({
       return { started: false, ok: false, reason: "midi-send-failed", ...target };
     }
     updateStatus({ rampActive: true });
-    rampTimer = setInterval(() => {
+    const generation = ++rampGeneration;
+    rampTimer = setIntervalImpl(() => {
+      // clearInterval prevents future callbacks in production. The generation
+      // fence also makes an already-queued callback a no-op, so an F13 Stop
+      // cannot be followed by a stale ramp CC under a timer-boundary race.
+      if (generation !== rampGeneration || !rampTimer) return;
       const elapsed = now() - startedAt;
       const progress = Math.min(1, elapsed / durationMs);
       const value = Math.round(startValue + (endValue - startValue) * progress);
       if (!sendAt(value)) {
-        clearInterval(rampTimer);
+        clearIntervalImpl(rampTimer);
         rampTimer = null;
+        rampGeneration += 1;
         rampStartedAt = 0;
         updateStatus({ rampActive: false, ok: false, message: "MIDI filter ramp stopped after send failure" });
         emitter.emit("ramp-error", { reason: "midi-send-failed", value });
@@ -385,8 +396,9 @@ function createRekordboxMidi({
         return;
       }
       if (progress >= 1) {
-        clearInterval(rampTimer);
+        clearIntervalImpl(rampTimer);
         rampTimer = null;
+        rampGeneration += 1;
         rampStartedAt = 0;
         updateStatus({ rampActive: false });
         emitter.emit("ramp-complete", { startValue, endValue, durationMs });
@@ -404,140 +416,25 @@ function createRekordboxMidi({
     };
   }
 
-  function releaseFadeMapping() {
-    if (releaseFade?.enabled === false) {
-      return null;
-    }
-    return normalizedMappings[releaseFade?.mappingName || "releaseFade"] || null;
-  }
-
-  function releaseFadeTarget(targetDeck, mapping) {
-    const scope = String(releaseFade?.target || "deck").trim().toLowerCase();
-    return resolveTarget(
-      releaseFade?.mappingName || "releaseFade",
-      scope === "global" ? null : targetDeck,
-      mapping,
-    );
-  }
-
-  function hasReleaseFade() {
-    return Boolean(releaseFadeMapping());
-  }
-
-  function startReleaseFade(options = {}) {
-    const mapping = releaseFadeMapping();
-    const target = releaseFadeTarget(options.targetDeck, mapping);
-    if (releaseFadeTimer) {
-      return { started: false, ok: false, reason: "release-fade-in-progress", ...target };
-    }
-    if (!mapping) {
-      return { started: false, ok: false, reason: "release-fade-mapping-missing", ...target };
-    }
-    if (!opened || !output) {
-      return { started: false, ok: false, reason: "midi-not-connected", ...target };
-    }
-    const startValue = clampMidi(options.startValue ?? releaseFade.startValue, 127);
-    const endValue = clampMidi(options.endValue ?? releaseFade.endValue, 0);
-    const durationMs = Math.max(1, Number(options.durationMs ?? releaseFade.durationMs ?? 1_000));
-    const updateIntervalMs = Math.max(1, Number(options.updateIntervalMs ?? releaseFade.updateIntervalMs ?? 50));
-    const startedAt = now();
-    releaseFadeStartedAt = startedAt;
-    const sendAt = (value) => sendNormalizedMapping(releaseFade.mappingName || "releaseFade", {
-      ...mapping,
-      channel: target.targetChannel || mapping.channel,
-      value,
-    }, { ...target, phase: "release-fade" });
-    if (!sendAt(startValue)) {
-      releaseFadeStartedAt = 0;
-      options.onError?.({ reason: "midi-send-failed", value: startValue });
-      return { started: false, ok: false, reason: "midi-send-failed", ...target };
-    }
-    updateStatus({ releaseFadeActive: true });
-    releaseFadeTimer = setInterval(() => {
-      const elapsed = now() - startedAt;
-      const progress = Math.min(1, elapsed / durationMs);
-      const value = Math.round(startValue + (endValue - startValue) * progress);
-      if (!sendAt(value)) {
-        clearInterval(releaseFadeTimer);
-        releaseFadeTimer = null;
-        releaseFadeStartedAt = 0;
-        updateStatus({ releaseFadeActive: false, ok: false, message: "MIDI release fade stopped after send failure" });
-        emitter.emit("release-fade-error", { reason: "midi-send-failed", value, ...target });
-        options.onError?.({ reason: "midi-send-failed", value, ...target });
-        return;
-      }
-      if (progress >= 1) {
-        clearInterval(releaseFadeTimer);
-        releaseFadeTimer = null;
-        releaseFadeStartedAt = 0;
-        updateStatus({ releaseFadeActive: false });
-        const result = { startValue, endValue, durationMs, updateIntervalMs, ...target };
-        emitter.emit("release-fade-complete", result);
-        options.onComplete?.(result);
-      }
-    }, updateIntervalMs);
-    return {
-      started: true,
-      ok: true,
-      startValue,
-      endValue,
-      durationMs,
-      updateIntervalMs,
-      resetAfterStop: releaseFade.resetAfterStop === true || releaseFade.resetPolicy === "restore-after-stop",
-      resetValue: clampMidi(releaseFade.resetValue, startValue),
-      resetDelayMs: Math.max(0, Number(releaseFade.resetDelayMs) || 0),
-      ...target,
-    };
-  }
-
-  function resetReleaseFade(options = {}) {
-    const mapping = releaseFadeMapping();
-    const target = releaseFadeTarget(options.targetDeck, mapping);
-    if (!mapping) {
-      return { ok: false, reason: "release-fade-mapping-missing", ...target };
-    }
-    const value = clampMidi(options.value ?? releaseFade.resetValue, 127);
-    const sent = sendNormalizedMapping(releaseFade.mappingName || "releaseFade", {
-      ...mapping,
-      channel: target.targetChannel || mapping.channel,
-      value,
-    }, { ...target, phase: "release-fade-reset" });
-    return { ok: sent, value, reason: sent ? null : "midi-send-failed", ...target };
-  }
-
   function cancelFilterRamp(reason = "cancelled") {
     if (!rampTimer) {
       return false;
     }
-    clearInterval(rampTimer);
+    clearIntervalImpl(rampTimer);
     rampTimer = null;
+    rampGeneration += 1;
     rampStartedAt = 0;
     updateStatus({ rampActive: false, message: `MIDI filter ramp ${reason}` });
     return true;
   }
 
-  function cancelReleaseFade(reason = "cancelled") {
-    if (!releaseFadeTimer) {
-      return false;
-    }
-    clearInterval(releaseFadeTimer);
-    releaseFadeTimer = null;
-    releaseFadeStartedAt = 0;
-    updateStatus({ releaseFadeActive: false, message: `MIDI release fade ${reason}` });
-    return true;
-  }
-
   function stop() {
     if (rampTimer) {
-      clearInterval(rampTimer);
+      clearIntervalImpl(rampTimer);
       rampTimer = null;
     }
-    if (releaseFadeTimer) {
-      clearInterval(releaseFadeTimer);
-      releaseFadeTimer = null;
-    }
+    rampGeneration += 1;
     rampStartedAt = 0;
-    releaseFadeStartedAt = 0;
     releaseOutput(output, opened);
     output = null;
     opened = false;
@@ -549,9 +446,6 @@ function createRekordboxMidi({
       ...status,
       rampActive: Boolean(rampTimer),
       rampStartedAt,
-      releaseFadeActive: Boolean(releaseFadeTimer),
-      releaseFadeStartedAt,
-      releaseFadeConfigured: hasReleaseFade(),
     };
   }
 
@@ -560,15 +454,11 @@ function createRekordboxMidi({
     off: emitter.off.bind(emitter),
     getStatus,
     cancelFilterRamp,
-    cancelReleaseFade,
-    hasReleaseFade,
-    resetReleaseFade,
     resolveTarget,
     sendMapping,
     sendMessage,
     start,
     startFilterRamp,
-    startReleaseFade,
     stop,
   };
 }

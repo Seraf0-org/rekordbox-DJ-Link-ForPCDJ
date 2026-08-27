@@ -115,14 +115,15 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
     },
   },
   releaseMacro: {
-    enabled: false,
+    enabled: true,
+    sequence: "filter-then-stop",
   },
 };
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.6.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.6.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.7.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.7.csv",
   valid: null,
 };
 const djAgentSetupDraft = {
@@ -348,7 +349,9 @@ function renderDjAgentStatus(status) {
       : agent.timelineLoopActive ? "ON" : "OFF";
   }
   if (djAgentReleaseMacroEl) {
-    const sequence = agent.releaseMacroSequence || "parallel";
+    const sequence = agent.releaseMacroSequence === "filter-then-stop"
+      ? "filter-then-stop"
+      : "unavailable";
     const phase = agent.releaseMacroPhase || "idle";
     const reason = agent.releaseMacroReason || "";
     djAgentReleaseMacroEl.textContent = `${sequence} · ${phase}${reason ? ` · ${reason}` : ""}`;
@@ -604,7 +607,7 @@ function normalizeDjAgentConfigTemplate(template) {
     ...(safe.releaseMacro && typeof safe.releaseMacro === "object" && !Array.isArray(safe.releaseMacro)
       ? safe.releaseMacro
       : {}),
-    enabled: false,
+    enabled: true,
   };
   return safe;
 }
@@ -759,7 +762,7 @@ function updateDjAgentConfigPreviewFromDraft() {
     device: midiDevice,
     port: midiPort,
   };
-  safe.releaseMacro = { ...(safe.releaseMacro || {}), enabled: false };
+  safe.releaseMacro = { ...(safe.releaseMacro || {}), enabled: true, sequence: "filter-then-stop" };
   renderDjAgentConfigTemplate(safe);
 }
 

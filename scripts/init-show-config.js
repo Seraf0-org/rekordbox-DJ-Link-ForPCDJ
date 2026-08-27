@@ -2,10 +2,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { validateFilterThenStopShowConfig } = require("../server/dj-agent/config");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.6.example.json");
-const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.6.json`;
+const TEMPLATE_PATH = path.join(PROJECT_ROOT, "config", "dj-agent-v1.1.7.example.json");
+const TARGET_PATH = String.raw`C:\SyndocalShow\dj-agent-v1.1.7.json`;
 const TOKEN_PLACEHOLDER = "<SYNDOCAL_ONE_TIME_TOKEN>";
 
 class ShowConfigInitializationError extends Error {
@@ -42,25 +43,13 @@ function parseAndValidateTemplate(raw) {
     throw new ShowConfigInitializationError("TEMPLATE_INVALID_JSON", "bundled show config template is not valid JSON");
   }
 
-  const valid = config?.enabled === true
-    && config?.syndocal?.enabled === true
-    && config.syndocal.host === "192.168.50.1"
-    && config.syndocal.port === 9100
-    && config.syndocal.path === "/dj-link"
-    && config.syndocal.nic === "192.168.50.2"
-    && config.syndocal.token === TOKEN_PLACEHOLDER
-    && config.syndocal.adapter === "syndocal-envelope-v3"
-    && config.syndocal.heartbeatMs === 5000
-    && config?.pedal?.enabled === true
-    && config?.midi?.enabled === true
-    && config.midi.device === "CustomMIDI1"
-    && Number.isInteger(config.midi.port)
-    && config?.midi?.releaseMacro?.enabled === false;
+  const valid = config?.syndocal?.token === TOKEN_PLACEHOLDER &&
+    validateFilterThenStopShowConfig(config, { allowTokenPlaceholder: true });
 
   if (!valid) {
     throw new ShowConfigInitializationError(
       "TEMPLATE_CONTRACT_MISMATCH",
-      "bundled show config template does not match the strict v1.1.6 contract",
+      "bundled show config template does not match the strict v1.1.7 filter-then-stop contract",
     );
   }
   return config;

@@ -312,7 +312,7 @@ test("release workflow pins Actions, serializes each tag, and revalidates before
   assert.ok(uploadIndex > sealIndex, "release upload must follow the final release seal");
 });
 
-test("release workflow seals the exact v1.1.6 tag, artifacts, and compiler before upload", () => {
+test("release workflow seals the exact v1.1.7 tag, artifacts, and compiler before upload", () => {
   assert.match(RELEASE_WORKFLOW, /runs-on:\s+windows-2025/);
   assert.doesNotMatch(RELEASE_WORKFLOW, /runs-on:\s+windows-latest/);
 
@@ -324,7 +324,7 @@ test("release workflow seals the exact v1.1.6 tag, artifacts, and compiler befor
   assert.match(RELEASE_WORKFLOW, /\$command\.Source -cne \$expected/);
   assert.match(RELEASE_WORKFLOW, /ReparsePoint/);
 
-  assert.match(RELEASE_WORKFLOW, /\$expectedTag = "v1\.1\.6"/);
+  assert.match(RELEASE_WORKFLOW, /\$expectedTag = "v1\.1\.7"/);
   assert.match(RELEASE_WORKFLOW, /\$env:GITHUB_REF_PROTECTED -cne "true"/);
   assert.match(RELEASE_WORKFLOW, /show-ref --verify --hash "refs\/tags\/\$tag"/);
   assert.match(RELEASE_WORKFLOW, /cat-file -t \$tagObject/);
@@ -334,7 +334,7 @@ test("release workflow seals the exact v1.1.6 tag, artifacts, and compiler befor
   assert.match(RELEASE_WORKFLOW, /node scripts\/verify-release-artifacts\.js --project-root \. --expected-tag \$tag/);
   assert.match(RELEASE_WORKFLOW, /tag_name:\s*\$\{\{ github\.ref_name \}\}/);
   assert.match(RELEASE_WORKFLOW, /target_commitish:\s*\$\{\{ github\.sha \}\}/);
-  assert.match(RELEASE_WORKFLOW, /dist\/rb-output-1\.1\.6\.zip/);
+  assert.match(RELEASE_WORKFLOW, /dist\/rb-output-1\.1\.7\.zip/);
   assert.doesNotMatch(RELEASE_WORKFLOW, /dist\/rb-output-\*\.zip/);
 });
 

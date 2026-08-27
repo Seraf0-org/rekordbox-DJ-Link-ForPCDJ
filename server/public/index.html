@@ -250,17 +250,17 @@
           <section class="dj-agent-setup-section" aria-labelledby="djAgentConfigTitle">
             <h2 id="djAgentConfigTitle">Token-free config preview</h2>
             <pre id="djAgentConfigPreview" class="dj-agent-config-preview" aria-label="Token-free DJ Agent config preview">{
-  "enabled": false,
+  "enabled": true,
   "syndocal": { "host": "", "nic": "", "adapter": "", "path": "/dj-link" },
   "midi": { "device": "CustomMIDI1", "port": null },
   "pedal": { "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" } },
-  "releaseMacro": { "enabled": false }
+  "releaseMacro": { "enabled": true, "sequence": "filter-then-stop" }
 }</pre>
             <div class="dj-agent-setup-actions">
               <button id="djAgentConfigDownload" type="button">Download config preview</button>
               <button id="djAgentConfigCopy" type="button">Copy config preview</button>
             </div>
-            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. Release macro remains disabled until physical confirmation.</p>
+            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.7 configuration.</p>
           </section>
         </div>
 
@@ -273,7 +273,7 @@
                 <tr><th scope="col">Pedal</th><th scope="col">Stage 1</th><th scope="col">Stage 2</th></tr>
               </thead>
               <tbody>
-                <tr><th scope="row">F13</th><td>Local Filter → ChannelFader → Cue/Stop, then DJ_RELEASE</td><td>−4 bars BeatJump; no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F13</th><td>Local HPF Filter ramp → planned Cue/Stop, then one DJ_RELEASE</td><td>−4 bars BeatJump; no Rekordbox MIDI</td></tr>
                 <tr><th scope="row">F14</th><td>Local LoopHalf MIDI and DJ_LOOP_STATE</td><td>Absolute loop set from authoritative loopActive; no Rekordbox MIDI</td></tr>
                 <tr><th scope="row">F15</th><td>Inactive</td><td>+4 bars BeatJump; only while authoritative timeline is running</td></tr>
               </tbody>

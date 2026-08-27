@@ -10,11 +10,7 @@ const { spawn } = require("node:child_process");
 const REPO_ROOT = path.join(__dirname, "..");
 const SERVER_ENTRY = path.join(REPO_ROOT, "server", "index.js");
 const fs = require("node:fs");
-
-// Fixed, secret-free deprecation notice emitted by server/dj-agent/config.js
-// whenever env or config-file tries to enable remote actions.
-const DEPRECATION_WARNING =
-  "DJ Agent security notice: DJ_AGENT_ALLOW_REMOTE_ACTIONS/allowRemoteActions is deprecated and ignored; HTTP action endpoints are permanently loopback-only";
+const { STRICT_SHOW_CONFIG_DISABLED_REASON } = require("../server/dj-agent/config");
 
 function nonLoopbackIpv4() {
   for (const entries of Object.values(os.networkInterfaces())) {
@@ -39,12 +35,8 @@ function startServer(t, {
       RB_OUTPUT_HOST: "0.0.0.0",
       HOOK_UDP_ENABLED: "false",
       ABLETON_LINK_ENABLED: "false",
-      DJ_AGENT_ENABLED: "true",
       ...(configFile ? { DJ_AGENT_CONFIG_PATH: configFile } : {}),
-      DJ_AGENT_ALLOW_REMOTE_ACTIONS: allowRemoteEnv ? "true" : "false",
-      SYNDOCAL_ENABLED: "false",
-      MIDI_ENABLED: "false",
-      PEDAL_ENABLED: "false",
+      ...(allowRemoteEnv ? { DJ_AGENT_ALLOW_REMOTE_ACTIONS: "true" } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -176,7 +168,7 @@ test("action HTTP POST and preflight reject cross-site requests without wildcard
   });
   assert.notEqual(local.statusCode, 403);
   assert.equal(local.headers["access-control-allow-origin"], undefined);
-  assert.equal(local.body?.action, "filter-close");
+  assert.equal(local.statusCode, 404);
 
   const sameOrigin = await requestJson("127.0.0.1", port, "/api/dj-agent/actions/filter-close", {
     headers: { Host: host, Origin: origin },
@@ -262,7 +254,7 @@ test("action CORS fence covers every Express-routable path variant without wildc
       403,
       `${variant}: local POST must still reach the action handler`
     );
-    assert.equal(localPost.body?.action, "filter-close", variant);
+    assert.equal(localPost.statusCode, 404, variant);
     assert.equal(localPost.headers["access-control-allow-origin"], undefined, variant);
     assert.notEqual(localPost.headers["access-control-allow-origin"], "*", variant);
 
@@ -340,7 +332,7 @@ test("action CORS fence covers every Express-routable path variant without wildc
   }
 });
 
-test("env DJ_AGENT_ALLOW_REMOTE_ACTIONS=true grants no LAN action access while loopback diagnostics keep working", async (t) => {
+test("env DJ_AGENT_ALLOW_REMOTE_ACTIONS=true keeps the Agent disabled while LAN action access stays fenced", async (t) => {
   const { port } = await startServer(t, { allowRemoteEnv: true });
   const lanAddress = nonLoopbackIpv4();
   assert.ok(lanAddress, "a non-loopback IPv4 NIC is required to prove the fence");
@@ -382,13 +374,13 @@ test("env DJ_AGENT_ALLOW_REMOTE_ACTIONS=true grants no LAN action access while l
   assert.equal(lanPreflight.headers["access-control-allow-origin"], undefined);
   assert.notEqual(lanPreflight.headers["access-control-allow-origin"], "*");
 
-  // Local diagnostics keep working through the same action path.
+  // Loopback reaches the action route but cannot bypass the runtime config gate.
   const localPost = await requestJson("127.0.0.1", port, "/api/dj-agent/actions/filter-close", {
     headers: { Host: `localhost:${port}` },
     body: {},
   });
   assert.notEqual(localPost.statusCode, 403);
-  assert.equal(localPost.body?.action, "filter-close");
+  assert.equal(localPost.statusCode, 404);
   assert.equal(localPost.headers["access-control-allow-origin"], undefined);
 
   // The runtime never reports remote actions as enabled.
@@ -397,7 +389,7 @@ test("env DJ_AGENT_ALLOW_REMOTE_ACTIONS=true grants no LAN action access while l
   assert.equal(status.body?.allowRemoteActions, false);
 });
 
-test("config-file allowRemoteActions:true is inert and the fixed warning leaks no caller values", async (t) => {
+test("invalid config-file content keeps the Agent disabled and leaks no caller values", async (t) => {
   const FILE_MARKER = `file-secret-${Date.now()}-never-echoed`;
   const configPath = path.join(
     os.tmpdir(),
@@ -433,19 +425,20 @@ test("config-file allowRemoteActions:true is inert and the fixed warning leaks n
     body: {},
   });
   assert.notEqual(localPost.statusCode, 403);
-  assert.equal(localPost.body?.action, "loop-half");
+  assert.equal(localPost.statusCode, 404);
 
   const fullStatus = await requestJson("127.0.0.1", port, "/api/status", { method: "GET" });
   assert.equal(fullStatus.statusCode, 200);
   const warnings = Array.isArray(fullStatus.body?.warnings) ? fullStatus.body.warnings : [];
-  const matches = warnings.filter((warning) => warning === DEPRECATION_WARNING);
-  assert.equal(matches.length, 1, "exactly one fixed deprecation warning must be present");
+  const matches = warnings.filter((warning) => warning === STRICT_SHOW_CONFIG_DISABLED_REASON);
+  assert.equal(matches.length, 1, "exactly one fixed disabled reason must be present");
   // The public payload must not echo the config path or any file content.
   assert.equal(fullStatus.raw.includes(configPath), false);
   assert.equal(fullStatus.raw.includes(FILE_MARKER), false);
 
   const agentStatus = await requestJson("127.0.0.1", port, "/api/dj-agent/status", { method: "GET" });
   assert.equal(agentStatus.statusCode, 200);
+  assert.equal(agentStatus.body?.enabled, false);
   assert.equal(agentStatus.body?.allowRemoteActions, false);
 });
 
@@ -548,5 +541,5 @@ test("unrelated read-only LAN surfaces keep wildcard CORS while namespace lookal
     body: {},
   });
   assert.notEqual(localAction.statusCode, 403);
-  assert.equal(localAction.body?.action, "filter-close");
+  assert.equal(localAction.statusCode, 404);
 });

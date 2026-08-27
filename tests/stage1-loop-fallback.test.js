@@ -20,6 +20,16 @@ const { loadDjAgentConfig } = require("../server/dj-agent/config");
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
+function exactFilterThenStopMacro() {
+  return {
+    enabled: true,
+    sequence: "filter-then-stop",
+    filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
+    resetAfterStop: true,
+    resetDelayMs: 0,
+  };
+}
+
 function createTimers() {
   let nextId = 0;
   const pending = new Map();
@@ -426,6 +436,7 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
     getStatus: () => ({ ok: false }),
     resolveTarget: (_mapping, deck) => ({ targetDeck: deck, targetChannel: 1 }),
     sendMapping: () => false,
+    startFilterRamp: () => ({ started: true, ok: true }),
     start() {},
     stop() {},
   };
@@ -435,6 +446,8 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
     midi,
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
     loopFallback: { responseWindowMs: 250, timerApi: timers },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: timers,
   });
   detector.emit("event", {
     type: "DJ_TRACK_ACTIVE",
@@ -469,8 +482,9 @@ test("F14 arms fallback before MIDI failure, while F13 routes release and clears
   assert.equal(timers.size(), 1);
   const release = router.triggerAction("release");
   assert.equal(release.midiSent, false);
-  assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 1);
+  assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 0);
   timers.runAll();
+  assert.equal(sent.filter((event) => event.type === "DJ_RELEASE").length, 1);
   assert.equal(sent.filter((event) => event.type === "DJ_LOOP_FALLBACK").length, 1);
   router.stop();
 });
@@ -519,6 +533,7 @@ test("stopping the router clears an armed F14 fallback before transport shutdown
 });
 
 test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fails", async () => {
+  const timers = createTimers();
   const detector = new EventEmitter();
   detector.getState = () => ({
     currentMasterDeck: 1,
@@ -545,15 +560,12 @@ test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fa
         queueMicrotask(() => options.onComplete({ started: true, ok: true }));
         return { started: true, ok: true, targetDeck: options.targetDeck, targetChannel: 1 };
       },
-      startReleaseFade(options) {
-        queueMicrotask(() => options.onComplete({ started: true, ok: true }));
-        return { started: true, ok: true, targetDeck: options.targetDeck, targetChannel: 1 };
-      },
       start() {},
       stop() {},
     },
     pedal: { getStatus: () => ({}), start() {}, stop() {} },
-    releaseMacro: { enabled: true, sequence: "parallel", filter: {} },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: timers,
   });
   detector.emit("event", { type: "DJ_TRACK_ACTIVE", eventId: "active-1", payload: candidateTrack() });
   client.emit("delivery", {
@@ -563,6 +575,7 @@ test("release macro preserves DJ_RELEASE delivery when its final Stop mapping fa
     ack: { outcome: "accepted" },
   });
   router.triggerAction("release");
+  timers.runAll();
   await new Promise((resolve) => setImmediate(resolve));
   const release = sent.find((event) => event.type === "DJ_RELEASE");
   assert.ok(release);

@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { validToken } = require("./tokenValidation");
 
 function asBoolean(value, fallback = false) {
   if (typeof value === "boolean") {
@@ -89,7 +90,6 @@ function normalizeMidiMappings(mappings) {
     loopHalf: ["loopHalf", "loop_half"],
     stop: ["stop", "release"],
     filter: ["filter", "filterClose", "filter_close"],
-    releaseFade: ["releaseFade", "release_fade", "fade", "channelFader", "channel_fader"],
     masterLevel: ["masterLevel", "master_level"],
     loopOff: ["loopOff", "loop_off"],
     filterReset: ["filterReset", "filter_reset"],
@@ -104,17 +104,71 @@ function normalizeMidiMappings(mappings) {
   return result;
 }
 
-function normalizeReleaseFadeTarget(value) {
-  const normalized = String(value || "deck").trim().toLowerCase().replace(/[_ ]/g, "-");
-  return normalized === "global" || normalized === "master" ? "global" : "deck";
+function normalizeReleaseMacroSequence(value) {
+  return value === "filter-then-stop" ? "filter-then-stop" : null;
 }
 
-function normalizeReleaseMacroSequence(value) {
-  const normalized = String(value || "parallel")
-    .trim()
-    .toLowerCase()
-    .replace(/[_ ]/g, "-");
-  return normalized === "filter-then-fade" ? "filter-then-fade" : "parallel";
+function isPlainRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  if (!isPlainRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasExactValues(value, expected) {
+  return hasExactKeys(value, Object.keys(expected)) && Object.entries(expected).every(
+    ([key, expectedValue]) => value[key] === expectedValue,
+  );
+}
+
+// The controlled source launcher accepts exactly one show schema.  Keep this
+// validator separate from the permissive default-off config loader: its input
+// is the raw external show file and it never returns that file or its token.
+function validateFilterThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
+  if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi"])) return false;
+  if (value.version !== "1.1.7" || value.enabled !== true) return false;
+
+  const syndocal = value.syndocal;
+  if (!hasExactKeys(syndocal, ["enabled", "host", "port", "path", "nic", "token", "adapter", "heartbeatMs"])) return false;
+  if (
+    syndocal.enabled !== true ||
+    syndocal.host !== "192.168.50.1" ||
+    syndocal.port !== 9100 ||
+    syndocal.path !== "/dj-link" ||
+    syndocal.nic !== "192.168.50.2" ||
+    syndocal.adapter !== "syndocal-envelope-v3" ||
+    syndocal.heartbeatMs !== 5000 ||
+    typeof syndocal.token !== "string"
+  ) return false;
+  if (syndocal.token === "<SYNDOCAL_ONE_TIME_TOKEN>") {
+    if (!allowTokenPlaceholder) return false;
+  } else if (!validToken(syndocal.token)) {
+    return false;
+  }
+
+  const pedal = value.pedal;
+  if (!hasExactKeys(pedal, ["enabled", "bindings"]) || pedal.enabled !== true) return false;
+  if (!hasExactValues(pedal.bindings, { release: "F13", loopHalf: "F14", filterClose: "F15" })) return false;
+
+  const midi = value.midi;
+  if (!hasExactKeys(midi, ["enabled", "device", "port", "mappings", "deckChannels", "filter", "releaseFade", "releaseMacro"])) return false;
+  if (midi.enabled !== true || midi.device !== "CustomMIDI1" || !Number.isInteger(midi.port) || midi.port < 0 || midi.port > 4096) return false;
+  if (!hasExactKeys(midi.mappings, ["loopHalf", "stop", "filter"])) return false;
+  if (!hasExactValues(midi.mappings.loopHalf, { channel: 1, messageType: "noteOn", note: 36, value: 127 })) return false;
+  if (!hasExactValues(midi.mappings.stop, { channel: 1, messageType: "noteOn", note: 37, value: 127 })) return false;
+  if (!hasExactValues(midi.mappings.filter, { channel: 1, messageType: "controlChange", cc: 16 })) return false;
+  if (!hasExactValues(midi.deckChannels, { 1: 1, 2: 2 })) return false;
+  const filter = { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50 };
+  if (!hasExactValues(midi.filter, filter)) return false;
+  if (!hasExactValues(midi.releaseFade, { enabled: false })) return false;
+  if (!hasExactKeys(midi.releaseMacro, ["enabled", "sequence", "filter", "resetAfterStop", "resetDelayMs"])) return false;
+  if (midi.releaseMacro.enabled !== true || midi.releaseMacro.sequence !== "filter-then-stop") return false;
+  if (!hasExactValues(midi.releaseMacro.filter, { ...filter, resetValue: 64 })) return false;
+  return midi.releaseMacro.resetAfterStop === true && midi.releaseMacro.resetDelayMs === 0;
 }
 
 function normalizeDeckChannels(value) {
@@ -131,226 +185,194 @@ function normalizeDeckChannels(value) {
   return result;
 }
 
-function loadDjAgentConfig({ env = process.env, fsApi = fs, cwd = process.cwd() } = {}) {
-  const requestedPath = String(env.DJ_AGENT_CONFIG_PATH || "").trim();
-  const inlineConfig = String(env.DJ_AGENT_CONFIG || "").trim();
-  const inlineLooksLikeJson = inlineConfig.startsWith("{") || inlineConfig.startsWith("[");
-  const filePath = requestedPath
-    ? path.resolve(cwd, requestedPath)
-    : inlineConfig && !inlineLooksLikeJson && !/^(true|false|0|1)$/i.test(inlineConfig)
-      ? path.resolve(cwd, inlineConfig)
-      : "";
-  const fileResult = readConfigFile(filePath, fsApi);
-  const fileConfig = pickObject(fileResult.config);
-  const inlineObject = inlineLooksLikeJson ? parseJson(inlineConfig, {}) : {};
-  const merged = {
-    ...fileConfig,
-    ...inlineObject,
-  };
+const STRICT_SHOW_CONFIG_DISABLED_REASON =
+  "DJ Agent disabled: exact external v1.1.7 filter-then-stop configuration is required";
+const RUNTIME_SHOW_OVERRIDE_KEYS = Object.freeze([
+  "DJ_AGENT_CONFIG",
+  "DJ_AGENT_ENABLED",
+  "DJ_AGENT_ALLOW_REMOTE_ACTIONS",
+  "SYNDOCAL_ENABLED",
+  "SYNDOCAL_HOST",
+  "SYNDOCAL_PORT",
+  "SYNDOCAL_PATH",
+  "SYNDOCAL_NIC",
+  "SYNDOCAL_TOKEN",
+  "SYNDOCAL_WS_ADAPTER",
+  "SYNDOCAL_HEARTBEAT_MS",
+  "PEDAL_ENABLED",
+  "PEDAL_MODULE",
+  "MIDI_ENABLED",
+  "MIDI_MODULE",
+  "MIDI_DEVICE",
+  "MIDI_PORT",
+  "MIDI_RELEASE_FADE",
+  "MIDI_RELEASE_MACRO",
+  "MIDI_DECK_CHANNELS",
+]);
 
-  const envEnabled = env.DJ_AGENT_ENABLED;
-  const explicitEnabled = envEnabled != null && String(envEnabled).trim() !== "";
-  const enabled = explicitEnabled
-    ? asBoolean(envEnabled, false)
-    : asBoolean(merged.enabled, false);
+function hasRuntimeShowOverride(env) {
+  return RUNTIME_SHOW_OVERRIDE_KEYS.some((key) => (
+    Object.hasOwn(env, key) && env[key] != null && String(env[key]).trim() !== ""
+  ));
+}
 
-  const syndocalFile = pickObject(merged.syndocal);
-  const syndocalToken = Object.hasOwn(env, "SYNDOCAL_TOKEN")
-    ? env.SYNDOCAL_TOKEN
-    : syndocalFile.token;
-  const pedalFile = pickObject(merged.pedal);
-  const midiFile = pickObject(merged.midi);
-  const releaseFadeValue =
-    env.MIDI_RELEASE_FADE != null && String(env.MIDI_RELEASE_FADE).trim() !== ""
-      ? parseJson(String(env.MIDI_RELEASE_FADE), {})
-      : midiFile.releaseFade || midiFile.release_fade;
-  const releaseFadeFile = pickObject(releaseFadeValue);
-  const rawMidiMappings = pickObject(midiFile.mappings);
-  const hasReleaseFadeMapping = [
-    "releaseFade",
-    "release_fade",
-    "fade",
-    "channelFader",
-    "channel_fader",
-  ].some((name) => rawMidiMappings[name] && typeof rawMidiMappings[name] === "object");
-  const hasFilterMapping = ["filter", "filterClose", "filter_close"].some(
-    (name) => rawMidiMappings[name] && typeof rawMidiMappings[name] === "object"
-  ) || midiFile.filter?.cc != null;
-  const releaseMacroValue =
-    env.MIDI_RELEASE_MACRO != null && String(env.MIDI_RELEASE_MACRO).trim() !== ""
-      ? parseJson(String(env.MIDI_RELEASE_MACRO), {})
-      : midiFile.releaseMacro || midiFile.release_macro;
-  const releaseMacroFile = pickObject(releaseMacroValue);
-  const releaseFadeMappingName = String(
-    releaseFadeFile.mappingName || releaseFadeFile.mapping || (hasReleaseFadeMapping ? "releaseFade" : "")
-  ).trim();
-  const deckChannelsValue =
-    env.MIDI_DECK_CHANNELS != null && String(env.MIDI_DECK_CHANNELS).trim() !== ""
-      ? parseJson(String(env.MIDI_DECK_CHANNELS), {})
-      : midiFile.deckChannels;
-  const midiPortValue =
-    env.MIDI_PORT != null && String(env.MIDI_PORT).trim() !== ""
-      ? env.MIDI_PORT
-      : midiFile.port;
-  const resetFile = pickObject(merged.releaseReset || merged.release_reset);
-  // HTTP diagnostic action endpoints are permanently loopback-only on the DJ
-  // PC; FOH control uses the authenticated /dj-link WebSocket. Any env or
-  // config-file attempt to enable remote actions grants no authority and
-  // yields exactly one fixed, secret-free notice (caller values are never
-  // echoed back).
-  const allowRemoteEnablementAttempted =
-    asBoolean(env.DJ_AGENT_ALLOW_REMOTE_ACTIONS, false)
-    || asBoolean(merged.allowRemoteActions, false);
-  const allowRemoteDeprecationWarning = allowRemoteEnablementAttempted
-    ? "DJ Agent security notice: DJ_AGENT_ALLOW_REMOTE_ACTIONS/allowRemoteActions is deprecated and ignored; HTTP action endpoints are permanently loopback-only"
-    : null;
-  const config = {
-    enabled,
+function disabledDjAgentConfig() {
+  return {
+    enabled: false,
     allowRemoteActions: false,
-    warning: fileResult.warning,
-    allowRemoteDeprecationWarning,
+    warning: STRICT_SHOW_CONFIG_DISABLED_REASON,
+    allowRemoteDeprecationWarning: null,
     syndocal: {
-      enabled: asBoolean(env.SYNDOCAL_ENABLED, asBoolean(syndocalFile.enabled, enabled)),
-      host: String(env.SYNDOCAL_HOST || syndocalFile.host || "127.0.0.1").trim(),
-      port: asNumber(env.SYNDOCAL_PORT || syndocalFile.port, 9100, { min: 1, max: 65535 }),
-      path: String(env.SYNDOCAL_PATH || syndocalFile.path || "/dj-link").trim() || "/dj-link",
-      nic: String(env.SYNDOCAL_NIC || syndocalFile.nic || syndocalFile.networkInterface || "").trim(),
-      // Preserve the token exactly for the client preflight; do not trim,
-      // persist, or log credentials here.
-      token: typeof syndocalToken === "string" ? syndocalToken : "",
-      adapter: String(env.SYNDOCAL_WS_ADAPTER || syndocalFile.adapter || "syndocal-envelope-v3").trim(),
-      reconnectMinMs: asNumber(syndocalFile.reconnectMinMs, 500, { min: 50, max: 60_000 }),
-      reconnectMaxMs: asNumber(syndocalFile.reconnectMaxMs, 10_000, { min: 250, max: 300_000 }),
-      heartbeatMs: asNumber(
-        env.SYNDOCAL_HEARTBEAT_MS ?? syndocalFile.heartbeatMs,
-        5_000,
-        { min: 1_000, max: 300_000 },
-      ),
-      ackTimeoutMs: asNumber(syndocalFile.ackTimeoutMs, 5_000, { min: 100, max: 120_000 }),
+      enabled: false,
+      host: "",
+      port: 9100,
+      path: "/dj-link",
+      nic: "",
+      token: "",
+      adapter: "syndocal-envelope-v3",
+      reconnectMinMs: 500,
+      reconnectMaxMs: 10_000,
+      heartbeatMs: 5_000,
+      ackTimeoutMs: 5_000,
     },
     pedal: {
-      enabled: asBoolean(env.PEDAL_ENABLED, asBoolean(pedalFile.enabled, enabled)),
-      bindings: normalizeBindings(pedalFile.bindings),
-      moduleName: String(env.PEDAL_MODULE || pedalFile.moduleName || "uiohook-napi").trim(),
+      enabled: false,
+      bindings: normalizeBindings({}),
+      moduleName: "uiohook-napi",
     },
     midi: {
-      enabled: asBoolean(env.MIDI_ENABLED, asBoolean(midiFile.enabled, enabled)),
-      moduleName: String(env.MIDI_MODULE || midiFile.moduleName || "@julusian/midi").trim(),
-      device: String(env.MIDI_DEVICE || midiFile.device || "").trim(),
-      port: asNumber(midiPortValue, null, { min: 0, max: 4096 }),
-      deckChannels: normalizeDeckChannels(deckChannelsValue),
-      mappings: normalizeMidiMappings(midiFile.mappings),
-      releaseFade: {
-        enabled: asBoolean(releaseFadeFile.enabled, Boolean(releaseFadeMappingName)),
-        mappingName: releaseFadeMappingName || "releaseFade",
-        target: normalizeReleaseFadeTarget(releaseFadeFile.target || releaseFadeFile.scope),
-        startValue: asNumber(releaseFadeFile.startValue ?? releaseFadeFile.start, 127, { min: 0, max: 127 }),
-        endValue: asNumber(releaseFadeFile.endValue ?? releaseFadeFile.end, 0, { min: 0, max: 127 }),
-        durationMs: asNumber(releaseFadeFile.durationMs ?? releaseFadeFile.duration, 1_000, { min: 1, max: 120_000 }),
-        updateIntervalMs: asNumber(
-          releaseFadeFile.updateIntervalMs ?? releaseFadeFile.updateInterval,
-          50,
-          { min: 1, max: 10_000 }
-        ),
-        resetPolicy: ["restore-after-stop", "restore", "reset"].includes(
-          String(releaseFadeFile.resetPolicy || "").trim().toLowerCase()
-        ) || asBoolean(releaseFadeFile.resetAfterStop, false)
-          ? "restore-after-stop"
-          : "none",
-        resetAfterStop: asBoolean(
-          releaseFadeFile.resetAfterStop,
-          ["restore-after-stop", "restore", "reset"].includes(
-            String(releaseFadeFile.resetPolicy || "").trim().toLowerCase()
-          )
-        ),
-        resetValue: asNumber(releaseFadeFile.resetValue ?? releaseFadeFile.reset, 127, { min: 0, max: 127 }),
-        resetDelayMs: asNumber(releaseFadeFile.resetDelayMs ?? releaseFadeFile.resetDelay, 0, { min: 0, max: 120_000 }),
-      },
+      enabled: false,
+      moduleName: "@julusian/midi",
+      device: "",
+      port: null,
+      deckChannels: {},
+      mappings: {},
+      filter: {},
       releaseMacro: {
-        enabled: asBoolean(
-          releaseMacroFile.enabled,
-          false
-        ),
-        sequence: normalizeReleaseMacroSequence(
-          releaseMacroFile.sequence ?? releaseMacroFile.mode
-        ),
-        filter: {
-          startValue: asNumber(
-            releaseMacroFile.filter?.startValue ?? releaseMacroFile.filterStartValue,
-            64,
-            { min: 0, max: 127 }
-          ),
-          endValue: asNumber(
-            releaseMacroFile.filter?.endValue ?? releaseMacroFile.filterEndValue,
-            127,
-            { min: 0, max: 127 }
-          ),
-          durationMs: asNumber(
-            releaseMacroFile.filter?.durationMs ?? releaseMacroFile.filterDurationMs,
-            1_000,
-            { min: 1, max: 120_000 }
-          ),
-          updateIntervalMs: asNumber(
-            releaseMacroFile.filter?.updateIntervalMs ?? releaseMacroFile.filterUpdateIntervalMs,
-            50,
-            { min: 1, max: 10_000 }
-          ),
-          resetValue: asNumber(
-            releaseMacroFile.filter?.resetValue ?? releaseMacroFile.filterResetValue,
-            64,
-            { min: 0, max: 127 }
-          ),
-        },
-        resetAfterStop: asBoolean(
-          releaseMacroFile.resetAfterStop,
-          asBoolean(releaseMacroFile.enabled, false)
-            ? true
-            : releaseFadeFile.resetAfterStop === true || releaseFadeFile.resetPolicy === "restore-after-stop"
-        ),
-        resetDelayMs: asNumber(
-          releaseMacroFile.resetDelayMs ?? releaseMacroFile.resetDelay,
-          releaseFadeFile.resetDelayMs ?? releaseFadeFile.resetDelay ?? 0,
-          { min: 0, max: 120_000 }
-        ),
+        enabled: false,
+        sequence: null,
+        filter: {},
+        resetAfterStop: false,
+        resetDelayMs: 0,
       },
-      filter: {
-        channel: asNumber(midiFile.filter?.channel, 1, { min: 1, max: 16 }),
-        cc: asNumber(midiFile.filter?.cc, null, { min: 0, max: 127 }),
-        startValue: asNumber(midiFile.filter?.startValue, 127, { min: 0, max: 127 }),
-        endValue: asNumber(midiFile.filter?.endValue, 0, { min: 0, max: 127 }),
-        durationMs: asNumber(midiFile.filter?.durationMs ?? midiFile.filter?.duration, 2_000, { min: 1, max: 120_000 }),
-        updateIntervalMs: asNumber(
-          midiFile.filter?.updateIntervalMs ?? midiFile.filter?.updateInterval,
-          50,
-          { min: 1, max: 10_000 }
-        ),
-      },
-    },
-    releaseReset: {
-      enabled: asBoolean(resetFile.enabled, false),
-      steps: Array.isArray(resetFile.steps)
-        ? resetFile.steps
-            .filter((step) => step && typeof step === "object")
-            .map((step) => ({
-              delayMs: asNumber(step.delayMs ?? step.delay_ms, 0, { min: 0, max: 120_000 }),
-              mapping: String(step.mapping || "").trim(),
-            }))
-            .filter((step) => step.mapping)
-        : [],
     },
   };
-  return config;
+}
+
+function strictShowConfig(source) {
+  return {
+    enabled: true,
+    allowRemoteActions: false,
+    warning: null,
+    allowRemoteDeprecationWarning: null,
+    syndocal: {
+      enabled: true,
+      host: source.syndocal.host,
+      port: source.syndocal.port,
+      path: source.syndocal.path,
+      nic: source.syndocal.nic,
+      token: source.syndocal.token,
+      adapter: source.syndocal.adapter,
+      reconnectMinMs: 500,
+      reconnectMaxMs: 10_000,
+      heartbeatMs: source.syndocal.heartbeatMs,
+      ackTimeoutMs: 5_000,
+    },
+    pedal: {
+      enabled: true,
+      bindings: { ...source.pedal.bindings },
+      moduleName: "uiohook-napi",
+    },
+    midi: {
+      enabled: true,
+      moduleName: "@julusian/midi",
+      device: source.midi.device,
+      port: source.midi.port,
+      deckChannels: { ...source.midi.deckChannels },
+      mappings: {
+        loopHalf: { ...source.midi.mappings.loopHalf },
+        stop: { ...source.midi.mappings.stop },
+        filter: { ...source.midi.mappings.filter },
+      },
+      filter: { ...source.midi.filter },
+      releaseMacro: {
+        enabled: true,
+        sequence: "filter-then-stop",
+        filter: { ...source.midi.releaseMacro.filter },
+        resetAfterStop: true,
+        resetDelayMs: 0,
+      },
+    },
+  };
+}
+
+function realpath(fsApi, target) {
+  const native = fsApi.realpathSync && fsApi.realpathSync.native;
+  if (typeof native === "function") return native(target);
+  if (typeof fsApi.realpathSync === "function") return fsApi.realpathSync(target);
+  return path.resolve(target);
+}
+
+function isWithin(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+}
+
+const REPOSITORY_ROOT = path.resolve(__dirname, "..", "..");
+
+// Direct server starts may use an arbitrary process.cwd(). The external-file
+// boundary must therefore be the module's checkout root, not the caller's
+// working directory. The injected filesystem seam intentionally falls back to
+// its resolved path for pure parser tests that do not model filesystem metadata.
+function resolveStrictExternalShowPath(requestedPath, fsApi, repositoryRoot = REPOSITORY_ROOT) {
+  if (!path.isAbsolute(requestedPath)) return null;
+  if (typeof fsApi.lstatSync !== "function") return path.resolve(requestedPath);
+
+  try {
+    const stat = fsApi.lstatSync(requestedPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const resolvedPath = realpath(fsApi, requestedPath);
+    const resolvedRepositoryRoot = realpath(fsApi, repositoryRoot);
+    return isWithin(resolvedRepositoryRoot, resolvedPath) ? null : resolvedPath;
+  } catch {
+    return null;
+  }
+}
+
+function loadDjAgentConfig({ env = process.env, fsApi = fs, repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const requestedPath = typeof env.DJ_AGENT_CONFIG_PATH === "string"
+    ? env.DJ_AGENT_CONFIG_PATH.trim()
+    : "";
+  if (!requestedPath || hasRuntimeShowOverride(env)) {
+    return disabledDjAgentConfig();
+  }
+
+  const externalPath = resolveStrictExternalShowPath(requestedPath, fsApi, repositoryRoot);
+  if (!externalPath) return disabledDjAgentConfig();
+
+  const fileResult = readConfigFile(externalPath, fsApi);
+  if (fileResult.warning || !validateFilterThenStopShowConfig(fileResult.config)) {
+    return disabledDjAgentConfig();
+  }
+  return strictShowConfig(fileResult.config);
 }
 
 module.exports = {
+  STRICT_SHOW_CONFIG_DISABLED_REASON,
+  RUNTIME_SHOW_OVERRIDE_KEYS,
+  REPOSITORY_ROOT,
   asBoolean,
   asNumber,
+  disabledDjAgentConfig,
+  hasRuntimeShowOverride,
   loadDjAgentConfig,
-  normalizeReleaseFadeTarget,
   normalizeReleaseMacroSequence,
+  resolveStrictExternalShowPath,
   normalizeDeckChannels,
   normalizeBindings,
   normalizeMidiMappings,
   parseJson,
   readConfigFile,
+  strictShowConfig,
+  validateFilterThenStopShowConfig,
 };

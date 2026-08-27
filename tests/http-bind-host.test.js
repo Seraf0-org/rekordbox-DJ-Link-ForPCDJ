@@ -6,6 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
+const { RUNTIME_SHOW_OVERRIDE_KEYS } = require("../server/dj-agent/config");
 
 const REPO_ROOT = path.join(__dirname, "..");
 const SERVER_ENTRY = path.join(REPO_ROOT, "server", "index.js");
@@ -16,8 +17,8 @@ function serverEnvironment(requestedHost) {
     PORT: "0",
     HOOK_UDP_ENABLED: "false",
     ABLETON_LINK_ENABLED: "false",
-    DJ_AGENT_ENABLED: "false",
   };
+  for (const key of [...RUNTIME_SHOW_OVERRIDE_KEYS, "DJ_AGENT_CONFIG_PATH"]) delete env[key];
   if (requestedHost === undefined) {
     delete env.RB_OUTPUT_HOST;
   } else {

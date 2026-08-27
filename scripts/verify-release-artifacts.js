@@ -24,7 +24,7 @@ const {
   validatePackagedIdentity,
 } = require("../server/buildIdentity");
 
-const EXPECTED_PRODUCT_VERSION = "1.1.6";
+const EXPECTED_PRODUCT_VERSION = "1.1.7";
 const EXPECTED_RELEASE_TAG = `v${EXPECTED_PRODUCT_VERSION}`;
 const EXPECTED_ARTIFACT_PATHS = Object.freeze([
   "dist/DJLinkForPCDJ-setup.exe",

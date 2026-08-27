@@ -1,6 +1,7 @@
 const { EventEmitter } = require("node:events");
 const crypto = require("node:crypto");
 const { exactFallbackPayload } = require("./stage1LoopFallback");
+const { hasUnicodeControl, validToken } = require("./tokenValidation");
 
 function makeId() {
   return typeof crypto.randomUUID === "function"
@@ -33,7 +34,6 @@ const DEFAULT_DELIVERY_HISTORY_MAX = 256;
 const DEFAULT_MAX_PENDING_ACKS = 256;
 const DEFAULT_PHYSICAL_EVENT_ID_REGISTRY_MAX = 262_144;
 const MAX_STRING_UTF8_BYTES = 256;
-const MIN_TOKEN_UTF8_BYTES = 32;
 let processControlIdCounter = 0;
 
 function makeControlId() {
@@ -42,23 +42,6 @@ function makeControlId() {
   }
   processControlIdCounter += 1;
   return `control-${processControlIdCounter}-${makeId()}`;
-}
-
-function hasUnicodeControl(value) {
-  if (/\p{Cc}/u.test(value)) {
-    return true;
-  }
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) return true;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function isPlainRecord(value) {
@@ -263,20 +246,6 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
     adapterObject: null,
     error: UNRECOGNIZED_ADAPTER_ERROR,
   };
-}
-
-function validToken(value) {
-  if (
-    typeof value !== "string" ||
-    !value ||
-    value.trim() !== value ||
-    /\s/u.test(value) ||
-    hasUnicodeControl(value)
-  ) {
-    return false;
-  }
-  const byteLength = Buffer.byteLength(value, "utf8");
-  return byteLength >= MIN_TOKEN_UTF8_BYTES && byteLength <= MAX_STRING_UTF8_BYTES;
 }
 
 const ENVELOPE_V3_PROTOCOL_VERSION = 3;

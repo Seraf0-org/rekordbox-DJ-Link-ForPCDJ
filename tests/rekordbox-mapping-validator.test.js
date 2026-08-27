@@ -15,7 +15,6 @@ const VALID_CSV = [
   "@file,1,CustomMIDI1",
   "CFXParameterCH1,,KnobSlider,B010,,,,,,,,,,Fast;,",
   "CFXParameterCH2,,KnobSlider,B110,,,,,,,,,,Fast;,",
-  "ChannelFader,,KnobSlider,,B011,B111,,,,,,,,Fast;,",
   "Cue,,Button,,9025,9125,,,,9025,9125,,,Fast;Blink=500;Priority=50;,",
   "LoopHalf,,Button,,9024,9124,,,,9024,9124,,,Fast;,",
 ].join("\r\n") + "\r\n";
@@ -41,8 +40,6 @@ test("validates the reviewed 15-field CustomMIDI1 contract and returns semantic 
     controller: 16,
     code: "B110",
   });
-  assert.equal(result.summary.mappings.ChannelFader.channel1.controller, 17);
-  assert.equal(result.summary.mappings.ChannelFader.channel2.controller, 17);
   assert.equal(result.summary.mappings.Cue.channel1.note, 37);
   assert.equal(result.summary.mappings.Cue.channel2.note, 37);
   assert.equal(result.summary.mappings.LoopHalf.channel1.note, 36);

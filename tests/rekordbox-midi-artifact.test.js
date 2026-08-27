@@ -15,7 +15,7 @@ const ARTIFACT = path.join(
   "server",
   "public",
   "setup",
-  "CustomMIDI1-Syndocal-v1.1.6.csv",
+  "CustomMIDI1-Syndocal-v1.1.7.csv",
 );
 
 test("bundled CustomMIDI1 mapping matches the reviewed rekordbox setup contract", () => {
@@ -41,13 +41,11 @@ test("bundled CustomMIDI1 mapping matches the reviewed rekordbox setup contract"
   assert.deepEqual([...mappings.keys()], [
     "CFXParameterCH1",
     "CFXParameterCH2",
-    "ChannelFader",
     "Cue",
     "LoopHalf",
   ]);
   assert.equal(mappings.get("CFXParameterCH1")[3], "B010");
   assert.equal(mappings.get("CFXParameterCH2")[3], "B110");
-  assert.deepEqual(mappings.get("ChannelFader").slice(4, 6), ["B011", "B111"]);
   assert.deepEqual(mappings.get("Cue").slice(4, 6), ["9025", "9125"]);
   assert.deepEqual(mappings.get("LoopHalf").slice(4, 6), ["9024", "9124"]);
 });

@@ -61,7 +61,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.6.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.7.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -177,7 +177,7 @@ const state = {
       state: DJ_AGENT_CONFIG.enabled ? "not-started" : "disabled",
       message: DJ_AGENT_CONFIG.enabled
         ? "DJ Agent not started"
-        : "DJ Agent extension disabled by config",
+        : DJ_AGENT_CONFIG.warning || "DJ Agent extension disabled by config",
       updatedAt: null,
       syndocal: null,
       midi: null,
@@ -190,7 +190,7 @@ const state = {
       timelineSnapshotReady: false,
       lastTimelineAction: null,
       lastTimelineWarning: null,
-      releaseMacroSequence: "parallel",
+      releaseMacroSequence: "filter-then-stop",
       releaseMacroPhase: "idle",
       releaseMacroReason: null,
       releaseMacroActive: false,
@@ -1053,7 +1053,6 @@ const djAgentMidi = createRekordboxMidi({
   port: DJ_AGENT_CONFIG.midi.port,
   deckChannels: DJ_AGENT_CONFIG.midi.deckChannels,
   mappings: DJ_AGENT_CONFIG.midi.mappings,
-  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
   filter: DJ_AGENT_CONFIG.midi.filter,
 });
 let djAgentRouter = null;
@@ -1068,7 +1067,6 @@ djAgentRouter = createShowEventRouter({
   syndocalClient: djAgentSyndocalClient,
   midi: djAgentMidi,
   pedal: djAgentPedal,
-  releaseReset: DJ_AGENT_CONFIG.releaseReset,
   releaseMacro: DJ_AGENT_CONFIG.midi.releaseMacro,
 });
 
@@ -1083,7 +1081,7 @@ function updateDjAgentStatus() {
     state: enabled ? syndocal.state || "not-started" : "disabled",
     message: enabled
       ? syndocal.message || "DJ Agent running"
-      : "DJ Agent extension disabled by config",
+      : DJ_AGENT_CONFIG.warning || "DJ Agent extension disabled by config",
     syndocal,
     midi: routerStatus.midi,
     pedal: routerStatus.pedal,
@@ -1099,6 +1097,7 @@ function updateDjAgentStatus() {
     releaseMacroPhase: routerStatus.releaseMacroPhase,
     releaseMacroReason: routerStatus.releaseMacroReason,
     releaseMacroActive: routerStatus.releaseMacroActive,
+    lastReleaseReset: routerStatus.lastReleaseReset,
     lastAction: routerStatus.lastAction || state.status.djAgent.lastAction || null,
     loopDivision: routerStatus.loopDivision,
     released: routerStatus.released,
@@ -1161,7 +1160,7 @@ djAgentRouter.on("event", (event) => {
     state.status.djAgent.lastAction = {
       ...state.status.djAgent.lastAction,
       delivery: event.delivery,
-      ok: deliveryState === "acknowledged" && (
+      ok: !state.status.djAgent.lastAction.localFailure && deliveryState === "acknowledged" && (
         state.status.djAgent.lastAction.mode === "timeline-control" ||
         state.status.djAgent.lastAction.midiSent !== false
       ),
@@ -1172,7 +1171,8 @@ djAgentRouter.on("event", (event) => {
             ["send-failed", "rejected", "timed-out"].includes(deliveryState)
           ? "failed"
         : state.status.djAgent.lastAction.phase,
-      reason: deliveryState === "acknowledged" ? null : event.delivery?.reason || deliveryState,
+      reason: state.status.djAgent.lastAction.localFailure ||
+        (deliveryState === "acknowledged" ? null : event.delivery?.reason || deliveryState),
     };
   }
   if (
@@ -1807,22 +1807,12 @@ function buildDjAgentSetupSnapshot() {
           loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
           stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
           filter: { channel: 1, messageType: "controlChange", cc: 16 },
-          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
         },
-        releaseFade: {
-          enabled: true,
-          mapping: "releaseFade",
-          target: "deck",
-          startValue: 127,
-          endValue: 0,
-          durationMs: 1_000,
-          updateIntervalMs: 50,
-          resetAfterStop: true,
-          resetValue: 127,
-        },
+        filter: { startValue: 64, endValue: 127, durationMs: 1_000, updateIntervalMs: 50 },
+        releaseFade: { enabled: false },
         releaseMacro: {
-          enabled: false,
-          sequence: "filter-then-fade",
+          enabled: true,
+          sequence: "filter-then-stop",
           filter: {
             startValue: 64,
             endValue: 127,
@@ -1831,6 +1821,7 @@ function buildDjAgentSetupSnapshot() {
             resetValue: 64,
           },
           resetAfterStop: true,
+          resetDelayMs: 0,
         },
       },
     },
@@ -1868,7 +1859,7 @@ function handleDjAgentAction(action, _req, res) {
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
-      error: "DJ Agent extension is disabled; set DJ_AGENT_ENABLED=true or use DJ_AGENT_CONFIG_PATH",
+      error: "DJ Agent extension is disabled; exact external v1.1.7 filter-then-stop configuration is required",
     });
     return;
   }

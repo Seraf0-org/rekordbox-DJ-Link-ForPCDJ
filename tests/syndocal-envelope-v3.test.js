@@ -17,6 +17,19 @@ const { createHookUdpProvider } = require("../server/providers/hookUdpProvider")
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 const NOW = Date.parse("2026-08-25T00:00:00.000Z");
 const ENVELOPE_FIELDS = ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"];
+const EXACT_RELEASE_MACRO = Object.freeze({
+  enabled: true,
+  sequence: "filter-then-stop",
+  filter: Object.freeze({
+    startValue: 64,
+    endValue: 127,
+    durationMs: 1_000,
+    updateIntervalMs: 50,
+    resetValue: 64,
+  }),
+  resetAfterStop: true,
+  resetDelayMs: 0,
+});
 
 function assertV3Frame(frame, type) {
   assert.deepEqual(Object.keys(frame).sort(), [...ENVELOPE_FIELDS].sort());
@@ -1952,6 +1965,25 @@ test("ACK v3 schema rejects missing, extra, stale, and nonfinite fields", () => 
 });
 
 function createFakeRouter() {
+  const timerTasks = [];
+  const timerApi = {
+    setTimeout(callback, delayMs) {
+      const task = { callback, delayMs, cleared: false };
+      timerTasks.push(task);
+      return task;
+    },
+    clearTimeout(task) {
+      task.cleared = true;
+    },
+    runNext() {
+      const task = timerTasks
+        .filter((entry) => !entry.cleared)
+        .sort((left, right) => left.delayMs - right.delayMs)[0];
+      assert.ok(task, "expected a scheduled router timer");
+      task.cleared = true;
+      task.callback();
+    },
+  };
   const detector = new EventEmitter();
   detector.state = {
     currentMasterDeck: 1,
@@ -1983,13 +2015,27 @@ function createFakeRouter() {
     sent: [],
     resolveTarget: (_mapping, deck) => ({ targetDeck: deck, targetChannel: 1 }),
     sendMapping(mapping) { this.sent.push(mapping); return true; },
+    startFilterRamp(options) {
+      this.sent.push("filterRamp");
+      options.onComplete?.({ targetDeck: options.targetDeck, targetChannel: 1 });
+      return { started: true, ok: true, targetDeck: options.targetDeck, targetChannel: 1 };
+    },
+    cancelFilterRamp() {},
     getStatus: () => ({}),
     start() {},
     stop() {},
   };
   const pedal = { start() {}, stop() {}, getStatus: () => ({}) };
-  const router = createShowEventRouter({ detector, syndocalClient: client, midi, pedal, now: () => NOW });
-  return { detector, client, midi, router };
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal,
+    releaseMacro: EXACT_RELEASE_MACRO,
+    timerApi,
+    now: () => NOW,
+  });
+  return { detector, client, midi, router, timerApi };
 }
 
 test("router admits one per-deck candidate only after terminal ACTIVE ACK", () => {
@@ -2106,7 +2152,7 @@ test("router flushes an initial measured loop after delayed candidate ACTIVE ACK
 });
 
 test("router fails closed for unaccepted, malformed, competing, and released candidates", () => {
-  const { detector, client, router } = createFakeRouter();
+  const { detector, client, router, timerApi } = createFakeRouter();
   const candidate = (suffix, deck = 2) => strictCandidateTrackPayload({
     deck,
     deckId: `rekordbox-deck-${deck}`,
@@ -2149,6 +2195,7 @@ test("router fails closed for unaccepted, malformed, competing, and released can
   assert.equal(client.sent.length, sentBeforeMalformed);
 
   router.triggerAction("release");
+  timerApi.runNext();
   assert.equal(router.getStateSync().released, true);
   client.emit("delivery", {
     eventId: "accepted-owner",
@@ -2190,7 +2237,7 @@ test("router reannounces fresh candidates only after each connection's timeline-
 });
 
 test("router never revives a released session during a reconnect reannouncement", () => {
-  const { detector, client, router } = createFakeRouter();
+  const { detector, client, router, timerApi } = createFakeRouter();
   const candidate = strictCandidateTrackPayload({ playSessionId: "released-reannounce-session" });
   let reannounceCalls = 0;
   detector.requestCurrentTrackCandidates = () => {
@@ -2211,6 +2258,7 @@ test("router never revives a released session during a reconnect reannouncement"
   });
   assert.equal(router.getStateSync().activePlaySessionId, candidate.playSessionId);
   router.triggerAction("release");
+  timerApi.runNext();
   assert.equal(router.getStateSync().released, true);
 
   client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
@@ -2225,7 +2273,7 @@ test("router never revives a released session during a reconnect reannouncement"
 });
 
 test("pedal ownership changes only after correlated release and late sync cannot reacquire", () => {
-  const { detector, client, midi, router } = createFakeRouter();
+  const { detector, client, midi, router, timerApi } = createFakeRouter();
   const candidate = strictCandidateTrackPayload();
   detector.emit("event", {
     type: "DJ_TRACK_ACTIVE",
@@ -2252,7 +2300,10 @@ test("pedal ownership changes only after correlated release and late sync cannot
   assert.deepEqual(midi.sent, ["loopHalf"]);
 
   const release = router.triggerAction("release");
-  assert.equal(release.mode, "handoff-pending");
+  assert.equal(release.phase, "filter-ramp");
+  timerApi.runNext();
+  assert.equal(router.getStatus().mode, "handoff-pending");
+  const releaseDelivery = router.getStatus().lastAction.delivery;
   const releaseEvent = client.sent.find((event) => event.type === "DJ_RELEASE");
   assert.deepEqual(releaseEvent.payload, {
     state: "released",
@@ -2280,9 +2331,9 @@ test("pedal ownership changes only after correlated release and late sync cannot
     ...strictTimelineState({
       playSessionId: candidate.playSessionId,
       pedalOwner: "timeline",
-      releaseEventId: releaseEvent.eventId || release.delivery.eventId,
+      releaseEventId: releaseDelivery.eventId,
     }).payload,
-    releaseEventId: release.delivery.eventId,
+    releaseEventId: releaseDelivery.eventId,
     type: "DJ_TIMELINE_STATE",
   });
   assert.equal(router.getStatus().mode, "timeline-control");

@@ -4,7 +4,6 @@ const FIELD_COUNT = 15;
 const REQUIRED_ROWS = Object.freeze([
   "CFXParameterCH1",
   "CFXParameterCH2",
-  "ChannelFader",
   "Cue",
   "LoopHalf",
 ]);
@@ -13,7 +12,6 @@ const EXPECTED_HEADER = Object.freeze(["@file", "1", "CustomMIDI1"]);
 const EXPECTED_FIELDS = Object.freeze({
   CFXParameterCH1: Object.freeze({ 3: "B010" }),
   CFXParameterCH2: Object.freeze({ 3: "B110" }),
-  ChannelFader: Object.freeze({ 4: "B011", 5: "B111" }),
   Cue: Object.freeze({ 4: "9025", 5: "9125", 9: "9025", 10: "9125" }),
   LoopHalf: Object.freeze({ 4: "9024", 5: "9124", 9: "9024", 10: "9124" }),
 });
@@ -22,7 +20,6 @@ const CANONICAL_STRING = [
   "@file|1|CustomMIDI1",
   "CFXParameterCH1|B010",
   "CFXParameterCH2|B110",
-  "ChannelFader|B011|B111",
   "Cue|9025|9125|9025|9125",
   "LoopHalf|9024|9124|9024|9124",
 ].join("\n");
@@ -115,8 +112,6 @@ function decodeMidiCode(code) {
 function buildSemanticSummary() {
   const cfxCh1 = decodeMidiCode("B010");
   const cfxCh2 = decodeMidiCode("B110");
-  const faderCh1 = decodeMidiCode("B011");
-  const faderCh2 = decodeMidiCode("B111");
   const cueCh1 = decodeMidiCode("9025");
   const cueCh2 = decodeMidiCode("9125");
   const loopCh1 = decodeMidiCode("9024");
@@ -127,7 +122,6 @@ function buildSemanticSummary() {
     mappings: {
       CFXParameterCH1: cfxCh1,
       CFXParameterCH2: cfxCh2,
-      ChannelFader: { channel1: faderCh1, channel2: faderCh2 },
       Cue: { channel1: cueCh1, channel2: cueCh2 },
       LoopHalf: { channel1: loopCh1, channel2: loopCh2 },
     },

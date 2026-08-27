@@ -34,7 +34,7 @@ test("first-run setup card is always present and exposes read-only setup surface
   assert.match(card, /F13/);
   assert.match(card, /F14/);
   assert.match(card, /F15/);
-  assert.match(card, /releaseMacro[^]*enabled[^]*false/);
+  assert.match(card, /releaseMacro[^]*enabled[^]*true[^]*filter-then-stop/);
   assert.match(card, /does not install drivers/);
   assert.match(card, /not persisted, sent to the server, or stored in localStorage/);
 });
@@ -48,7 +48,7 @@ test("setup client uses only local GET, handles remote/403 gracefully, and has n
   assert.match(app, /option\.dataset\.interfaceName = name/);
   assert.doesNotMatch(app, /const value = name \|\| address/);
   assert.match(app, /configTemplate/);
-  assert.match(app, /releaseMacro[\s\S]{0,160}enabled: false/);
+  assert.match(app, /releaseMacro[\s\S]{0,160}enabled: true/);
   const setupBlock = app.slice(app.indexOf("function isLocalDjAgentHost"), app.indexOf("function renderWarnings"));
   assert.equal(setupBlock.includes("localStorage"), false);
   assert.equal(setupBlock.includes('method: "POST"'), false);

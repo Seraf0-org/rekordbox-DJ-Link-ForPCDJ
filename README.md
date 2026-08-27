@@ -4,27 +4,26 @@ Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシ�
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
-## Current show-source authority — v1.1.6 any-deck strict v3 (2026-08-26)
+## Current show-source authority — v1.1.7 any-deck strict v3 (2026-08-27)
 
 The only current Syndocal adapter is `syndocal-envelope-v3`; every frame is the
 exact `{v:3,type,agentId,sessionId,sequence,eventId,payload}` shape. Flat, v1,
 and v2 adapters/frames are retired and fail closed. Product source metadata is
-`1.1.6`; no v1.1.6 installer/tag/public release or hardware acceptance is
+`1.1.7`; no v1.1.7 installer/tag/public release or hardware acceptance is
 claimed here. Use an approved source checkout, an external
 `DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. The only tracked
-token-free template is `config/dj-agent-v1.1.6.example.json`; exact
+token-free template is `config/dj-agent-v1.1.7.example.json`; exact
 `start-all.bat --init-config` creates only
-`C:\SyndocalShow\dj-agent-v1.1.6.json` when absent. It never overwrites,
+`C:\SyndocalShow\dj-agent-v1.1.7.json` when absent. It never overwrites,
 copies, deletes, or reads the deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`, and it performs no build, server,
 Rekordbox, or injection action.
 
-The exact v1.1.6 source implementation checkpoint is
-`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`. On 2026-08-27 the full Node
-suite completed with 406 tests: 404 passed, 0 failed, and the 2 explicitly
-real-packaging-only cases remained skipped. Independent adversarial review
-reported no P0/P1/P2 finding. This is source evidence only: the target DJ PC
-has not yet been updated to v1.1.6 and the physical HW-4 matrix remains 0/12.
+The controlled v1.1.7 source change is based on docs tip
+`789f7724a699324cd87171ef835b69486bcd4e70`, whose runtime checkpoint is
+`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`. It is a software-reviewed source
+candidate pending final independent review; it does not claim an installer, tag, deployment,
+or physical acceptance. The HW-4 matrix remains 0/12.
 
 An exact mapped track may now be admitted from **any actually playing
 Rekordbox deck**. `DJ_TRACK_ACTIVE` is emitted once per admitted deck,
@@ -36,7 +35,7 @@ SYNC identity.
 Rekordbox MASTER/master-change remains diagnostic and never grants show-control
 ownership. An unmapped, foreign, stale, conflicting, or ambiguous candidate
 fails closed without replacing the admitted owner. The current operator import
-artifact is `server/public/setup/CustomMIDI1-Syndocal-v1.1.6.csv`; the
+artifact is `server/public/setup/CustomMIDI1-Syndocal-v1.1.7.csv`; the
 v1.1.5 CSV/config and its deployed observations are historical evidence only.
 
 Stage 1 separates Rekordbox MIDI from Syndocal delivery. Physical F14 arms the
@@ -44,9 +43,13 @@ response window before the MIDI send. Fresh measured Rekordbox loop state is
 primary. Only true no-response emits `DJ_LOOP_FALLBACK`, using
 `8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64` and stopping only at
 `1/64`. Invalid, stale, or contradictory same-lineage responses suppress the
-fallback, and a late fresh measurement rebases it. Physical F13 sends one
-correlated `DJ_RELEASE` even when local Stop MIDI fails, so the Rekordbox and
-Syndocal results stay independently visible. These are software gates only;
+fallback, and a late fresh measurement rebases it. Physical F13 schedules its
+completion, ramps only owner-deck Filter HPF (64→127 for 1000ms), tries Cue/Stop
+once at that planned completion, then routes one correlated `DJ_RELEASE`
+independently of Filter/Stop local success. It sends only the configured Filter,
+the best-effort Filter reset occurs only after Release has been routed and
+cannot block it. ACK alone never enters Stage 2; only authoritative correlated
+running state does, and Stage 2 sends zero MIDI. These are software gates only;
 controller/pedal/Rekordbox/wired-Syndocal acceptance remains exactly **0/12**.
 Each fallback carries a monotonic `pedalIntentId` plus the exact measured
 revision and effective loop-division base. The strict-v3 sender nests measured
@@ -58,7 +61,7 @@ wire shape is rejected.
 公開済みimmutable v1.1.3は履歴・provenance evidenceだけです。内部の
 `DJ_MASTER_CHANGED` mismatchがstrict-v2 clean-breakのnegative proofを阻むため、
 現行final artifactとしてinstall、接続、受入れに使ってはなりません。現在の実行可能な
-operator guidanceは、この履歴節ではなく上記v1.1.6 any-deck strict-v3節だけを使います。
+operator guidanceは、この履歴節ではなく上記v1.1.7 any-deck strict-v3節だけを使います。
 
 Syndocal公演同期を`syndocal-envelope-v2`へclean breakし、配布物の真正性検証
 （provenance）も大幅に強化しました。
@@ -115,7 +118,7 @@ Learn/CustomMIDI1へoperatorが手動でimportします。driver、virtual MIDI�
 Elgato/Stream Deckの外部操作は自動実行せず、画面上のguided confirmationの対象です。
 カード上で案内する入力はSyndocal host、local NIC、MIDI output、adapterです。
 CSVの検証済み要点は `CFXParameterCH1=B010`、`CFXParameterCH2=B110`、
-`ChannelFader=B011/B111`、`Cue=9025/9125`、`LoopHalf=9024/9124`です。
+`Cue=9025/9125`、`LoopHalf=9024/9124`です。
 
 MIDI outputは、列挙された同一optionの非空device nameとsafe integer portが一致した
 場合だけ既存選択を反映します。`null`/空/boolean/数値文字列をportとしてseedせず、
@@ -169,8 +172,7 @@ DJ Agent拡張を強化しました。
 * DJ Agentは既定OFFのoptional拡張として統合。未接続のSyndocal、MIDI、または
   global hotkey adapterがあっても本体の起動を妨げません。
 * master deckに応じたdeck-aware MIDI channel routingを追加。
-* ペダルを2段階制御化。Stage 1はF13の設定可能なHP→ChannelFader fade→Cue/Stop
-  （`filter-then-fade`、従来互換のparallelも選択可）、
+* ペダルを2段階制御化した過去の設計記録。現行のmacro/CC設定として再利用しないこと。
   F14のLoopHalf、F15のinactive。authoritative timelineがrunningになるStage 2では、
   F13/F15が±4 bars、F14がabsolute loop toggleとなり、Rekordbox MIDIは送信しません。
 * Syndocal handoffはtimeline-controlだけをsnapshot待ち・切断・再接続時にfail-closedにし、eventId/sequence/
@@ -186,125 +188,24 @@ adapterの未接続時継続起動です。2026-08-23に `npm run build:dist` �
 バージョン固有のhook署名、CustomMIDI1の物理Learn、Loop意味論、Syndocal/KDMXとの
 相互運用は、対象環境での実機受入試験が別途必要です。
 
-## DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff (2026-08-26)
+## DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 record (2026-08-26)
 
-This is the deployed v1.1.5 controlled-source handoff and its recorded
-software/hardware evidence. It is retained unchanged for provenance, not as
-current or next operator guidance. Do not run its commands, re-use its config,
-or infer current any-deck acceptance from it; use the v1.1.6 authority above
-and the v1.1.6 source-launch guidance below.
+The v1.1.5 controlled-source handoff, checkpoint
+`ffd013c91f23df6ced84cd6daabc97266993dc34`, and its 0/12 hardware observations
+are retained only as provenance. They are not a launch, configuration, token,
+or acceptance procedure. The previously documented commands, historical path,
+and twelve-row wake/acceptance sequence are intentionally omitted so this
+record cannot be executed or mistaken for current guidance.
 
-The historical show path was deliberately **source only**, not a public distribution.
-Runtime checkpoint H is the exact full commit
-`ffd013c91f23df6ced84cd6daabc97266993dc34` on branch `beta-v1.1.2` (product
-source version `1.1.5`). Docs-only commits changing exactly `README.md`,
-`SYNDOCAL_PEDAL_HANDOFF.md`, and `API.md` may follow H, so the proof must
-never require `HEAD == H`; it verifies ancestry plus an all-docs diff instead.
-Before each controlled source acceptance, prove the checkout at runtime:
-
-```powershell
-git fetch origin
-$checkpointH = "ffd013c91f23df6ced84cd6daabc97266993dc34"
-$docsAllowlist = @("README.md", "SYNDOCAL_PEDAL_HANDOFF.md", "API.md")
-if (([string](git branch --show-current)).Trim() -ne "beta-v1.1.2") { throw "wrong source branch" }
-$dirty = @(git status --porcelain)
-if ($dirty.Count -ne 0) { throw "source checkout is not clean" }
-$head = ([string](git rev-parse HEAD)).Trim()
-$upstream = ([string](git rev-parse origin/beta-v1.1.2)).Trim()
-if ($head -ne $upstream) {
-  throw "HEAD is not upstream-equal on beta-v1.1.2"
-}
-git merge-base --is-ancestor $checkpointH HEAD
-if ($LASTEXITCODE -ne 0) {
-  throw "checkpoint H is not an ancestor of HEAD"
-}
-$outside = @((git diff --name-only "$checkpointH..HEAD") | Where-Object { $docsAllowlist -notcontains $_ })
-if ($outside.Count -ne 0) {
-  throw "non-allowlisted path changed since checkpoint H"
-}
-```
-
-Expected result: the script exits `0`; branch is `beta-v1.1.2`, the checkout
-is clean, `HEAD` equals `origin/beta-v1.1.2`,
-`git merge-base --is-ancestor H HEAD` succeeds, and
-`git diff --name-only H..HEAD` contains only the exact allowlist
-`README.md`, `SYNDOCAL_PEDAL_HANDOFF.md`, `API.md` and no other path.
-Any other result is a failed source acceptance; do not launch or substitute a
-different checkout.
-
-Checkpoint H's recorded software gates are: config initializer + launcher +
-security focused suite 46/46 pass, full `npm test` 393 total / 391 pass /
-0 fail / 2 intentional package-smoke skips, and first-party warnings 0. The
-Stage 1 + strict-v3 focused suite remains 33/33 pass. The Stage 1 contract covers
-the full `8 → 4 → 2 → 1 → 1/2 → 1/4 → 1/8 → 1/16 → 1/32 → 1/64` profile;
-`1/64` is the only floor. These are source-level gates only; hardware acceptance
-remains **0/12** and is not closed by them.
-
-The immutable `v1.1.3` tag and installer are blocked for current acceptance because
-of the `DJ_MASTER_CHANGED` wire mismatch. Do not install, launch, or use their
-shortcuts as a substitute. `v1.1.5` has no tag, identity-bound installer, or GitHub
-Release yet; general-public distribution is explicitly incomplete. The current
-show therefore requires neither an installer nor a packaged exe; only the
-proven source checkout below is used.
-
-For the 2026-08-30 controlled source-acceptance exception, use only the target
-DJ PC's proven checkout, a checkout-external config file, and the current
-Syndocal one-time token:
-
-```powershell
-.\start-all.bat --init-config
-# Edit C:\SyndocalShow\dj-agent-v1.1.5.json:
-# replace only <SYNDOCAL_ONE_TIME_TOKEN> and verify the exact CustomMIDI1 port.
-$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.5.json"
-.\start-all.bat --preflight-only
-.\start-all.bat
-```
-
-`start-all.bat` is the sole source-launch path, not an installer. Run it with
-**no arguments** for production. Two exact lowercase, no-side-effect utilities
-are also accepted: `--init-config` exclusively creates the token-free external
-file and refuses every existing target, while `--preflight-only` runs the same
-fail-closed production preflight. Both start no build or show-side process. Any
-other or combined argument fails closed before anything is built or started. It must be
-started in the same PowerShell that set `DJ_AGENT_CONFIG_PATH`; it does not
-persist or reload the config, token, or Setup selections. Before it builds or
-starts anything, it fail-closes on the retired `REKORDBOX_EXE_PATH` in Process,
-User, or Machine scope. If it reports a scope, clear that retired override with
-the authority required for that scope, open a fresh PowerShell, and rerun this
-same command; do not bypass the preflight with a second launch route. The source
-path is accepted only after all twelve hardware rows below have recorded evidence.
-Until then the state remains **0/12 hardware acceptance**, not show-ready DJ-Link
-completion.
-
-### Historical DJ-PC wake and HW-4 acceptance sequence (exactly 12 rows)
-
-The following v1.1.5 sequence is retained as an observed/deployed historical
-record only; it is not an execution plan for v1.1.6. Before row 1, wake the DJ PC, connect the wired show LAN, start the FOH Syndocal
-listener on its explicitly selected wired NIC, rotate/copy the currently displayed
-one-time token into the external JSON, and confirm its exact `CustomMIDI1` name and
-port in the DJ Agent Setup view. Then launch the source path above. A status label
-such as `connected` does not substitute for HELLO/auth, State Sync, timeline-state,
-and correlated ACK evidence. Record a pass/fail result and raw evidence for each row;
-do not advance a failing row by retrying through an alternate/legacy adapter.
-
-1. Prove wired `/dj-link` HELLO/authentication, session replacement, and old-close protection.
-2. Pre-load a track and prove no trigger; prove a non-Master deck is rejected.
-3. Start actual Master playback and prove exactly one mapped Track Active event.
-4. Switch Master while playback is already running.
-5. In Stage 1, use F14 and prove local LoopHalf plus repeated absolute measured-loop `DJ_LOOP_STATE` reports.
-6. In Stage 1, keep `releaseMacro.enabled:false`; use F13 and prove only direct local Cue/Stop followed by `DJ_RELEASE`.
-7. In Stage 1, prove that direct F13 Release's ACK, rejection, timeout, and retry dispositions are visible and fail closed.
-8. Enter authoritative Stage 2 `running`; prove F13/F15 `-4/+4`, F14 absolute loop-set, and no MIDI output.
-9. Disconnect; prove local Stage 1 operation, reconnect State Sync, and Stage 2 fail-closed behavior.
-10. Prove same-session event dedupe and replay safety.
-11. Restart the app and prove next-show reuse with a new valid session/token configuration.
-12. Prove Art-Net/sACN traffic can share the wired network during the DJ run.
+That record observed direct local Cue/Stop before `DJ_RELEASE`; it provides no
+authority for v1.1.7. Current source authority is only the v1.1.7 strict
+`filter-then-stop` contract above; hardware acceptance remains 0/12.
 
 ## SUPERSEDED / HISTORICAL — planned v1.1.4 strict-v2 guidance
 
 This archived v1.1.4 plan is **not executable operator guidance**. Do not copy its
 v2 frame, configuration, or release instructions into a current show setup. Current
-authority is the v1.1.6 any-deck/v3 section above. The immutable published v1.1.3 package
+authority is the v1.1.7 any-deck/v3 section above. The immutable published v1.1.3 package
 remains historical and blocked by its internal `DJ_MASTER_CHANGED` mismatch. The
 v1.1.4 checkpoint H **(historical v1.1.4)** was
 `c6ebb0fd917a82574b9ef61f12ebb41283db357e` on branch `beta-v1.1.2`; its tagged/public
@@ -352,53 +253,31 @@ source commit `5eaf1994e1bf4456857fefd36cc0ce827145b603`, annotated tag `v1.1.3`
   * 必要な項目（Album, Genre, Key, Label, Time, Track BPM）の表示ON/OFF切り替え。
   * スマホ、タブレット、PCのどのサイズにでも対応するレスポンシブデザイン。
 
-## DJ Agent 拡張 (既定OFF)
+## DJ Agent 拡張 (strict v1.1.7 controlled source)
 
-SyndocalのShow Control、ペダル、rekordbox MIDI出力は、一般利用者向けの
-Now Playing本体とは分離された任意拡張です。既定では無効で、次のいずれかを
-明示した場合だけ、既存Nodeサーバー内で起動します。
+Syndocal Show Control、pedal、Rekordbox MIDI は通常の Now Playing 本体から分離されています。
+DJ Agent を有効にできるのは、`start-all.bat --init-config` が作る checkout 外の
+exact v1.1.7 `filter-then-stop` 設定を `DJ_AGENT_CONFIG_PATH` で指定した時だけです。
+`DJ_AGENT_ENABLED`、inline JSON、`SYNDOCAL_*`、`MIDI_*`、`PEDAL_*` の環境変数は
+runtime でも fail-closed になり、Agent は固定の secret-free reason とともに disabled のままです。
+設定が無い状態でも first-run Setup と read-only HTTP/UI は起動を継続します。
 
-~~~powershell
-$env:DJ_AGENT_ENABLED = "true"
-npm start
-~~~
-
-MIDI出力は誤ったデバイスへ送信しないよう、`MIDI_DEVICE` と `MIDI_PORT` の
-完全一致を必須にします。たとえばSetup APIで `CustomMIDI1` がport 1と列挙された
-場合は、両方を明示します。
-
-~~~powershell
-$env:MIDI_ENABLED = "true"
-$env:MIDI_DEVICE = "CustomMIDI1"
-$env:MIDI_PORT = "1"
-~~~
-
-または `DJ_AGENT_CONFIG_PATH` に、リポジトリ外のJSON設定ファイルを指定します。Nodeは
-`.env`を自動ロードしないため、`.env.example`は値の一覧を示すテンプレートです。
-トークンは`SYNDOCAL_TOKEN`などのプロセス環境、または明示した外部設定ファイルから
-読み込みます。Syndocalを有効にする場合は32〜256 UTF-8 bytesで、Unicode control文字や
-空白を含まないtokenが必須です。リポジトリへ保存したりログ・ステータスへ出力したり
-しません。wire文字列はUnicode scalarとして検証し、KDMXの`char::is_control`相当の
-Ccと256 UTF-8 bytes超を拒否します。Cf/ZWJ、U+2028/U+2029はKDMX互換のため許可し、
-  unpaired surrogateは拒否します。v1.1.6 sourceで使用する唯一のproduction adapterは
-  `syndocal-envelope-v3`、接続先pathは`/dj-link`、heartbeatは5000msです。公開済み
-immutable v1.1.3は`DJ_MASTER_CHANGED` mismatchのため現行受入れに使いません。接続後は
-`DJ_AGENT_HELLO` → `DJ_STATE_SYNC` → `DJ_TIMELINE_STATE_REQUEST` の順序が必須です。
-Syndocalが返す権威`DJ_TIMELINE_STATE`が有効になるまでtimeline操作はfail-closedです
-(SnapshotRequired)。adapterは
-`SYNDOCAL_WS_ADAPTER`またはfirst-run Setup cardで明示できます。選択可能値は
-`syndocal-envelope-v3`だけです。旧flat/v1/v2名、未知名、曖昧な別名はfail-closedで、
-変換・fallback・legacy adapterはありません。
+唯一の production adapter は `syndocal-envelope-v3`、接続先 path は `/dj-link`、
+heartbeat は 5000ms です。token は 32〜256 UTF-8 bytes、空白・Unicode control・
+unpaired surrogate を含まない exact string だけを受理します。repository、ログ、
+status へ token を保存・表示しません。Syndocal の権威 `DJ_TIMELINE_STATE` が有効になるまで
+Stage 2 timeline 操作は fail-closed です。old flat/v1/v2 adapter、別名、環境 override、
+legacy macro はありません。
 
 次は2026-08-30公演のpre-release source acceptanceで使用する現在の構成です。
-実ファイルはcheckout外（例：`C:\SyndocalShow\dj-agent-v1.1.6.json`）へ置き、
+実ファイルはcheckout外（例：`C:\SyndocalShow\dj-agent-v1.1.7.json`）へ置き、
 `<SYNDOCAL_ONE_TIME_TOKEN>`だけをSyndocalが表示した現在のtokenへ置換します。
 tokenをrepository、スクリーンショット、ログへ保存しません。`MIDI_PORT: 1`はDJ PCの
 Setup列挙で`CustomMIDI1`がport 1と表示された場合だけ正しく、列挙値が違えばその整数へ
 完全一致で直します。名前だけ、推測値、暗黙port 0は拒否されます。
 
 The canonical token-free source is tracked at
-`config/dj-agent-v1.1.6.example.json`. Do not copy JSON out of this README.
+`config/dj-agent-v1.1.7.example.json`. Do not copy JSON out of this README.
 From any checkout location, create the external file exactly once with:
 
 ```powershell
@@ -406,27 +285,31 @@ From any checkout location, create the external file exactly once with:
 ```
 
 The initializer resolves the template relative to its own checkout, writes only
-`C:\SyndocalShow\dj-agent-v1.1.6.json`, and refuses to overwrite any existing
+`C:\SyndocalShow\dj-agent-v1.1.7.json`, and refuses to overwrite any existing
 regular, invalid, or linked target. It never generates, reads, or prints a token.
 The deployed historical `.15` target is outside this initializer's write scope.
 
-`releaseMacro.enabled` はphysical acceptanceが完了するまで必ずfalseのままにします。
-上のramp定義は受入れ後にoperatorが明示的に有効化する場合の契約例であり、
-first-run Setupのpreviewでも常にfalseへ固定されます。
+v1.1.7 controlled sourceは、tokenを置換した外部JSONについてだけ
+`releaseMacro.enabled:true`、`sequence:"filter-then-stop"`、Filter HPF
+64→127/1000ms/50ms、Cue/Stop Note37、deck channel 1/2、`releaseFade.enabled:false`
+をexactに要求します。extra mapping、fade、別sequence、direct-Stop fallback、
+別duration/value/channelはlauncher preflightでrejectします。Setup画面のtoken-free previewは
+外部show sourceではなく、launch authorizationにも使用できません。
 
-DJ_AGENT_ENABLED未設定時はoptionalなWebSocket/MIDI/global-hotkey依存を読み込まず、
+exact external v1.1.7 config が無い場合は Syndocal接続、MIDI、global-hotkey adapterを起動せず、
 SyndocalやMIDI機器が未接続でも既存のHook UDP、Web UI、Socket.IO、HTTP APIは
 継続します。拡張を有効にした場合も、/api/dj-agent/actions/loop-half、
 /api/dj-agent/actions/filter-close、/api/dj-agent/actions/release、
 /api/dj-agent/actions/track-active は物理ペダルと同じAction経路を使う診断用
-エンドポイントです。Windows global hotkey用adapterとMIDI transportは実行時に
-optional requireされ、未導入なら機能を無効表示して本体を停止させません。
+エンドポイントです。Windows global hotkey adapter、MIDI transport、`ws` はいずれも
+optional dependencyとして実行時に解決され、未導入なら該当機能を無効表示して本体を停止させません。
+`ws` はSyndocal envelope transportだけに使われます。
 読み取りAPIはLANから利用できますが、/api/dj-agent/actions/* のPOST action診断は
 **恒久的にIPv4/IPv6 loopback限定**であり、DJ PC上のlocalhostからだけ到達できます。
 判定は実際のTCP peerアドレスに基づき、Host/Origin/X-Forwarded-*や設定では
 peerを偽装できません。旧env `DJ_AGENT_ALLOW_REMOTE_ACTIONS` とconfig-fileの
-`allowRemoteActions` は非推奨です。trueを設定しても権限は一切開かず、起動時に
-固定の（呼び出し値を含まない）セキュリティ警告を1件出力します。
+`allowRemoteActions` を含む別の設定値は受理しません。inline または環境 override が
+一つでもあれば Agent 全体を固定の secret-free reason とともに disabled にします。
 物理ペダルとglobal hotkeyはDJ PCローカルで動作し、FOH側のShow Controlは
 トークン認証済みの `/dj-link` WebSocket経由で行います。この変更で、LAN向けの
 read-only GET APIや既存のSocket.IOイベントが認証付きになったわけではありません
@@ -441,7 +324,7 @@ generic `DJ_STATE_SYNC` payloadは、未admit時の`{released}`、または
 all-or-noneであり、Rekordbox MASTERをshow-control ownerとしてwireへ載せません。
 v1.1.3はこのencoder/router negative proofを満たさないためblockedです。訂正版
 deployed historical v1.1.5 runtime checkpoint `ffd013c91f23df6ced84cd6daabc97266993dc34` は経路到達不能の
-negative proofを持ちますが、current v1.1.6 authority、installer、実機受入れとは別です。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
+negative proofを持ちますが、current v1.1.7 authority、installer、実機受入れとは別です。送信直後を成功扱いにせず、pending/acknowledged/rejected/timed-out/
 send-failedを `/api/dj-agent/status` とUIに反映します。`accepted`/`duplicate`だけが
 成功、`no_mapping`/`rejected`はterminal failure、`busy`だけが同じ`eventId`・
 `sequence`・canonical v3 shape・socket generationのまま短い指数backoffで有限回
@@ -466,27 +349,25 @@ Syndocalを無効にしたローカル専用構成では、従来どおりMIDI�
 `timeline-control`のStage 2操作は、接続済みかつsnapshot確定時だけ送信します。
 `idle`/`stopped`/`ended`/`reset`のsnapshotを受信するとStage 1へ戻ります。
 
-MIDIをadmitted owner deckごとに分ける場合は、`midi.deckChannels` に
-`{"1":1,"2":2}` のようなdeck番号→MIDI channel（1〜16）を指定します。
-loop-half、release、filter rampの全CC送信に適用され、未指定のdeckは各mappingの
-`channel`へfallbackします。実行中のaction resultには `targetDeck` と
-`targetChannel` が含まれます。Rekordbox MASTERは診断のみでtargetを置換しません。KDMX strict-v3 envelope framesはstrict fieldsだけを送信し、
-この診断情報は含めません。環境変数では
-`MIDI_DECK_CHANNELS` に同じJSONを指定できます。
+v1.1.7 controlled sourceは`midi.deckChannels`をexact
+`{"1":1,"2":2}`だけに固定します。LoopHalf、Cue/Stop、Filter HPFはadmitted owner
+deckのこのchannelだけへ送ります。未指定deckやmapping `channel`へのfallbackはありません。
+実行中のaction resultには `targetDeck` と `targetChannel` が含まれます。Rekordbox MASTERは
+診断のみでtargetを置換しません。KDMX strict-v3 envelope framesはstrict fieldsだけを送信し、
+この診断情報は含めません。環境変数による deck/channel 指定は受理しません。
 
 ### Pedal handoff modes
 
-The physical bindings are an explicit state machine. For the 2026-08-30 source
-acceptance, Stage 1 fixes `releaseMacro.enabled:false`: F13 performs only the
-direct local Cue/Stop plus one independently routed `DJ_RELEASE`. Stop MIDI
-failure does not suppress the Syndocal Release leg. It is neither a compatibility
-fallback nor an inferred macro mode. F14 keeps the local LoopHalf mapping and
-arms the measured-response window before MIDI; true no-response alone emits the
-full-profile `DJ_LOOP_FALLBACK`. F15
-is deliberately inactive in Stage 1 and sends neither MIDI nor Syndocal events.
-Release-macro enablement (Filter/ChannelFader ramp and its sequence) is outside
-this acceptance and may be considered only after all twelve rows pass, in a
-separate documented configuration and acceptance tranche.
+The physical bindings are an explicit state machine. In v1.1.7 controlled source,
+Stage 1 requires `releaseMacro.enabled:true` and `filter-then-stop`: F13 starts
+the owner-deck Filter HPF ramp, attempts Cue/Stop once at its planned completion,
+then independently routes one `DJ_RELEASE`. Local Filter or Stop failure stays
+visible and never suppresses the Release leg. No fade MIDI or
+direct-Stop fallback exists. Reset is best-effort after Release and cannot block
+or duplicate it. F14 keeps the local LoopHalf mapping and arms the
+measured-response window before MIDI; true no-response alone emits the
+full-profile `DJ_LOOP_FALLBACK`. F15 is deliberately inactive in Stage 1 and
+sends neither MIDI nor Syndocal events.
 
 Only an authoritative `DJ_TIMELINE_STATE` with `state:"running"`, the current
 `timelineId`/`playSessionId`, `pedalOwner:"timeline"`, and the correlated Release
@@ -501,11 +382,8 @@ Disconnects, missing snapshots, invalid state broadcasts, and ACK failures keep
 timeline-control fail-closed; Stage 1 local MIDI remains available while only
 the network side effect is marked failed or pending.
 See [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md) for the handoff
-contract and a direct Learn mapping example. The standard Rekordbox CSV uses
-the deck-specific `ChannelFader` control (for example `ChannelFader,,KnobSlider,,B011,B111,...`);
-the CustomMIDI1 example uses Filter CC16 (`B010`) and release-fade CC17
-(`B011`/`B111` for Deck 1/2), with the actual deck channel selected by
-`deckChannels`.
+contract and the v1.1.7 Learn mapping. The CustomMIDI1 CSV contains only
+Filter CC16 (`B010`/`B110`), Cue/Stop, and LoopHalf; it has no fade mapping.
 
 配布時は `@julusian/midi` と `uiohook-napi` をoptionalDependenciesとして解決し、
 Windows native prebuildをpkgのassetsに含めます。機器やnative moduleがない環境でも
@@ -552,19 +430,19 @@ DLLのビルドには `g++` または Visual Studio C++ Build Tools を使用し
 - [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
 - [MSYS2](https://www.msys2.org/) (mingw-w64)
 
-### 2. 将来の検証済みv1.1.6インストール済みリリースの起動
+### 2. 将来の検証済みv1.1.7インストール済みリリースの起動
 
-この経路は、v1.1.6のtag・identity-bound artifact・対象DJ PCでの検証が完了した後だけ
-公演運用に使用します。公開済みv1.1.3は使用禁止であり、v1.1.6未公開期間に既存shortcutを
-起動して代用してはいけません。検証済みv1.1.6をインストールした後は、Rekordboxを先に
+この経路は、v1.1.7のtag・identity-bound artifact・対象DJ PCでの検証が完了した後だけ
+公演運用に使用します。公開済みv1.1.3は使用禁止であり、v1.1.7未公開期間に既存shortcutを
+起動して代用してはいけません。検証済みv1.1.7をインストールした後は、Rekordboxを先に
 起動し、スタートメニューまたはデスクトップの
 `DJLinkForPCDJ` ショートカットを実行してください。これはインストール先の
 `start-rb.bat` を起動し、署名済みmanifestと全payloadを検証してからserverとHookを
 開始します。
 
-### 3. v1.1.6未公開期間の公演前source acceptance（現在の暫定正規経路）
+### 3. v1.1.7未公開期間の公演前source acceptance（現在の暫定正規経路）
 
-検証済みv1.1.6 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
+検証済みv1.1.7 installerが存在するまで、対象DJ PCではcheckout外の上記JSON構成を
 明示して**唯一の**source launcherを実行します。`start-all.bat`は`.env`やSetup画面の
 選択を保存・読込しません。構成またはtokenを変えた場合は、同じPowerShellで環境を設定
 し直して同じランチャーを再実行してください。退役済み`REKORDBOX_EXE_PATH`の
@@ -578,7 +456,7 @@ Process/User/Machine確認とfail-closeは、ここに重複した手順を置�
 ```powershell
 .\start-all.bat --init-config
 # Replace only <SYNDOCAL_ONE_TIME_TOKEN> in the created external file.
-$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.6.json"
+$env:DJ_AGENT_CONFIG_PATH = "C:\SyndocalShow\dj-agent-v1.1.7.json"
 .\start-all.bat --preflight-only
 .\start-all.bat
 ```
@@ -593,10 +471,10 @@ HELLO/authとstate sync、generation、heartbeatを確認し、最後に物理�
 このsource経路は現在の対象DJ PCでのpre-release acceptance例外です。一般配布の
 installer完成を主張するものではありません。
 
-#### v1.1.6 any-deck operator proof
+#### v1.1.7 any-deck operator proof
 
 Before recording a show cue, import
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.6.csv` and confirm the Setup/status
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.7.csv` and confirm the Setup/status
 view reports the admitted owner deck/session. Start one exactly mapped track on a
 non-MASTER deck: it must produce one `DJ_TRACK_ACTIVE`, and a MASTER change must
 neither retrigger nor replace that owner. Later `DJ_TRACK_SYNC`, measured

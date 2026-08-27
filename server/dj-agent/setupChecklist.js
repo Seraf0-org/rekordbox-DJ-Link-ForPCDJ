@@ -18,8 +18,7 @@ const SYNDOCAL_ADAPTERS = Object.freeze([
 ]);
 
 const RELEASE_MACRO_SEQUENCES = Object.freeze([
-  "parallel",
-  "filter-then-fade",
+  "filter-then-stop",
 ]);
 
 const SYNDOCAL_ADAPTER_SET = new Set(SYNDOCAL_ADAPTERS);

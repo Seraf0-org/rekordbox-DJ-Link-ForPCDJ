@@ -46,6 +46,35 @@ const {
 } = require("../server/dj-agent/httpSecurity");
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
+function exactFilterThenStopMacro() {
+  return {
+    enabled: true,
+    sequence: "filter-then-stop",
+    filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
+    resetAfterStop: true,
+    resetDelayMs: 0,
+  };
+}
+
+function createReleaseTimers() {
+  const pending = [];
+  return {
+    timerApi: {
+      setTimeout(callback, delayMs) { pending.push({ callback, delayMs }); return callback; },
+      clearTimeout(callback) {
+        const index = pending.findIndex((pendingTimer) => pendingTimer.callback === callback);
+        if (index >= 0) pending.splice(index, 1);
+      },
+    },
+    runPlannedCompletion() {
+      const index = pending.findIndex((pendingTimer) => pendingTimer.delayMs === 1000);
+      const completion = index >= 0 ? pending.splice(index, 1)[0]?.callback : null;
+      assert.ok(completion, "release macro must schedule its planned completion");
+      completion();
+    },
+  };
+}
+
 function assertStrictV3Frame(frame, type = frame?.type) {
   assert.ok(frame && typeof frame === "object" && !Array.isArray(frame));
   assert.deepEqual(
@@ -333,14 +362,8 @@ test("cleared or inverted loop boundaries are not treated as a configured range"
   assert.equal(inverted.endBeat, null);
 });
 
-test("DJ Agent configuration remains off without an explicit gate", () => {
-  const config = loadDjAgentConfig({
-    env: {
-      DJ_AGENT_ENABLED: "",
-      DJ_AGENT_CONFIG_PATH: "",
-      DJ_AGENT_CONFIG: "",
-    },
-  });
+test("DJ Agent configuration remains off without an exact external show configuration", () => {
+  const config = loadDjAgentConfig({ env: {} });
   assert.equal(config.enabled, false);
   assert.equal(config.syndocal.enabled, false);
   assert.equal(config.pedal.enabled, false);
@@ -348,86 +371,16 @@ test("DJ Agent configuration remains off without an explicit gate", () => {
   assert.equal(config.syndocal.adapter, "syndocal-envelope-v3");
 });
 
-test("release macro is opt-in and keeps the documented Filter and ChannelFader defaults", () => {
-  const baseEnv = {
-    DJ_AGENT_ENABLED: "true",
-    MIDI_ENABLED: "true",
-    DJ_AGENT_CONFIG: JSON.stringify({
-      midi: {
-        mappings: {
-          filter: { channel: 1, messageType: "controlChange", cc: 16 },
-          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
-        },
-      },
-    }),
-  };
-  const legacy = loadDjAgentConfig({ env: baseEnv });
-  assert.equal(legacy.midi.releaseMacro.enabled, false);
-  assert.equal(legacy.midi.releaseMacro.sequence, "parallel");
-  const macro = loadDjAgentConfig({
-    env: {
-      ...baseEnv,
-      DJ_AGENT_CONFIG: JSON.stringify({
-        midi: {
-          mappings: {
-            filter: { channel: 1, messageType: "controlChange", cc: 16 },
-            releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
-          },
-          releaseMacro: { enabled: true, sequence: "filter-then-fade" },
-        },
-      }),
-    },
-  });
-  assert.equal(macro.midi.releaseMacro.enabled, true);
-  assert.equal(macro.midi.releaseMacro.sequence, "filter-then-fade");
-  assert.deepEqual(macro.midi.releaseMacro.filter, {
-    startValue: 64,
-    endValue: 127,
-    durationMs: 1000,
-    updateIntervalMs: 50,
-    resetValue: 64,
-  });
-  assert.equal(macro.midi.releaseMacro.resetAfterStop, true);
-});
-
-test("MIDI port config keeps missing values unset and honors device or explicit port zero", () => {
+test("MIDI port primitives preserve explicit numeric zero without enabling the DJ Agent", () => {
   assert.equal(asNumber(null, 7), 7);
   assert.equal(asNumber(undefined, 7), 7);
   assert.equal(asNumber("", 7), 7);
 
-  const namedConfig = loadDjAgentConfig({
-    env: {
-      DJ_AGENT_ENABLED: "true",
-      MIDI_ENABLED: "true",
-      MIDI_DEVICE: "CustomMIDI1",
-    },
-  });
-  assert.equal(namedConfig.midi.port, null);
-  assert.equal(namedConfig.midi.device, "CustomMIDI1");
-
-  const zeroConfig = loadDjAgentConfig({
-    env: {
-      DJ_AGENT_ENABLED: "true",
-      MIDI_ENABLED: "true",
-      MIDI_DEVICE: "CustomMIDI1",
-      MIDI_PORT: "0",
-    },
-  });
-  assert.equal(zeroConfig.midi.port, 0);
-  const zeroNumberConfig = loadDjAgentConfig({
-    env: {
-      DJ_AGENT_ENABLED: "true",
-      MIDI_ENABLED: "true",
-      MIDI_PORT: 0,
-    },
-  });
-  assert.equal(zeroNumberConfig.midi.port, 0);
-
   const openedNamed = [];
   const namedMidi = createRekordboxMidi({
     enabled: true,
-    device: namedConfig.midi.device,
-    port: namedConfig.midi.port,
+    device: "CustomMIDI1",
+    port: null,
     midiModule: {
       Output: class {
         getPortCount() { return 2; }
@@ -445,8 +398,8 @@ test("MIDI port config keeps missing values unset and honors device or explicit 
   const openedZero = [];
   const zeroMidi = createRekordboxMidi({
     enabled: true,
-    device: zeroConfig.midi.device,
-    port: zeroConfig.midi.port,
+    device: "CustomMIDI1",
+    port: 0,
     midiModule: {
       Output: class {
         getPortCount() { return 2; }
@@ -467,14 +420,7 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
     "1": 1,
     "2": 2,
   });
-  const config = loadDjAgentConfig({
-    env: {
-      DJ_AGENT_ENABLED: "true",
-      MIDI_ENABLED: "true",
-      MIDI_DECK_CHANNELS: '{"1":1,"2":2,"3":17}',
-    },
-  });
-  assert.deepEqual(config.midi.deckChannels, { "1": 1, "2": 2 });
+  const deckChannels = { "1": 1, "2": 2 };
 
   const messages = [];
   const sent = [];
@@ -482,24 +428,13 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
     enabled: true,
     device: "Test MIDI",
     port: 0,
-    deckChannels: config.midi.deckChannels,
+    deckChannels,
     mappings: {
       loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
       stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
       filter: { channel: 1, messageType: "controlChange", cc: 16 },
-      releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
     },
     filter: { startValue: 127, endValue: 0, durationMs: 20, updateIntervalMs: 5 },
-    releaseFade: {
-      enabled: true,
-      mappingName: "releaseFade",
-      target: "deck",
-      startValue: 127,
-      endValue: 0,
-      durationMs: 20,
-      updateIntervalMs: 5,
-      resetValue: 127,
-    },
     midiModule: {
       Output: class {
         getPortCount() { return 1; }
@@ -534,19 +469,6 @@ test("deck MIDI channels override mapping channels and filter ramp messages", as
   assert.ok(messages.length >= 3);
   assert.equal(messages.slice(2).every((message) => (message[0] & 0xf0) === 0xb0 && (message[0] & 0x0f) === 1), true);
 
-  const fade = midi.startReleaseFade({ targetDeck: 2 });
-  assert.equal(fade.started, true);
-  assert.equal(fade.targetDeck, 2);
-  assert.equal(fade.targetChannel, 2);
-  await new Promise((resolve) => setTimeout(resolve, 35));
-  assert.equal(messages.slice(-5).every((message) => (message[0] & 0xf0) === 0xb0 && (message[0] & 0x0f) === 1), true);
-  const reset = midi.resetReleaseFade({ targetDeck: 2 });
-  assert.equal(reset.ok, true);
-  assert.equal((messages.at(-1)[0] & 0x0f), 1);
-
-  // An unmapped deck preserves the mapping's configured channel.
-  assert.equal(midi.sendMapping("loopHalf", { targetDeck: 3 }), true);
-  assert.deepEqual(messages.at(-1), [0x90, 36, 127]);
   midi.stop();
 });
 
@@ -601,369 +523,8 @@ test("router sends Stage 1 MIDI to the acknowledged candidate deck", () => {
   assert.equal(midiCalls.length, 1);
 
   const release = router.triggerAction("release");
-  assert.deepEqual(midiCalls[1], { name: "stop", options: { targetDeck: 2 } });
-  assert.equal(release.targetDeck, 2);
-  assert.equal(release.targetChannel, 2);
-  router.stop();
-});
-
-test("stage 1 release macro runs filter and channel fader in parallel before stop and release", async (t) => {
-  const detector = createTrackActivityDetector({ idFactory: () => "macro-track-id" });
-  detector.onSnapshot({
-    masterDeck: 1,
-    deckNowPlaying: [{ deck: 1, contentId: "macro-track", title: "Macro", artist: "Artist" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true, positionSec: 12 }],
-  });
-  const midiCalls = [];
-  const midi = {
-    resolveTarget(_name, targetDeck) {
-      return { targetDeck, targetChannel: targetDeck === 1 ? 1 : null };
-    },
-    hasReleaseFade: () => true,
-    sendMapping(name, options) {
-      midiCalls.push({ name, options });
-      return true;
-    },
-    startFilterRamp(options) {
-      midiCalls.push({ name: "filter-ramp", options });
-      setTimeout(() => options.onComplete?.({ targetChannel: 1, startValue: 64, endValue: 127 }), 5);
-      return { started: true, ok: true, targetDeck: 1, targetChannel: 1 };
-    },
-    startReleaseFade(options) {
-      midiCalls.push({ name: "fade-ramp", options });
-      setTimeout(() => options.onComplete?.({ targetChannel: 1, resetValue: 127 }), 5);
-      return { started: true, ok: true, targetDeck: 1, targetChannel: 1, resetValue: 127 };
-    },
-    resetReleaseFade(options) {
-      midiCalls.push({ name: "fade-reset", options });
-      return { ok: true, targetChannel: 1 };
-    },
-    cancelFilterRamp: () => {},
-    cancelReleaseFade: () => {},
-    getStatus: () => ({ ok: true }),
-    start() {},
-    stop() {},
-  };
-  const client = {
-    sendEvent(event) {
-      return {
-        eventId: event.eventId || "macro-release-event",
-        type: event.type,
-        sent: true,
-        ok: true,
-        state: "acknowledged",
-        ackState: "acknowledged",
-      };
-    },
-    getStatus: () => ({ enabled: false, state: "disabled" }),
-    start() {},
-    stop() {},
-  };
-  const pedal = { start() {}, stop() {}, getStatus: () => ({ ok: true }) };
-  asEventedClient(client);
-  const router = createShowEventRouter({
-    detector,
-    syndocalClient: client,
-    midi,
-    pedal,
-    releaseMacro: {
-      enabled: true,
-      filter: { startValue: 64, endValue: 127, durationMs: 10, updateIntervalMs: 5, resetValue: 64 },
-      resetAfterStop: true,
-      resetDelayMs: 0,
-    },
-  });
-  admitCandidate(detector, client);
-  t.after(() => router.stop());
-
-  const inactive = router.triggerAction("filter-close");
-  assert.equal(inactive.ignored, true);
-  assert.equal(midiCalls.length, 0);
-
-  const pending = router.triggerAction("release");
-  assert.equal(pending.pending, true);
-  assert.deepEqual(midiCalls.slice(0, 2).map((call) => call.name), ["filter-ramp", "fade-ramp"]);
-  assert.equal(router.triggerAction("release").reason, "release-macro-in-progress");
-  assert.equal(midiCalls.some((call) => call.name === "stop"), false);
-
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(midiCalls.map((call) => call.name), [
-    "filter-ramp",
-    "fade-ramp",
-    "stop",
-    "filter",
-    "fade-reset",
-  ]);
-  assert.equal(midiCalls[2].options.targetDeck, 1);
-  assert.equal(midiCalls[3].options.value, 64);
-  assert.equal(midiCalls[4].options.value, 127);
-});
-
-test("filter-then-fade release macro waits for Filter completion before any fade MIDI", async (t) => {
-  const detector = createTrackActivityDetector({ idFactory: () => "serial-macro-id" });
-  detector.onSnapshot({
-    masterDeck: 1,
-    deckNowPlaying: [{ deck: 1, contentId: "serial-track" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
-  });
-  const calls = [];
-  let filterOptions = null;
-  let fadeOptions = null;
-  const midi = {
-    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
-    sendMapping(name, options) {
-      calls.push({ name, value: options?.value ?? null });
-      return true;
-    },
-    startFilterRamp(options) {
-      filterOptions = options;
-      calls.push({ name: "filter-start" });
-      return { started: true, ok: true, targetDeck: 1, targetChannel: 1 };
-    },
-    startReleaseFade(options) {
-      fadeOptions = options;
-      calls.push({ name: "fade-start" });
-      return { started: true, ok: true, targetDeck: 1, targetChannel: 1, resetValue: 127 };
-    },
-    resetReleaseFade() {
-      calls.push({ name: "fade-reset" });
-      return { ok: true };
-    },
-    cancelFilterRamp: () => {},
-    cancelReleaseFade: () => {},
-    getStatus: () => ({ ok: true }),
-    start() {},
-    stop() {},
-  };
-  const client = {
-    sendEvent: (event) => ({ eventId: "serial-release", type: event.type, ok: true, state: "acknowledged" }),
-    getStatus: () => ({ enabled: false, state: "disabled" }),
-    start() {},
-    stop() {},
-  };
-  const actions = [];
-  asEventedClient(client);
-  const router = createShowEventRouter({
-    detector,
-    syndocalClient: client,
-    midi,
-    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: {
-      enabled: true,
-      sequence: "filter-then-fade",
-      filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
-      resetAfterStop: true,
-      resetDelayMs: 0,
-    },
-  });
-  admitCandidate(detector, client);
-  router.on("action", (action) => actions.push(action));
-  t.after(() => router.stop());
-
-  const pending = router.triggerAction("release");
-  assert.equal(pending.sequence, "filter-then-fade");
-  assert.equal(pending.phase, "filter-ramp");
-  assert.deepEqual(calls, [{ name: "filter-start" }]);
-  assert.equal(fadeOptions, null);
-
-  filterOptions.onComplete({ targetChannel: 1, startValue: 64, endValue: 127 });
-  assert.deepEqual(calls, [{ name: "filter-start" }, { name: "fade-start" }]);
-  assert.equal(router.getStatus().releaseMacroPhase, "fade-ramp");
-  assert.equal(fadeOptions != null, true);
-  assert.equal(calls.some((call) => call.name === "stop"), false);
-
-  fadeOptions.onComplete({ targetChannel: 1, startValue: 127, endValue: 0, resetValue: 127 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(calls.map((call) => call.name), [
-    "filter-start",
-    "fade-start",
-    "stop",
-    "filter",
-    "fade-reset",
-  ]);
-  assert.equal(actions.at(-1).sequence, "filter-then-fade");
-  assert.equal(actions.at(-1).phase, "complete");
-});
-
-test("filter-then-fade failures never start the next phase or Stop/Release", () => {
-  const makeRouter = ({ filterFailure = false } = {}) => {
-    const detector = createTrackActivityDetector({ idFactory: () => `serial-failure-${filterFailure}` });
-    detector.onSnapshot({
-      masterDeck: 1,
-      deckNowPlaying: [{ deck: 1, contentId: "serial-failure-track" }],
-      deckPlaybacks: [{ deck: 1, isPlaying: true }],
-    });
-    const calls = [];
-    let filterOptions = null;
-    let fadeOptions = null;
-    const midi = {
-      resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
-      sendMapping: (name) => { calls.push(name); return true; },
-      startFilterRamp: (options) => {
-        filterOptions = options;
-        calls.push("filter-start");
-        return { started: true, ok: true, targetChannel: 1 };
-      },
-      startReleaseFade: (options) => {
-        fadeOptions = options;
-        calls.push("fade-start");
-        return { started: true, ok: true, targetChannel: 1, resetValue: 127 };
-      },
-      resetReleaseFade: () => { calls.push("fade-reset"); return { ok: true }; },
-      cancelFilterRamp: () => {},
-      cancelReleaseFade: () => {},
-      getStatus: () => ({ ok: true }),
-      start() {},
-      stop() {},
-    };
-    const sent = [];
-    const client = {
-      sendEvent: (event) => { sent.push(event); return { eventId: "must-not-release", ok: true, state: "acknowledged" }; },
-      getStatus: () => ({ enabled: false, state: "disabled" }),
-      start() {},
-      stop() {},
-    };
-    asEventedClient(client);
-    const router = createShowEventRouter({
-      detector,
-      syndocalClient: client,
-      midi,
-      pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-      releaseMacro: {
-        enabled: true,
-        sequence: "filter-then-fade",
-        filter: { startValue: 64, endValue: 127, resetValue: 64 },
-        resetAfterStop: true,
-      },
-    });
-    admitCandidate(detector, client);
-    return { router, calls, filterOptions, fadeOptions, client, sent, getFilter: () => filterOptions, getFade: () => fadeOptions };
-  };
-
-  const filterCase = makeRouter({ filterFailure: true });
-  filterCase.router.triggerAction("release");
-  filterCase.getFilter().onError({ reason: "filter-failed" });
-  assert.deepEqual(filterCase.calls, ["filter-start"]);
-  assert.deepEqual(filterCase.sent.filter((event) => event.type === "DJ_RELEASE"), []);
-  filterCase.router.stop();
-
-  const fadeCase = makeRouter();
-  fadeCase.router.triggerAction("release");
-  fadeCase.getFilter().onComplete({ targetChannel: 1 });
-  fadeCase.getFade().onError({ reason: "fade-failed" });
-  assert.deepEqual(fadeCase.calls, ["filter-start", "fade-start", "filter"]);
-  assert.deepEqual(fadeCase.sent.filter((event) => event.type === "DJ_RELEASE"), []);
-  assert.equal(fadeCase.router.getStatus().releaseMacroPhase, "failed");
-  fadeCase.router.stop();
-});
-
-test("serial fade synchronous first-CC failure resets Filter exactly once", () => {
-  const detector = createTrackActivityDetector({ idFactory: () => "serial-sync-failure-id" });
-  detector.onSnapshot({
-    masterDeck: 1,
-    deckNowPlaying: [{ deck: 1, contentId: "serial-sync-failure-track" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
-  });
-  const midiCalls = [];
-  let filterOptions = null;
-  const midi = {
-    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
-    sendMapping: (name, options) => {
-      midiCalls.push({ name, value: options?.value ?? null });
-      return true;
-    },
-    startFilterRamp: (options) => {
-      filterOptions = options;
-      return { started: true, ok: true, targetChannel: 1 };
-    },
-    startReleaseFade: (options) => {
-      options.onError({ reason: "first-cc-failed" });
-      return { started: true, ok: true, targetChannel: 1, resetValue: 127 };
-    },
-    cancelFilterRamp: () => {},
-    cancelReleaseFade: () => {},
-    getStatus: () => ({ ok: false }),
-    start() {},
-    stop() {},
-  };
-  const sent = [];
-  const client = {
-    sendEvent: (event) => {
-      sent.push(event);
-      return { eventId: "must-not-release", type: event.type, ok: true, state: "acknowledged" };
-    },
-    getStatus: () => ({ enabled: false, state: "disabled" }),
-    start() {},
-    stop() {},
-  };
-  asEventedClient(client);
-  const router = createShowEventRouter({
-    detector,
-    syndocalClient: client,
-    midi,
-    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: {
-      enabled: true,
-      sequence: "filter-then-fade",
-      filter: { startValue: 64, endValue: 127, resetValue: 64 },
-    },
-  });
-  admitCandidate(detector, client);
-  const pending = router.triggerAction("release");
-  assert.equal(pending.pending, true);
-  filterOptions.onComplete({ targetChannel: 1 });
-
-  const status = router.getStatus();
-  assert.equal(status.releaseMacroPhase, "failed");
-  assert.equal(status.releaseMacroReason, "release-fade-ramp-failed");
-  assert.equal(status.lastAction.phase, "failed");
-  assert.equal(midiCalls.filter((call) => call.name === "filter" && call.value === 64).length, 1);
-  assert.equal(midiCalls.some((call) => call.name === "stop"), false);
-  assert.deepEqual(sent.filter((event) => event.type === "DJ_RELEASE"), []);
-  router.stop();
-});
-
-test("release macro failure is truthful and never advances to stop or DJ_RELEASE", () => {
-  const detector = createTrackActivityDetector({ idFactory: () => "macro-failure-id" });
-  detector.onSnapshot({
-    masterDeck: 1,
-    deckNowPlaying: [{ deck: 1, contentId: "failure-track" }],
-    deckPlaybacks: [{ deck: 1, isPlaying: true }],
-  });
-  const midiCalls = [];
-  const midi = {
-    resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
-    hasReleaseFade: () => true,
-    sendMapping: (name) => { midiCalls.push(name); return true; },
-    startFilterRamp: () => ({ started: true, ok: true }),
-    startReleaseFade: () => ({ started: false, ok: false, reason: "midi-not-connected" }),
-    cancelFilterRamp: () => {},
-    cancelReleaseFade: () => {},
-    getStatus: () => ({ ok: false }),
-    start() {},
-    stop() {},
-  };
-  const sent = [];
-  const client = {
-    sendEvent: (event) => { sent.push(event); return { eventId: "unused", ok: true, state: "acknowledged" }; },
-    getStatus: () => ({ enabled: false, state: "disabled" }),
-    start() {},
-    stop() {},
-  };
-  asEventedClient(client);
-  const router = createShowEventRouter({
-    detector,
-    syndocalClient: client,
-    midi,
-    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
-    releaseMacro: { enabled: true, filter: { startValue: 64, endValue: 127 } },
-  });
-  admitCandidate(detector, client);
-  const result = router.triggerAction("release");
-  assert.equal(result.ok, false);
-  assert.match(result.reason, /release-fade|midi-not-connected/);
-  assert.deepEqual(midiCalls, ["filter"]);
-  assert.deepEqual(sent.filter((event) => event.type === "DJ_RELEASE"), []);
+  assert.equal(release.reason, "release-macro-unavailable");
+  assert.equal(midiCalls.length, 1, "no direct-Stop fallback may remain reachable");
   router.stop();
 });
 
@@ -996,11 +557,23 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   client.getStatus = () => ({ ...connection });
   client.start = () => {};
   client.stop = () => {};
+  const timers = [];
   const router = createShowEventRouter({
     detector,
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    timerApi: {
+      setTimeout(callback) { timers.push(callback); return callback; },
+      clearTimeout() {},
+    },
+    releaseMacro: {
+      enabled: true,
+      sequence: "filter-then-stop",
+      filter: { startValue: 64, endValue: 127, durationMs: 1000, updateIntervalMs: 50, resetValue: 64 },
+      resetAfterStop: true,
+      resetDelayMs: 0,
+    },
   });
 
   detector.onSnapshot({
@@ -1020,7 +593,9 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
     pedalOwner: "dj",
     releaseEventId: null,
   });
-  const stage1Release = router.triggerAction("release");
+  router.triggerAction("release");
+  timers.shift()();
+  const stage1Release = router.getStatus().lastAction;
   assert.equal(router.getStatus().mode, "handoff-pending");
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -1101,12 +676,14 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
 
 function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
   let identityCounter = 0;
+  const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({
     idFactory: () => `stage2-identity-${++identityCounter}`,
   });
   const midiCalls = [];
   const midi = {
     sendMapping: (name) => { midiCalls.push(name); return true; },
+    startFilterRamp: () => ({ started: true, ok: true }),
     resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
     start() {},
     stop() {},
@@ -1141,6 +718,8 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
   detector.onSnapshot({
@@ -1160,7 +739,9 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
     pedalOwner: "dj",
     releaseEventId: null,
   });
-  const stage1Release = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const stage1Release = router.getStatus().lastAction;
   const handoffEventId = stage1Release.delivery.eventId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -1333,6 +914,7 @@ test("reconnect requires a fresh authoritative snapshot before stage2 sends resu
 });
 
 test("terminal LOOP_SET outcomes clear the pending latch immediately and stay retryable", () => {
+  const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({ idFactory: (() => {
     let id = 0;
     return () => `loop-latch-${++id}`;
@@ -1354,6 +936,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
   client.stop = () => {};
   const midi = {
     sendMapping: () => true,
+    startFilterRamp: () => ({ started: true, ok: true }),
     resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
     start() {},
     stop() {},
@@ -1364,6 +947,8 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
   detector.onSnapshot({
@@ -1383,7 +968,9 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     pedalOwner: "dj",
     releaseEventId: null,
   });
-  const stage1Release = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const stage1Release = router.getStatus().lastAction;
   const handoffEventId = stage1Release.delivery.eventId;
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -1704,6 +1291,7 @@ test("Stage 1 actions fail closed without an acknowledged candidate", () => {
 });
 
 test("release handoff failures never stick in handoff-pending and running wins the late-failure race", () => {
+  const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({ idFactory: () => "handoff-lifecycle-id" });
   const client = new EventEmitter();
   const connection = { enabled: true, state: "connected" };
@@ -1719,6 +1307,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
   const midiCalls = [];
   const midi = {
     sendMapping: (name) => { midiCalls.push(name); return true; },
+    startFilterRamp: () => ({ started: true, ok: true }),
     resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
     getStatus: () => ({ ok: true }),
     start() {},
@@ -1729,6 +1318,8 @@ test("release handoff failures never stick in handoff-pending and running wins t
     syndocalClient: client,
     midi,
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
   });
   router.on("warning", () => {});
   detector.onSnapshot({
@@ -1748,7 +1339,9 @@ test("release handoff failures never stick in handoff-pending and running wins t
     releaseEventId: null,
   });
 
-  const first = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const first = router.getStatus().lastAction;
   assert.equal(first.delivery.state, "pending");
   assert.equal(router.getStatus().mode, "handoff-pending");
   client.emit("delivery", {
@@ -1765,7 +1358,9 @@ test("release handoff failures never stick in handoff-pending and running wins t
   assert.equal(router.getStatus().lastAction.phase, "failed");
   assert.equal(router.getStatus().lastAction.reason, "denied");
 
-  const second = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const second = router.getStatus().lastAction;
   assert.equal(second.delivery.state, "pending");
   client.emit("delivery", {
     eventId: second.delivery.eventId,
@@ -1781,7 +1376,9 @@ test("release handoff failures never stick in handoff-pending and running wins t
   assert.equal(router.getStatus().lastAction.phase, "failed");
   assert.equal(router.getStatus().lastAction.reason, "ack-timeout");
 
-  const third = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const third = router.getStatus().lastAction;
   assert.equal(router.getStatus().mode, "handoff-pending");
   client.emit("timeline-state", {
     state: "running",
@@ -1812,6 +1409,7 @@ test("release handoff failures never stick in handoff-pending and running wins t
 });
 
 test("synchronous DJ_RELEASE send failure returns to dj-control and remains retryable", () => {
+  const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({ idFactory: () => "sync-release-failure-id" });
   const client = new EventEmitter();
   client.getStatus = () => ({ enabled: true, state: "connected" });
@@ -1832,30 +1430,38 @@ test("synchronous DJ_RELEASE send failure returns to dj-control and remains retr
     syndocalClient: client,
     midi: {
       sendMapping: (name) => { if (name === "stop") stops += 1; return true; },
+      startFilterRamp: () => ({ started: true, ok: true }),
       resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
       getStatus: () => ({ ok: true }),
       start() {},
       stop() {},
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
   client.emit("timeline-state", { state: "idle", loopActive: false });
-  const first = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const first = router.getStatus().lastAction;
   assert.equal(first.delivery.state, "send-failed");
   assert.equal(router.getStatus().mode, "dj-control");
   assert.equal(router.getStatus().releaseMacroPhase, "failed");
   assert.equal(router.getStatus().releaseMacroReason, "not-sent");
   assert.equal(router.getStatus().lastAction.phase, "failed");
   assert.equal(stops, 1);
-  const second = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const second = router.getStatus().lastAction;
   assert.equal(second.delivery.state, "send-failed");
   assert.equal(router.getStatus().mode, "dj-control");
   assert.equal(stops, 2);
   router.stop();
 });
 
-test("Stage 1 release routes physical DJ_RELEASE when local Stop MIDI fails", () => {
+test("Stage 1 release routes physical DJ_RELEASE when planned Stop MIDI fails", () => {
+  const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({ idFactory: () => "legacy-failure-id" });
   const sent = [];
   const client = new EventEmitter();
@@ -1868,17 +1474,22 @@ test("Stage 1 release routes physical DJ_RELEASE when local Stop MIDI fails", ()
     syndocalClient: client,
     midi: {
       sendMapping: () => false,
+      startFilterRamp: () => ({ started: true, ok: true }),
       resolveTarget: (_name, targetDeck) => ({ targetDeck, targetChannel: 1 }),
       getStatus: () => ({ ok: false }),
       start() {},
       stop() {},
     },
     pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
   });
   admitCandidate(detector, client);
   client.emit("timeline-state", { state: "idle", loopActive: false });
-  const result = router.triggerAction("release");
-  assert.equal(result.reason, "local-midi-failed");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const result = router.getStatus().lastAction;
+  assert.equal(result.reason, "local-midi-stop-failed");
   assert.equal(result.midiSent, false);
   assert.equal(result.ok, false);
   assert.equal(result.delivery.state, "acknowledged");
@@ -2498,7 +2109,7 @@ test("Busy ACK retries the same eventId/sequence/shape and terminal rejection do
 
 test("Syndocal defaults use /dj-link, strict v3, five-second heartbeat, ws, and bounded history", async (t) => {
   const config = loadDjAgentConfig({
-    env: { DJ_AGENT_ENABLED: "true", SYNDOCAL_ENABLED: "true" },
+    env: {},
   });
   assert.equal(config.syndocal.path, "/dj-link");
   assert.equal(config.syndocal.adapter, "syndocal-envelope-v3");
@@ -3605,6 +3216,7 @@ test("router keeps identity-unproven Stage 1 actions off the disconnected networ
 });
 
 test("router correlates release timeout back to the same action event", async (t) => {
+  const releaseTimers = createReleaseTimers();
   class ActionWebSocket extends EventEmitter {
     static instances = [];
 
@@ -3648,7 +3260,14 @@ test("router correlates release timeout back to the same action event", async (t
     stop() {},
   };
   const pedal = { getStatus: () => ({ ok: true }), start() {}, stop() {} };
-  const router = createShowEventRouter({ detector, syndocalClient: client, midi, pedal });
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal,
+    releaseMacro: exactFilterThenStopMacro(),
+    timerApi: releaseTimers.timerApi,
+  });
   const routedEvents = [];
   const actions = [];
   let lastAction = null;
@@ -3700,7 +3319,9 @@ test("router correlates release timeout back to the same action event", async (t
     },
   }));
 
-  const release = router.triggerAction("release");
+  router.triggerAction("release");
+  releaseTimers.runPlannedCompletion();
+  const release = router.getStatus().lastAction;
   assert.equal(release.ok, false);
   assert.equal(release.delivery.state, "pending");
   await new Promise((resolve) => setTimeout(resolve, 35));
@@ -3711,7 +3332,7 @@ test("router correlates release timeout back to the same action event", async (t
   assert.equal(releaseFinal.source, "action");
   assert.equal(lastAction.delivery.state, "timed-out");
   assert.equal(lastAction.ok, false);
-  assert.equal(actions.length, 1);
+  assert.equal(socket.sent.filter((frame) => frame.type === "DJ_RELEASE").length, 1);
 });
 
 test("native optional dependency and pkg asset configuration keep source/packaged resolution explicit", () => {

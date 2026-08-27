@@ -8,23 +8,23 @@ only when the extension is explicitly enabled.
 
 ## Current state
 
-### Current Syndocal authority — v1.1.6 any-deck strict v3
+### Current Syndocal authority — v1.1.7 any-deck strict v3
 
 The current and next operator route uses
-`config/dj-agent-v1.1.6.example.json` and
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.6.csv`. The initializer creates
-only `C:\SyndocalShow\dj-agent-v1.1.6.json` when absent; it does not overwrite,
+`config/dj-agent-v1.1.7.example.json` and
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.7.csv`. The initializer creates
+only `C:\SyndocalShow\dj-agent-v1.1.7.json` when absent; it does not overwrite,
 copy, delete, or read the deployed historical v1.1.5 file. A mapped track may
 be admitted from any actually playing Rekordbox deck. MASTER/master-change is
 diagnostic only and never assigns show-control ownership. The v1.1.5
 controlled-source handoff remains deployed historical evidence, not current or
 next operator guidance.
 
-The exact v1.1.6 implementation checkpoint is
-`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`. Its 2026-08-27 full Node gate
-completed with 404 passed, 0 failed, and 2 explicitly skipped
-real-packaging-only cases. It is not yet deployed or physically accepted on the
-target DJ PC.
+The controlled v1.1.7 source change is based on docs tip
+`789f7724a699324cd87171ef835b69486bcd4e70`, whose runtime checkpoint is
+`ee2f6c3148f36dfd63e0b70e2ab372247dbb8572`. It remains a software-reviewed
+source candidate pending final independent review and physical acceptance; this document does not
+claim an installer, tag, deployment, or hardware acceptance.
 
 `GET /api/now-playing` (also available as `GET /api/state`) returns the complete
 snapshot used by the web UI. The loop-only endpoint is:
@@ -96,9 +96,11 @@ once for each known deck.
 
 ## DJ Agent extension
 
-The DJ Agent extension is disabled unless DJ_AGENT_ENABLED=true or a JSON
-file with "enabled": true is supplied through DJ_AGENT_CONFIG_PATH. When
-disabled, `GET /api/dj-agent/status` still returns HTTP 200 with
+The DJ Agent extension is disabled unless an exact external v1.1.7
+`filter-then-stop` JSON file is supplied through `DJ_AGENT_CONFIG_PATH`.
+`DJ_AGENT_ENABLED`, inline JSON, and every Syndocal/MIDI/pedal environment
+override fail closed with one fixed secret-free reason. When disabled,
+`GET /api/dj-agent/status` still returns HTTP 200 with
 `enabled:false`; the POST action routes return 404 and the existing APIs
 remain unchanged.
 
@@ -111,18 +113,16 @@ physical pedal:
 * POST /api/dj-agent/actions/release
 * POST /api/dj-agent/actions/track-active
 
-When configured, `midi.deckChannels` maps a one-based Rekordbox deck to a MIDI
-channel, for example `{ "1": 1, "2": 2 }`. The admitted owner deck (not the
-current MASTER diagnostic) selects the channel for loop-half, release, and
-every filter-ramp CC message; an unmapped deck falls back to the mapping's
-configured `channel`. Action results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads
-expose `targetDeck` and `targetChannel`. The equivalent environment override is
-the JSON-valued `MIDI_DECK_CHANNELS` variable.
+The exact configuration fixes `midi.deckChannels` to `{ "1": 1, "2": 2 }`.
+The admitted owner deck (not the current MASTER diagnostic) selects the channel
+for loop-half, release, and every filter-ramp CC message. An unmapped deck is
+blocked; it never falls back to a mapping channel or an environment override.
+Action results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads expose `targetDeck` and
+`targetChannel`.
 
-POST actions are loopback-only by default. IPv4 `127.0.0.0/8`, IPv4-mapped
-IPv6 loopback, and `::1` are accepted. A remote request receives HTTP 403 unless
-`DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` is explicitly configured. The read-only
-status route remains remotely readable.
+POST actions are permanently loopback-only. IPv4 `127.0.0.0/8`, IPv4-mapped
+IPv6 loopback, and `::1` are accepted; a remote request receives HTTP 403. The
+read-only status route remains remotely readable.
 
 For actions that send `DJ_RELEASE`, HTTP 202 with
 `ok:false`/`ackState:"pending"` means the Syndocal leg is waiting for an ACK.
@@ -170,7 +170,7 @@ admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
 three owner-correlation fields are present. Rekordbox MASTER is never encoded
 as show-control ownership. `DJ_LOOP_STATE` and `DJ_LOOP_FALLBACK` likewise
 correlate only to the admitted deck/deckId/playSessionId; foreign, mixed, or
-master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.6
+master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.7
 operator capability; it remains only deployed historical v1.1.5 evidence.
 `DJ_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
 connection-generation + wire-sequence eventId, never enters the durable
@@ -188,16 +188,18 @@ reconnection.
 is the last authoritative state (`idle`, `running`, `stopped`, `ended`, or
 `reset`); `timelineLoopActive` is the authoritative loop value; and
 `lastTimelineAction` contains the last Stage 2 action and its ACK delivery.
-`releaseMacroSequence` is `parallel` or `filter-then-fade`, and
-`releaseMacroPhase` reports `idle`, `filter-ramp`, `parallel-ramp`, `fade-ramp`,
-`stopping`, `resetting`, `handoff-pending`, `complete`, or `failed`.
-`releaseMacroReason` carries the terminal ramp/delivery failure reason when
-the phase is `failed` (otherwise it is `null`), and `lastAction` is updated
-with the same canonical release eventId, delivery state, phase, and reason.
-`filter-then-fade` guarantees that the first ChannelFader MIDI message is
-sent only after the Filter ramp completion callback; a Filter failure starts
-no fade/Stop/Release, and a fade failure attempts Filter reset without
-starting Stop/Release. `parallel` remains the backwards-compatible default.
+`releaseMacroSequence` is exactly `filter-then-stop`, and
+`releaseMacroPhase` reports `idle`, `blocked`, `filter-ramp`,
+`filter-failed-awaiting-completion`, `stopping`, `handoff-pending`, `complete`,
+or `failed`. `releaseMacroReason` and `lastAction.localFailure` preserve a
+local Filter/Stop failure without promoting it to success. F13 schedules its
+planned 1000ms Filter completion first, starts only the owner-deck Filter HPF
+ramp, attempts Cue/Stop exactly once at that planned completion, and routes
+one correlated `DJ_RELEASE` independently of either local result. It never
+sends fade or channel-fader MIDI. `lastReleaseReset` records the optional Filter reset
+as a best-effort post-release action, so reset failure cannot block or duplicate
+the release. An ACK alone does not enter Stage 2; only the correlated,
+authoritative running timeline state does. Stage 2 sends zero Rekordbox MIDI.
 Stage 1 F15 returns an explicit `ignored:true`, `state:"inactive"` result and
 HTTP 200 so an intentional no-op is not rendered as a hardware/network error.
 

@@ -1,24 +1,43 @@
 const { EventEmitter } = require("node:events");
-const { normalizeReleaseMacroSequence } = require("./config");
 const { createStage1LoopFallback } = require("./stage1LoopFallback");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
+const DEFAULT_TIMER_API = Object.freeze({
+  setTimeout(callback, delayMs) {
+    return setTimeout(callback, delayMs);
+  },
+  clearTimeout(timer) {
+    clearTimeout(timer);
+  },
+});
+
+function resolveTimerApi(timerApi) {
+  return {
+    setTimeout: typeof timerApi?.setTimeout === "function"
+      ? timerApi.setTimeout.bind(timerApi)
+      : DEFAULT_TIMER_API.setTimeout,
+    clearTimeout: typeof timerApi?.clearTimeout === "function"
+      ? timerApi.clearTimeout.bind(timerApi)
+      : DEFAULT_TIMER_API.clearTimeout,
+  };
+}
 
 function createShowEventRouter({
   detector,
   syndocalClient,
   midi,
   pedal,
-  releaseReset = { enabled: false, steps: [] },
   releaseMacro = { enabled: false },
   loopFallback = {},
+  timerApi,
   now = () => Date.now(),
 } = {}) {
   if (!detector || !syndocalClient || !midi || !pedal) {
     throw new TypeError("showEventRouter requires detector, syndocalClient, midi, and pedal");
   }
   const emitter = new EventEmitter();
+  const releaseTimerApi = resolveTimerApi(timerApi);
   const resetTimers = new Set();
   let currentSnapshot = {};
   let loopDivision = 0;
@@ -42,11 +61,21 @@ function createShowEventRouter({
   let lastTimelineAction = null;
   let lastTimelineWarning = null;
   let releaseMacroActive = false;
-  const releaseMacroSequence = normalizeReleaseMacroSequence(
-    releaseMacro.sequence ?? releaseMacro.mode
-  );
+  const releaseMacroSequence = releaseMacro.sequence === "filter-then-stop"
+    ? "filter-then-stop"
+    : null;
+  const releaseMacroConfigured = releaseMacro.enabled === true &&
+    releaseMacroSequence === "filter-then-stop" &&
+    releaseMacro.filter?.startValue === 64 &&
+    releaseMacro.filter?.endValue === 127 &&
+    releaseMacro.filter?.durationMs === 1_000 &&
+    releaseMacro.filter?.updateIntervalMs === 50 &&
+    releaseMacro.filter?.resetValue === 64 &&
+    releaseMacro.resetAfterStop === true &&
+    releaseMacro.resetDelayMs === 0;
   let releaseMacroPhase = "idle";
   let releaseMacroReason = null;
+  let lastReleaseReset = null;
   let activeReleaseAction = null;
   let lastAction = null;
   let releaseMacroGeneration = 0;
@@ -593,8 +622,8 @@ function createShowEventRouter({
                   phase: releaseMacroPhase,
                 }
               : {}),
-            ok: acknowledged && lastAction.midiSent !== false,
-            reason: acknowledged ? null : delivery.reason || delivery.state,
+            ok: acknowledged && lastAction.midiSent !== false && !lastAction.localFailure,
+            reason: lastAction.localFailure || (acknowledged ? null : delivery.reason || delivery.state),
           };
           if (updated.type === "DJ_RELEASE" && failure && releaseMacroPhase === "failed") {
             lastAction.reason = releaseMacroReason || lastAction.reason;
@@ -654,26 +683,6 @@ function createShowEventRouter({
     const result = detector.onMasterChange(event);
     emitState();
     return result;
-  }
-
-  function sendResetStep(step, targetDeck) {
-    if (!step || !step.mapping) {
-      return false;
-    }
-    return midi.sendMapping(step.mapping, { targetDeck });
-  }
-
-  function scheduleReleaseReset(targetDeck) {
-    if (!releaseReset?.enabled || !Array.isArray(releaseReset.steps)) {
-      return;
-    }
-    for (const step of releaseReset.steps) {
-      const timer = setTimeout(() => {
-        resetTimers.delete(timer);
-        sendResetStep(step, targetDeck);
-      }, Math.max(0, Number(step.delayMs) || 0));
-      resetTimers.add(timer);
-    }
   }
 
   function authoritativeTimelinePlaySessionId() {
@@ -758,11 +767,10 @@ function createShowEventRouter({
       targetChannel: midiTarget("stop", targetDeck).targetChannel,
       stopChannel: midiTarget("stop", targetDeck).targetChannel,
       filterChannel: midiTarget("filter", targetDeck).targetChannel,
-      fadeChannel: midiTarget("releaseFade", targetDeck).targetChannel,
     };
   }
 
-  function finalizeRelease({ target, stopSent, filterRamp, fadeRamp, reset, generation }) {
+  function finalizeRelease({ target, stopSent, filterRamp, reset, localFailure = null, generation }) {
     if (generation !== releaseMacroGeneration) {
       return null;
     }
@@ -783,9 +791,9 @@ function createShowEventRouter({
     if (isDeliveryFailure(delivery)) {
       setReleaseMacroPhase("failed", deliveryFailureReason(delivery));
     } else if (mode === "handoff-pending") {
-      setReleaseMacroPhase("handoff-pending", null);
+      setReleaseMacroPhase("handoff-pending", localFailure);
     } else {
-      setReleaseMacroPhase("complete", null);
+      setReleaseMacroPhase("complete", localFailure);
     }
     releaseMacroActive = false;
     activeReleaseAction = null;
@@ -798,16 +806,16 @@ function createShowEventRouter({
       targetDeck: target.targetDeck,
       targetChannel: target.targetChannel,
       filterRamp,
-      fadeRamp,
       reset,
+      localFailure,
       midiSent: stopSent === true,
       delivery,
-      ok: stopSent === true && delivery?.ok === true,
-      reason: stopSent !== true
+      ok: stopSent === true && !localFailure && delivery?.ok === true,
+      reason: localFailure || (stopSent !== true
         ? "local-midi-stop-failed"
         : releaseMacroPhase === "failed"
           ? releaseMacroReason
-          : delivery?.state || null,
+          : delivery?.state || null),
     };
     return emitAction(result);
   }
@@ -817,73 +825,107 @@ function createShowEventRouter({
     releaseMacroActive = true;
     const target = releaseTarget(targetDeck);
     const macroFilter = releaseMacro?.filter || {};
-    const sequence = releaseMacroSequence;
+    const durationMs = Math.max(1, Number(macroFilter.durationMs) || 1);
     let filterRamp = null;
-    let fadeRamp = null;
-    let filterDone = false;
-    let fadeDone = false;
-    let failed = false;
+    let filterFailure = null;
+    let filterOutcome = null;
+    let completionTimer = null;
+    let releaseRouted = false;
     let finalResult = null;
 
     const updatePending = (patch = {}) => {
       updateActiveReleaseAction({
         target,
         filterRamp,
-        fadeRamp,
         ...patch,
       });
     };
 
-    const resetFilterAfterFadeFailure = () => {
-      try {
-        const sent = midi.sendMapping("filter", {
-          targetDeck: target.targetDeck,
-          value: macroFilter.resetValue,
-        });
-        return { filter: sent === true, value: macroFilter.resetValue };
-      } catch (error) {
-        return {
-          filter: false,
-          value: macroFilter.resetValue,
-          error: error?.message || String(error),
-        };
-      }
-    };
-
-    const fail = (reason, extra = {}) => {
-      if (failed || generation !== releaseMacroGeneration) {
-        return finalResult;
-      }
-      failed = true;
-      midi.cancelFilterRamp?.("release-macro-failed");
-      midi.cancelReleaseFade?.("release-macro-failed");
-      releaseMacroActive = false;
-      activeReleaseAction = null;
-      setReleaseMacroPhase("failed", reason);
-      emitWarning(`Release macro failed: ${reason}`, "release-macro");
-      finalResult = emitAction({
-        action: "release",
-        mode,
-        sequence,
-        phase: "failed",
-        target,
+    const scheduleBestEffortReset = () => {
+      if (releaseMacro.resetAfterStop !== true) return null;
+      const delayMs = Math.max(0, Number(releaseMacro.resetDelayMs) || 0);
+      lastReleaseReset = {
+        state: "scheduled",
+        mapping: "filter",
         targetDeck: target.targetDeck,
-        targetChannel: target.targetChannel,
-        filterRamp,
-        fadeRamp,
-        midiSent: false,
-        delivery: null,
-        ok: false,
-        reason,
-        ...extra,
-      });
-      return finalResult;
+        value: macroFilter.resetValue,
+        delayMs,
+      };
+      const resetTimer = releaseTimerApi.setTimeout(() => {
+        resetTimers.delete(resetTimer);
+        if (generation !== releaseMacroGeneration) return;
+        let sent = false;
+        try {
+          sent = midi.sendMapping("filter", {
+            targetDeck: target.targetDeck,
+            value: macroFilter.resetValue,
+          }) === true;
+        } catch {
+          sent = false;
+        }
+        lastReleaseReset = {
+          ...lastReleaseReset,
+          state: sent ? "completed" : "failed",
+          ok: sent,
+          reason: sent ? null : "release-filter-reset-failed",
+        };
+        if (!sent) {
+          emitWarning("Release filter reset failed after DJ_RELEASE", "release-macro");
+        }
+        emitState();
+      }, delayMs);
+      resetTimers.add(resetTimer);
+      return { ...lastReleaseReset };
     };
 
-    const finishRamps = () => {
-      if (failed || !filterDone || !fadeDone || generation !== releaseMacroGeneration) {
-        return;
+    const cancelRampAtPlannedCompletion = () => {
+      // Status inspection is diagnostic only. A broken adapter status method
+      // must not be able to prevent the independently required Stop/Release.
+      let activeBeforeCancel = null;
+      try {
+        activeBeforeCancel = midi.getStatus?.().rampActive === true;
+      } catch {
+        activeBeforeCancel = null;
       }
+      const cancellation = {
+        state: "not-supported",
+        attempted: false,
+        activeBeforeCancel,
+        ok: null,
+      };
+      if (typeof midi.cancelFilterRamp !== "function") {
+        return { cancellation, failure: null };
+      }
+      cancellation.attempted = true;
+      try {
+        cancellation.ok = midi.cancelFilterRamp("planned-filter-completion") === true;
+        cancellation.state = cancellation.ok
+          ? "cancelled"
+          : activeBeforeCancel === false
+            ? "not-active"
+            : "failed";
+      } catch {
+        cancellation.ok = false;
+        cancellation.state = "failed";
+      }
+      const failure = cancellation.state === "failed"
+        ? "release-filter-ramp-cancel-failed"
+        : null;
+      filterRamp = { ...(filterRamp || {}), cancellation };
+      return { cancellation, failure };
+    };
+
+    const finishAtPlannedFilterCompletion = () => {
+      if (releaseRouted || generation !== releaseMacroGeneration) return finalResult;
+      releaseRouted = true;
+      if (completionTimer) {
+        resetTimers.delete(completionTimer);
+        completionTimer = null;
+      }
+      // Cancel the production interval before Stop.  The MIDI implementation
+      // additionally fences a callback that was queued at this same boundary.
+      // A cancel failure is visible, but cannot suppress the one Stop/Release.
+      const rampCancellation = cancelRampAtPlannedCompletion();
       setReleaseMacroPhase("stopping");
       let stopSent = false;
       try {
@@ -891,109 +933,37 @@ function createShowEventRouter({
       } catch {
         stopSent = false;
       }
-      if (stopSent !== true) {
-        // The F13 physical intent remains reportable even when the macro's
-        // final Stop mapping fails. Do not make Syndocal delivery disappear
-        // behind that local failure; the action result carries both truths.
-        fenceReleasedSession(activePlaySessionId);
-        const routedEvent = routeEvent({
-          type: "DJ_RELEASE",
-          source: "action",
-          payload: {
-            state: "released",
-            timelineId,
-            playSessionId: activePlaySessionId,
-          },
-        });
-        applyReleaseDeliveryLifecycle(routedEvent.delivery, routedEvent.eventId);
-        fail("local-midi-stop-failed", {
-          midiSent: false,
-          delivery: routedEvent.delivery,
-        });
-        return;
-      }
-      if (releaseMacro.resetAfterStop !== true) {
-        finalizeRelease({ target, stopSent, filterRamp, fadeRamp, reset: null, generation });
-        return;
-      }
-      setReleaseMacroPhase("resetting");
-      const resetDelayMs = Math.max(0, Number(releaseMacro.resetDelayMs) || 0);
-      const resetTimer = setTimeout(() => {
-        resetTimers.delete(resetTimer);
-        if (failed || generation !== releaseMacroGeneration) {
-          return;
-        }
-        const filterReset = midi.sendMapping("filter", {
-          targetDeck: target.targetDeck,
-          value: macroFilter.resetValue,
-        });
-        const fadeResetResult = midi.resetReleaseFade?.({
-          targetDeck: target.targetDeck,
-          value: fadeRamp?.resetValue,
-        });
-        const fadeReset = typeof fadeResetResult === "boolean"
-          ? { ok: fadeResetResult, reason: fadeResetResult ? null : "release-fade-reset-failed" }
-          : fadeResetResult || { ok: false, reason: "release-fade-reset-unavailable" };
-        const reset = { filter: filterReset, fade: fadeReset };
-        if (filterReset !== true || fadeReset.ok !== true) {
-          fail("release-reset-failed", { midiSent: true, reset });
-          return;
-        }
-        finalizeRelease({ target, stopSent, filterRamp, fadeRamp, reset, generation });
-      }, resetDelayMs);
-      resetTimers.add(resetTimer);
+      const reset = scheduleBestEffortReset();
+      finalResult = finalizeRelease({
+        target,
+        stopSent,
+        filterRamp,
+        reset,
+        localFailure: filterFailure || rampCancellation.failure || (stopSent ? null : "local-midi-stop-failed"),
+        generation,
+      });
+      return finalResult;
     };
 
-    const startFade = () => {
-      if (
-        failed ||
-        fadeRamp ||
-        fadeDone ||
-        generation !== releaseMacroGeneration ||
-        (sequence === "filter-then-fade" && !filterDone)
-      ) {
-        return;
-      }
-      setReleaseMacroPhase("fade-ramp");
-      fadeRamp = midi.startReleaseFade?.({
-        targetDeck: target.targetDeck,
-        onComplete: (result) => {
-          fadeRamp = { ...(fadeRamp || {}), ...result };
-          fadeDone = true;
-          updatePending({ fadeRamp });
-          finishRamps();
-        },
-        onError: (error) => {
-          const reset = resetFilterAfterFadeFailure();
-          fail("release-fade-ramp-failed", { error, reset });
-        },
-      }) || { started: false, ok: false, reason: "release-fade-unavailable" };
-      // startReleaseFade may invoke onError synchronously while attempting its
-      // first CC. That callback already performed the one safe Filter reset;
-      // do not run the unavailable/started fallback path a second time.
-      if (failed) {
-        return finalResult;
-      }
-      if (fadeRamp.started !== true) {
-        const reset = resetFilterAfterFadeFailure();
-        fail(fadeRamp.reason || "release-fade-ramp-failed", { reset });
-        return;
-      }
-      target.filterChannel = filterRamp?.targetChannel ?? target.filterChannel;
-      target.fadeChannel = fadeRamp.targetChannel ?? target.fadeChannel;
-      updatePending({ fadeRamp });
+    const recordFilterFailure = () => {
+      if (releaseRouted || generation !== releaseMacroGeneration || filterFailure) return;
+      filterFailure = "release-filter-ramp-failed";
+      filterOutcome = { ...(filterOutcome || {}), state: "failed", reason: filterFailure };
+      filterRamp = { ...(filterRamp || {}), ...filterOutcome };
+      setReleaseMacroPhase("filter-failed-awaiting-completion", filterFailure);
+      updatePending({ filterRamp });
+      emitWarning("Release filter ramp failed; planned Stop and DJ_RELEASE remain scheduled", "release-macro");
     };
 
     const pending = {
       action: "release",
       mode,
-      sequence,
-      phase: sequence === "filter-then-fade" ? "filter-ramp" : "parallel-ramp",
+      sequence: releaseMacroSequence,
+      phase: "filter-ramp",
       target,
       targetDeck: target.targetDeck,
       targetChannel: target.targetChannel,
       filterRamp: null,
-      fadeRamp: null,
       midiSent: false,
       delivery: null,
       ok: false,
@@ -1003,79 +973,35 @@ function createShowEventRouter({
     setReleaseMacroPhase(pending.phase, null);
     activeReleaseAction = pending;
 
-    filterRamp = midi.startFilterRamp?.({
-      targetDeck: target.targetDeck,
-      startValue: macroFilter.startValue,
-      endValue: macroFilter.endValue,
-      durationMs: macroFilter.durationMs,
-      updateIntervalMs: macroFilter.updateIntervalMs,
-      onComplete: (result) => {
-        filterRamp = { ...(filterRamp || {}), ...result };
-        filterDone = true;
-        updatePending({ filterRamp });
-        if (sequence === "filter-then-fade") {
-          startFade();
-        } else {
-          finishRamps();
-        }
-      },
-      onError: (error) => fail("release-filter-ramp-failed", { error }),
-    }) || { started: false, ok: false, reason: "filter-ramp-unavailable" };
-    if (failed || filterRamp.started !== true) {
-      return fail(filterRamp.reason || "release-filter-ramp-failed");
-    }
-    activeReleaseAction = { ...pending, filterRamp };
-    if (sequence === "parallel" && !fadeRamp && !failed) {
-      startFade();
-    }
-    if (!activeReleaseAction) {
-      return finalResult;
-    }
-    return emitAction(activeReleaseAction);
-  }
-
-  function sendLegacyRelease(target) {
-    let midiSent = false;
-    let midiError = null;
+    // The Stop deadline belongs to the physical F13 intent, not to successful
+    // MIDI ramp delivery.  It therefore remains armed through an unavailable
+    // MIDI port, a first-CC failure, or a later ramp failure.
+    completionTimer = releaseTimerApi.setTimeout(finishAtPlannedFilterCompletion, durationMs);
+    resetTimers.add(completionTimer);
     try {
-      midiSent = midi.sendMapping("stop", { targetDeck: target.targetDeck }) === true;
-    } catch (error) {
-      midiError = error?.message || String(error);
+      filterRamp = midi.startFilterRamp?.({
+        targetDeck: target.targetDeck,
+        startValue: macroFilter.startValue,
+        endValue: macroFilter.endValue,
+        durationMs,
+        updateIntervalMs: macroFilter.updateIntervalMs,
+        onComplete: (result) => {
+          if (releaseRouted || generation !== releaseMacroGeneration || filterFailure) return;
+          filterOutcome = { ...(filterOutcome || {}), ...(result || {}), state: "completed" };
+          filterRamp = { ...(filterRamp || {}), ...filterOutcome };
+          updatePending({ filterRamp });
+        },
+        onError: recordFilterFailure,
+      }) || { started: false, ok: false, reason: "filter-ramp-unavailable" };
+    } catch {
+      filterRamp = { started: false, ok: false, reason: "filter-ramp-unavailable" };
     }
-    released = midiSent === true;
-    // F13 is a physical release intent independently of whether the local
-    // Stop mapping reports success. Route that intent exactly once so MIDI and
-    // Syndocal delivery retain separate, truthful outcomes.
-    fenceReleasedSession(activePlaySessionId);
-    const routedEvent = routeEvent({
-      type: "DJ_RELEASE",
-      source: "action",
-      payload: {
-        state: "released",
-        timelineId,
-        playSessionId: activePlaySessionId,
-      },
-    });
-    const delivery = routedEvent.delivery;
-    applyReleaseDeliveryLifecycle(delivery, routedEvent.eventId);
-    scheduleReleaseReset(target.targetDeck);
-    return emitAction({
-      action: "release",
-      mode,
-      sequence: releaseMacroSequence,
-      phase: releaseMacroPhase,
-      target,
-      targetDeck: target.targetDeck,
-      targetChannel: target.targetChannel,
-      midiSent,
-      delivery,
-      ok: midiSent === true && delivery?.ok === true,
-      reason: midiSent !== true
-        ? midiError || "local-midi-failed"
-        : releaseMacroPhase === "failed"
-          ? releaseMacroReason
-          : delivery?.state || null,
-    });
+    filterRamp = { ...(filterRamp || {}), ...(filterOutcome || {}) };
+    if (filterRamp.started !== true) {
+      recordFilterFailure();
+    }
+    updatePending({ filterRamp, plannedCompletionMs: durationMs });
+    return emitAction(activeReleaseAction);
   }
 
   function triggerAction(action) {
@@ -1161,11 +1087,11 @@ function createShowEventRouter({
       if (!owner) {
         return blockedAction("release", "no-admitted-track-candidate");
       }
-      const target = releaseTarget(owner.deck);
-      if (releaseMacro?.enabled === true) {
-        return startReleaseMacro(target.targetDeck);
+      if (!releaseMacroConfigured) {
+        setReleaseMacroPhase("blocked", "release-macro-unavailable");
+        return blockedAction("release", "release-macro-unavailable");
       }
-      return sendLegacyRelease(target);
+      return startReleaseMacro(owner.deck);
     }
     if (normalized === "track-active" || normalized === "track_active" || normalized === "test-track-active") {
       return emitAction({
@@ -1201,6 +1127,7 @@ function createShowEventRouter({
       releaseMacroSequence,
       releaseMacroPhase,
       releaseMacroReason,
+      lastReleaseReset,
       lastAction,
       // `masterDeck` is deliberately not repurposed: under the generic v3
       // capability contract these explicit fields describe show-control
@@ -1241,6 +1168,7 @@ function createShowEventRouter({
       releaseMacroPhase,
       releaseMacroReason,
       releaseMacroActive,
+      lastReleaseReset,
       lastAction,
       loopDivision,
       stage1LoopFallback: stage1LoopFallback.getState(),
@@ -1272,11 +1200,15 @@ function createShowEventRouter({
     releaseMacroActive = false;
     stage1LoopFallback.clear("router-stopped");
     for (const timer of resetTimers) {
-      clearTimeout(timer);
+      releaseTimerApi.clearTimeout(timer);
     }
     resetTimers.clear();
-    midi.cancelFilterRamp?.("router-stopped");
-    midi.cancelReleaseFade?.("router-stopped");
+    try {
+      midi.cancelFilterRamp?.("router-stopped");
+    } catch {
+      // Shutdown is best-effort. A cancellation failure was already recorded
+      // at planned completion when it affected an active F13 macro.
+    }
     pedal.stop();
     midi.stop();
     syndocalClient.stop();
