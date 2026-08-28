@@ -29,8 +29,39 @@ ACL. Its pinned PowerShell writer uses `FileMode.CreateNew` plus `FileShare.None
 through flush and rejects a reparse-point parent. The Node parent path/identity
 evidence is passed into the helper; its `OPEN_REPARSE_POINT` parent handle's
 own reparse attribute and File ID must exactly match before token write. Parent
-ACL ownership and inheritance remain operator-managed; no broader Windows ACL
-guarantee is claimed.
+ACL ownership and inheritance remain operator-managed and the updater never
+mutates them. Broad Allow-write access for Everyone, Authenticated Users, or
+BUILTIN\\Users fails before target creation as fixed reason
+`PARENT_ACL_UNSAFE`. The parent handle permits read/write sharing but omits
+delete sharing; the target remains `FileShare.None` through durable flush.
+
+### 2026-08-28 v1.1.11 upgrade-writer live failure repair checkpoint
+
+Branch `beta-v1.1.2` was clean and equal to upstream at base HEAD
+`eea9d1dcaf82542eb4dc179724df049af9f02f1d`. On the controlled DJ PC, the
+initial updater rejected the inherited `Authenticated Users: Modify` parent
+ACL before creating a target. After the operator explicitly narrowed the exact
+parent to the current user, LocalSystem, and Administrators, the original
+writer still failed at its parent-directory native handle with Win32 code 203;
+a direct non-secret `FileStream(CreateNew, FileShare.None)` probe succeeded.
+The repaired writer therefore binds the parent with `FILE_READ_ATTRIBUTES` and
+`FILE_SHARE_READ | FILE_SHARE_WRITE`, while still omitting
+`FILE_SHARE_DELETE`. It also requires an allowlisted fixed `OK` marker and
+reports only fixed failure reasons; helper stderr, config bytes, and token bytes
+remain undisclosed. Automatic ACL mutation was prototyped, rejected by
+independent review because inherited/Deny ACE semantics were under-proven, and
+removed completely.
+
+Supervisor and independent Terra xHigh gates passed: `node --check
+scripts/upgrade-show-config.js`, `node --test
+tests/upgrade-show-config.test.js` (**18/18**, including live Windows
+rename/replacement and cleanup fences), and scoped `git diff --check` with only
+the repository's LF-to-CRLF notices. First-party warnings are **0**. The new
+target still did not exist at this checkpoint, so DJ-PC rerun, generated target
+validation, strict preflight, runtime restart, Rekordbox state coherence,
+pedal, Syndocal ACK, LAN, and physical hardware acceptance remain unverified.
+The first next action is pull this checkpoint on the DJ PC and rerun the same
+`start-all.bat --upgrade-config` against the unchanged v1.1.10 source.
 
 branch `beta-v1.1.2`の再接続ABA fenceはcommit
 `eb9d131f7b57c29231bdf605f498c877180ad553`としてpush済みです。この次の

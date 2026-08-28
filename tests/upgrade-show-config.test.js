@@ -19,6 +19,7 @@ const {
   WINDOWS_TARGET_ACL_BOUNDARY,
   ShowConfigUpgradeError,
   encodeSecureWriterFrame,
+  secureWriterResultCode,
   writeSecureWindowsTarget,
   upgradeShowConfig,
   validateStrictShowConfig,
@@ -444,6 +445,54 @@ test("Windows secure writer denies target rename and replacement while its handl
   assert.doesNotMatch(WINDOWS_SECURE_WRITER_SCRIPT, /RB_OUTPUT_SECURE_WRITER_HOLD_MS/);
   assert.equal(WINDOWS_TARGET_ACL_BOUNDARY.parent, String.raw`C:\SyndocalShow`);
   assert.equal(WINDOWS_TARGET_ACL_BOUNDARY.unixModeClaim, false);
+});
+
+test("Windows parent identity handle permits child open but retains delete fence", () => {
+  assert.match(
+    WINDOWS_SECURE_WRITER_SCRIPT,
+    /\$parent,\s*\r?\n\s*0x00000080,\s*\r?\n\s*0x00000003,/,
+  );
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /FILE_SHARE_DELETE/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /FILE_READ_ATTRIBUTES/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /C:\\SyndocalShow/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /S-1-5-11/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /target parent ACL grants broad write access/);
+  assert.doesNotMatch(WINDOWS_SECURE_WRITER_SCRIPT, /SetAccessControl/);
+  assert.doesNotMatch(WINDOWS_SECURE_WRITER_SCRIPT, /SetAccessRuleProtection/);
+  assert.doesNotMatch(WINDOWS_SECURE_WRITER_SCRIPT, /AddAccessRule/);
+  assert.doesNotMatch(WINDOWS_SECURE_WRITER_SCRIPT, /RemoveAccessRuleSpecific/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /PARENT_ACL_UNSAFE/);
+  assert.match(WINDOWS_SECURE_WRITER_SCRIPT, /RB_OUTPUT_SECURE_WRITER_RESULT=/);
+});
+
+test("secure writer diagnostics accept only fixed codes and never echo helper output", () => {
+  assert.equal(
+    secureWriterResultCode({ stdout: "READY\r\nRB_OUTPUT_SECURE_WRITER_RESULT=PARENT_OPEN_FAILED\r\n" }),
+    "PARENT_OPEN_FAILED",
+  );
+  assert.equal(
+    secureWriterResultCode({ stdout: "RB_OUTPUT_SECURE_WRITER_RESULT=SECRET_TOKEN_VALUE\r\n" }),
+    "NO_RESULT",
+  );
+  assert.equal(
+    secureWriterResultCode({ stdout: "", error: new Error("token must never be logged") }),
+    "PROCESS_SPAWN_FAILED",
+  );
+});
+
+test("secure writer does not accept a zero exit without the fixed success marker", (t) => {
+  const fixture = makeFixture(t);
+  fs.mkdirSync(path.dirname(fixture.targetPath), { recursive: true });
+  const targetPlan = targetPlanForTest(fixture.targetPath);
+  const originalSpawnSync = childProcess.spawnSync;
+  t.after(() => { childProcess.spawnSync = originalSpawnSync; });
+  childProcess.spawnSync = () => ({ status: 0, stdout: "", stderr: "" });
+  assert.throws(
+    () => writeSecureWindowsTarget(fixture.targetPath, "safe-payload\n", targetPlan),
+    (error) => error instanceof ShowConfigUpgradeError &&
+      error.code === "TARGET_WRITE_FAILED" &&
+      error.message.includes("writer reason: NO_RESULT"),
+  );
 });
 
 test("Windows writer rejects a parent replacement after Node preflight", { skip: process.platform !== "win32" }, (t) => {

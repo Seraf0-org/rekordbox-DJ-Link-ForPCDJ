@@ -99,6 +99,15 @@ PowerShell assignment for the next invocation, and does not start the runtime
 in the migration invocation. This is one-way tooling only: after every
 controlled DJ PC has adopted v1.1.11, remove the predecessor migration path.
 
+The exact `C:\SyndocalShow` parent must not grant broad write access to
+Everyone, Authenticated Users, or BUILTIN\\Users. The updater never changes the
+parent ACL automatically. An unsafe parent fails before target creation with the
+fixed reason `PARENT_ACL_UNSAFE`; other secure-writer failures likewise expose
+only an allowlisted reason code and never print the token or configuration.
+The Windows parent handle permits ordinary read/write sharing but deliberately
+omits delete sharing, while the exclusive target handle remains live through
+durable flush.
+
 Reconnect replay is fail-closed: only a pending, exactly correlated
 `DJ_RELEASE` may cross a socket close/error. It keeps its eventId and semantic
 payload until a matching current-socket ACK or exact authoritative running

@@ -100,8 +100,11 @@ $parentHandle = [IntPtr]::Zero
 $targetIdentity = $null
 $created = $false
 $exitCode = 1
+$stage = 'bootstrap'
+$failureCode = 'SECURE_WRITER_FAILED'
 $target = $null
 try {
+  $stage = 'frame'
   $frameBytes = [Convert]::FromBase64String(([Console]::In.ReadToEnd()).Trim())
   if ($frameBytes.Length -eq 0) { throw 'invalid secure-writer frame' }
   $frame = ([Text.Encoding]::UTF8.GetString($frameBytes)) | ConvertFrom-Json
@@ -110,19 +113,46 @@ try {
   $expectedParent = [string]$frame.parentResolvedPath
   $expectedParentIdentity = [string]$frame.parentIdentity
   $expectedParentResolvedIdentity = [string]$frame.parentResolvedIdentity
+  $stage = 'parent-path'
   if ([String]::IsNullOrWhiteSpace($target) -or [String]::IsNullOrWhiteSpace($parent) -or [String]::IsNullOrWhiteSpace($expectedParent)) { throw 'invalid secure-writer paths' }
   if ([String]::IsNullOrWhiteSpace($expectedParentIdentity) -or [String]::IsNullOrWhiteSpace($expectedParentResolvedIdentity)) { throw 'invalid secure-writer identity' }
   if (-not [String]::Equals([IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($target)), [IO.Path]::GetFullPath($parent), [StringComparison]::OrdinalIgnoreCase)) { throw 'target parent path mismatch' }
   if (-not [String]::Equals([IO.Path]::GetFullPath($parent), [IO.Path]::GetFullPath($expectedParent), [StringComparison]::OrdinalIgnoreCase)) { throw 'target parent realpath mismatch' }
+  $stage = 'parent-inspect'
   $payload = [Text.Encoding]::UTF8.GetBytes([string]$frame.payload)
   $parentItem = Get-Item -LiteralPath $parent -Force
   if (($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'target parent is a reparse point' }
+  # Keep the exact parent directory open with FILE_READ_ATTRIBUTES access. Read and
+  # write sharing lets the child FileStream open on Windows, while omitting
+  # FILE_SHARE_DELETE still prevents the parent/target path from being
+  # renamed or deleted until the target stream is flushed. OPEN_REPARSE_POINT
+  # makes this fail closed rather than traversing a reparse point if the parent
+  # changes before the handle.
+  $stage = 'parent-open'
+  $parentHandle = [RbOutputSecureWriterNative]::CreateFile(
+    $parent,
+    0x00000080,
+    0x00000003,
+    [IntPtr]::Zero,
+    3,
+    0x02000000 -bor 0x00200000,
+    [IntPtr]::Zero
+  )
+  if ($parentHandle.ToInt64() -eq -1) { throw 'target parent could not be bound' }
+  $stage = 'parent-info'
+  $parentInfo = New-Object 'RbOutputSecureWriterNative+ByHandleFileInformation'
+  if (-not [RbOutputSecureWriterNative]::GetFileInformationByHandle($parentHandle, [ref]$parentInfo)) { throw 'target parent identity could not be captured' }
+  if (($parentInfo.FileAttributes -band 0x00000400) -ne 0) { throw 'target parent handle is a reparse point' }
+  $stage = 'parent-identity'
+  $parentHandleIdentity = "$($parentInfo.VolumeSerialNumber):$([uint64]$parentInfo.FileIndexHigh * 4294967296 + [uint64]$parentInfo.FileIndexLow)"
+  $stage = 'parent-identity-match'
+  if ($parentHandleIdentity -ne $expectedParentIdentity -or $parentHandleIdentity -ne $expectedParentResolvedIdentity) { throw 'target parent identity changed' }
   # FileMode.CreateNew inherits the parent ACL. Refuse a parent that grants
   # write/delete rights to the broad built-in principals; this is the ACL
-  # boundary for the exact C:\SyndocalShow target. The check is deliberately
-  # conservative and does not pretend that Node's Unix mode argument changes
-  # Windows ACLs.
+  # boundary for the exact C:\SyndocalShow target. ACL ownership and repair
+  # remain operator-managed; this helper never mutates the parent descriptor.
   if ([String]::Equals($parent, 'C:\SyndocalShow', [StringComparison]::OrdinalIgnoreCase)) {
+    $stage = 'parent-acl'
     $parentAcl = [IO.Directory]::GetAccessControl($parent)
     $broadWriteSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
     $writeMask = [int64][System.Security.AccessControl.FileSystemRights]::WriteData -bor
@@ -139,25 +169,7 @@ try {
       }
     }
   }
-  # Keep the exact parent directory open without share access so it cannot be
-  # renamed/replaced between this check and CreateNew, or while the target
-  # stream is being flushed. OPEN_REPARSE_POINT makes this fail closed rather
-  # than traversing a reparse point if the parent changes before the handle.
-  $parentHandle = [RbOutputSecureWriterNative]::CreateFile(
-    $parent,
-    0x00010001,
-    0,
-    [IntPtr]::Zero,
-    3,
-    0x02000000 -bor 0x00200000,
-    [IntPtr]::Zero
-  )
-  if ($parentHandle.ToInt64() -eq -1) { throw 'target parent could not be bound' }
-  $parentInfo = New-Object 'RbOutputSecureWriterNative+ByHandleFileInformation'
-  if (-not [RbOutputSecureWriterNative]::GetFileInformationByHandle($parentHandle, [ref]$parentInfo)) { throw 'target parent identity could not be captured' }
-  if (($parentInfo.FileAttributes -band 0x00000400) -ne 0) { throw 'target parent handle is a reparse point' }
-  $parentHandleIdentity = "$($parentInfo.VolumeSerialNumber):$([uint64]$parentInfo.FileIndexHigh * 4294967296 + [uint64]$parentInfo.FileIndexLow)"
-  if ($parentHandleIdentity -ne $expectedParentIdentity -or $parentHandleIdentity -ne $expectedParentResolvedIdentity) { throw 'target parent identity changed' }
+  $stage = 'target-create'
   $stream = [IO.FileStream]::new(
     $target,
     [IO.FileMode]::CreateNew,
@@ -168,14 +180,32 @@ try {
   )
   $created = $true
   Write-Output 'READY'
+  $stage = 'target-inspect'
   $targetInfo = New-Object 'RbOutputSecureWriterNative+ByHandleFileInformation'
   if (-not [RbOutputSecureWriterNative]::GetFileInformationByHandle($stream.SafeFileHandle.DangerousGetHandle(), [ref]$targetInfo)) { throw 'target identity could not be captured' }
   $targetIdentity = "$($targetInfo.VolumeSerialNumber):$([uint64]$targetInfo.FileIndexHigh * 4294967296 + [uint64]$targetInfo.FileIndexLow)"
+  $stage = 'target-write'
   $stream.Write($payload, 0, $payload.Length)
+  $stage = 'target-flush'
   $stream.Flush($true)
   $exitCode = 0
 } catch {
   $exitCode = 1
+  $failureCode = switch ($stage) {
+    'frame' { 'FRAME_INVALID' }
+    'parent-path' { 'PARENT_PATH_INVALID' }
+    'parent-inspect' { 'PARENT_INSPECTION_FAILED' }
+    'parent-acl' { 'PARENT_ACL_UNSAFE' }
+    'parent-open' { 'PARENT_OPEN_FAILED' }
+    'parent-info' { 'PARENT_INFO_FAILED' }
+    'parent-identity' { 'PARENT_IDENTITY_FAILED' }
+    'parent-identity-match' { 'PARENT_IDENTITY_MISMATCH' }
+    'target-create' { 'TARGET_CREATE_FAILED' }
+    'target-inspect' { 'TARGET_IDENTITY_FAILED' }
+    'target-write' { 'TARGET_WRITE_FAILED' }
+    'target-flush' { 'TARGET_FLUSH_FAILED' }
+    default { 'SECURE_WRITER_FAILED' }
+  }
 } finally {
   if ($created -and $exitCode -ne 0 -and $null -ne $stream) {
     try {
@@ -217,6 +247,8 @@ if ($created -and $exitCode -ne 0) {
     if ($cleanupHandle -ne [IntPtr]::Zero -and $cleanupHandle.ToInt64() -ne -1) { [RbOutputSecureWriterNative]::CloseHandle($cleanupHandle) | Out-Null }
   }
 }
+if ($exitCode -eq 0) { $failureCode = 'OK' }
+Write-Output ("RB_OUTPUT_SECURE_WRITER_RESULT=" + $failureCode)
 exit $exitCode
 `;
 
@@ -868,6 +900,35 @@ function encodeSecureWriterFrame(targetPath, output, targetPlan) {
   return frame.toString("base64");
 }
 
+const SECURE_WRITER_RESULT_PREFIX = "RB_OUTPUT_SECURE_WRITER_RESULT=";
+const SECURE_WRITER_RESULT_CODES = Object.freeze(new Set([
+  "OK",
+  "FRAME_INVALID",
+  "PARENT_PATH_INVALID",
+  "PARENT_INSPECTION_FAILED",
+  "PARENT_ACL_UNSAFE",
+  "PARENT_OPEN_FAILED",
+  "PARENT_INFO_FAILED",
+  "PARENT_IDENTITY_FAILED",
+  "PARENT_IDENTITY_MISMATCH",
+  "TARGET_CREATE_FAILED",
+  "TARGET_IDENTITY_FAILED",
+  "TARGET_WRITE_FAILED",
+  "TARGET_FLUSH_FAILED",
+  "SECURE_WRITER_FAILED",
+  "PROCESS_SPAWN_FAILED",
+  "NO_RESULT",
+]));
+
+function secureWriterResultCode(result) {
+  const stdout = typeof result?.stdout === "string" ? result.stdout : "";
+  const match = stdout.match(
+    new RegExp(`(?:^|\\r?\\n)${SECURE_WRITER_RESULT_PREFIX}([A-Z0-9_]+)(?:\\r?$|\\r?\\n)`),
+  );
+  if (match && SECURE_WRITER_RESULT_CODES.has(match[1])) return match[1];
+  return result?.error ? "PROCESS_SPAWN_FAILED" : "NO_RESULT";
+}
+
 function writeSecureWindowsTarget(targetPath, output, targetPlan) {
   if (typeof childProcess.spawnSync !== "function") {
     throw new ShowConfigUpgradeError("TARGET_WRITE_FAILED", "secure Windows target writer is unavailable");
@@ -885,12 +946,14 @@ function writeSecureWindowsTarget(targetPath, output, targetPlan) {
       },
     );
   } catch {
-    throw new ShowConfigUpgradeError("TARGET_WRITE_FAILED", "upgrade target could not be created");
+    throw new ShowConfigUpgradeError("TARGET_WRITE_FAILED", "upgrade target could not be created (writer reason: PROCESS_SPAWN_FAILED)");
   }
-  if (result?.error || result?.status !== 0) {
-    // The helper never receives a token on its command line and its stdout /
-    // stderr are deliberately discarded so failure diagnostics cannot log it.
-    throw new ShowConfigUpgradeError("TARGET_WRITE_FAILED", "upgrade target could not be created");
+  // The helper never receives a token on its command line. It emits only a
+  // fixed result code on stdout; stderr remains deliberately discarded so
+  // failure diagnostics cannot log config or token-bearing exception text.
+  const reason = secureWriterResultCode(result);
+  if (result?.error || result?.status !== 0 || reason !== "OK") {
+    throw new ShowConfigUpgradeError("TARGET_WRITE_FAILED", `upgrade target could not be created (writer reason: ${reason})`);
   }
 }
 
@@ -1064,12 +1127,14 @@ module.exports = {
   TOKEN_PLACEHOLDER,
   WINDOWS_POWERSHELL_PATH,
   WINDOWS_SECURE_WRITER_SCRIPT,
+  SECURE_WRITER_RESULT_PREFIX,
   WINDOWS_TARGET_ACL_BOUNDARY,
   ShowConfigUpgradeError,
   buildCurrentConfig,
   isWithin,
   assertNoForbiddenEnvironment,
   encodeSecureWriterFrame,
+  secureWriterResultCode,
   parseJson,
   upgradeShowConfig,
   validateStrictShowConfig,
