@@ -27,7 +27,7 @@ const PRIVATE_PATH = "C:\\Users\\alice\\Documents\\dj-agent-secret.json";
 
 function strictShowConfig(token = TEST_TOKEN) {
   return {
-    version: "1.1.9",
+    version: "1.1.10",
     enabled: true,
     syndocal: {
       enabled: true,
@@ -108,7 +108,7 @@ test("config read failure exposes only a generic public warning", () => {
   assert.equal(result.warning.includes("alice"), false);
 });
 
-test("runtime enables only the exact external v1.1.9 show source", () => {
+test("runtime enables only the exact external v1.1.10 show source", () => {
   const config = loadExternalShow();
   assert.equal(config.enabled, true);
   assert.equal(config.warning, null);
@@ -173,7 +173,7 @@ test("module checkout root, not process cwd, defines the direct-entry external b
   assert.equal(loadedFromDifferentCwd.enabled, true);
   assert.equal(
     resolveStrictExternalShowPath(
-      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.9.example.json"),
+      path.join(REPOSITORY_ROOT, "config", "dj-agent-v1.1.10.example.json"),
       fs,
       REPOSITORY_ROOT,
     ),
@@ -325,7 +325,7 @@ test("strict external config composes production MIDI/client/router through F13 
   assert.equal(router.getStatus().mode, "dj-control");
 
   router.triggerAction("release");
-  const planned = timers.find((timer) => timer.delayMs === 1_000);
+  const planned = timers.find((timer) => timer.delayMs === 1_000 + 50);
   assert.ok(planned);
   planned.cleared = true;
   planned.callback();

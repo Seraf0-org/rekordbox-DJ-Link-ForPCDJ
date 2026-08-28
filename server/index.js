@@ -57,6 +57,10 @@ const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const {
+  OPERATOR_RETURN_CONFIRMATION_FIELD,
+  OPERATOR_RETURN_CONFIRMATION_TOKEN,
+} = require("./dj-agent/operatorDjControlReturn");
+const {
   getActionRequestOrigin,
   isActionPreflightAllowed,
   isActionRequestAllowed,
@@ -71,7 +75,7 @@ const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupS
 const { resolveBuildIdentity } = require("./buildIdentity");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.9.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.10.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -201,6 +205,7 @@ const state = {
       timelineSnapshotReady: false,
       lastTimelineAction: null,
       lastTimelineWarning: null,
+      lastOperatorOverride: null,
       releaseMacroSequence: "filter-then-fade-then-stop",
       releaseMacroPhase: "idle",
       releaseMacroReason: null,
@@ -211,6 +216,8 @@ const state = {
       ownerDeckId: null,
       activePlaySessionId: null,
       ownerWireIdentity: null,
+      ownerSource: "none",
+      productionCandidateStatus: null,
       ownerTrack: null,
     },
   },
@@ -1077,7 +1084,7 @@ const djAgentSyndocalClient = createSyndocalClient({
   reconnectMaxMs: DJ_AGENT_CONFIG.syndocal.reconnectMaxMs,
   heartbeatMs: DJ_AGENT_CONFIG.syndocal.heartbeatMs,
   ackTimeoutMs: DJ_AGENT_CONFIG.syndocal.ackTimeoutMs,
-  stateSyncProvider: () => (djAgentRouter ? djAgentRouter.getStateSync() : {}),
+  stateSyncProvider: () => (djAgentRouter ? djAgentRouter.getSyndocalStateSync() : {}),
 });
 const djAgentMidi = createRekordboxMidi({
   enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.midi.enabled,
@@ -1129,6 +1136,7 @@ function updateDjAgentStatus() {
     timelineSnapshotReady: routerStatus.timelineSnapshotReady,
     lastTimelineAction: routerStatus.lastTimelineAction,
     lastTimelineWarning: routerStatus.lastTimelineWarning,
+    lastOperatorOverride: routerStatus.lastOperatorOverride,
     releaseMacroSequence: routerStatus.releaseMacroSequence,
     releaseMacroPhase: routerStatus.releaseMacroPhase,
     releaseMacroReason: routerStatus.releaseMacroReason,
@@ -1141,6 +1149,8 @@ function updateDjAgentStatus() {
     ownerDeckId: routerStatus.ownerDeckId,
     activePlaySessionId: routerStatus.activePlaySessionId,
     ownerWireIdentity: routerStatus.ownerWireIdentity,
+    ownerSource: routerStatus.ownerSource,
+    productionCandidateStatus: routerStatus.productionCandidateStatus,
     ownerTrack: routerStatus.ownerTrack,
     updatedAt: new Date().toISOString(),
   };
@@ -1809,7 +1819,7 @@ function buildDjAgentSetupSnapshot() {
     midiPorts,
     mappingArtifact,
     configTemplate: {
-      version: "1.1.9",
+      version: "1.1.10",
       enabled: true,
       syndocal: {
         enabled: true,
@@ -1894,6 +1904,17 @@ app.get("/api/dj-agent/setup", (req, res) => {
   res.status(200).json(buildDjAgentSetupSnapshot());
 });
 
+function hasExactOperatorReturnConfirmation(req) {
+  const body = req?.body;
+  return Boolean(
+    body &&
+    typeof body === "object" &&
+    !Array.isArray(body) &&
+    Object.keys(body).length === 1 &&
+    body[OPERATOR_RETURN_CONFIRMATION_FIELD] === OPERATOR_RETURN_CONFIRMATION_TOKEN,
+  );
+}
+
 function handleDjAgentAction(action, _req, res) {
   res.removeHeader("Access-Control-Allow-Origin");
   // Permanently loopback-only: the socket peer must be the DJ PC itself.
@@ -1908,11 +1929,22 @@ function handleDjAgentAction(action, _req, res) {
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
-      error: "DJ Agent extension is disabled; exact external v1.1.9 filter-then-fade-then-stop configuration is required",
+      error: "DJ Agent extension is disabled; exact external v1.1.10 filter-then-fade-then-stop configuration is required",
     });
     return;
   }
-  const result = djAgentRouter.triggerAction(action);
+  if (action === "return-to-dj-control" && !hasExactOperatorReturnConfirmation(_req)) {
+    res.status(400).json({
+      ok: false,
+      action,
+      error: "operator-confirmation-required",
+      confirmationField: OPERATOR_RETURN_CONFIRMATION_FIELD,
+    });
+    return;
+  }
+  const result = action === "return-to-dj-control"
+    ? djAgentRouter.returnToDjControl()
+    : djAgentRouter.triggerAction(action);
   const ackState = result?.delivery?.state || result?.delivery?.ackState || null;
   const ok = result?.ok === true;
   const pending = ackState === "pending";
@@ -1934,6 +1966,7 @@ app.post("/api/dj-agent/actions/loop-half", (req, res) => handleDjAgentAction("l
 app.post("/api/dj-agent/actions/filter-close", (req, res) => handleDjAgentAction("filter-close", req, res));
 app.post("/api/dj-agent/actions/release", (req, res) => handleDjAgentAction("release", req, res));
 app.post("/api/dj-agent/actions/track-active", (req, res) => handleDjAgentAction("track-active", req, res));
+app.post("/api/dj-agent/actions/return-to-dj-control", (req, res) => handleDjAgentAction("return-to-dj-control", req, res));
 app.get("/api/dj-agent/status", (_req, res) => {
   // Status is read-only and remains remotely readable. Disabled is a normal
   // HTTP 200 response with enabled:false.

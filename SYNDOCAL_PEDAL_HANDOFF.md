@@ -2,17 +2,17 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-27 current v1.1.9 any-deck strict show-sync v3
+## 2026-08-27 current v1.1.10 any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.9`です。v1.1.9のinstaller、tag、public release、または
+product source versionは`1.1.10`です。v1.1.10のinstaller、tag、public release、または
 hardware acceptanceはこの文書で主張しません。current/next operator routeはtracked
-`config/dj-agent-v1.1.9.example.json`と
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.9.csv`を使います。exact
+`config/dj-agent-v1.1.10.example.json`と
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.10.csv`を使います。exact
 `start-all.bat --init-config`は存在しない場合だけ
-`C:\SyndocalShow\dj-agent-v1.1.9.json`を作成し、deployed historical
+`C:\SyndocalShow\dj-agent-v1.1.10.json`を作成し、deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
 
 branch `beta-v1.1.2`の再接続ABA fenceはcommit
@@ -59,7 +59,7 @@ focused helper + smokeは**67/67** pass。これはsource-onlyであり、対象
 再配備して点滅停止・waveform復帰を観測するまでhardware fixを主張しない。Deck 2の
 大きなseek戻りは採取時に実測loopがONで、そのloop範囲のwrap自体は正常だった。
 
-v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.9
+v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.10
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
 trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
 physical HW-4 12項目の受入を主張しません。
@@ -120,7 +120,8 @@ restart時のper-deck provenance、timer generation、reconnect再告知、stric
 launcher/READMEを再監査してP0/P1/P2なしの**GO**でした。これはsource checkpointであり、
 対象DJ PCへのpull/config更新、real Rekordbox title、wired ACK、pedalまたはHW-4受入を
 主張しません。Stage 2 trancheでは`transitionHoldActive`をstrict-v3の診断値として受信し、
-F13を現在のauthoritative loopを解除するabsolute loop-offへ置換します。
+F13をcurrent `loopActive`の反対を送るabsolute LOOP_SETへ、F14をactive-loop-only
+LOOP_HALFへ固定します。
 
 ### 2026-08-28 CURRENT content-identity transition checkpoint
 
@@ -138,10 +139,44 @@ enrichmentは保持し、owner selectionが古いtitleから再admitすること
 していない。mapped track、Rekordbox MIDI、physical pedal、wired LAN、real ACK、
 installer/tag/public releaseは未確認・未主張です。
 
+### 2026-08-28 CURRENT watchdog and Stage 2 pedal contract checkpoint
+
+The source-only v1.1.10 tranche is present on branch `beta-v1.1.2` at
+HEAD `53db21d620ac417faefffd1c66c8e622bb7d2405`, equal to its upstream
+tracking ref. It remains intentionally uncommitted and unpushed. Release ramp
+configuration remains exactly 1000 ms with a 50 ms update interval; the
+watchdog is now scheduled only after the nominal duration plus one update
+interval, so an adapter endpoint callback at the nominal boundary remains
+authoritative. A truly missing callback still records the specific incomplete
+ramp failure and continues the single Stop/reset tail. Deterministic boundary
+and missing-callback tests cover both Filter and ChannelFader ramps.
+
+Stage 2 F13 is the absolute current-loop `DJ_TIMELINE_LOOP_SET` toggle. F14 is
+the separate active-loop-only `DJ_TIMELINE_LOOP_HALF` v3 command with exact
+`timelineId` and `playSessionId`; its ACK, terminal failure, reconnect, and
+pending latch are independent from F13, and it never emits Rekordbox MIDI.
+The retired F14 toggle path and policy module/tests are removed. A rejected
+Stage 2 command carrying `timeline_not_playing` now marks the snapshot gate
+not-ready and requests a fresh authoritative state without inventing idle or
+automatically changing mode. The local confirmation-only `Return to DJ
+control` route remains loopback-fenced and can adopt only a fresh, playing
+Deck 1 fallback; it does not mutate Timeline or revive a released remote
+owner.
+
+Focused owner/auth tests pass **21/21** and **17/17**; the full `npm test` pass is
+**478 total / 476 pass / 0 fail / 2 intentional pkg skips**. All changed JS
+files pass `node --check`; `git diff --check` exits 0. First-party warning
+count is **0** (Git's LF-to-CRLF working-copy notices are not source warnings).
+No restart, deployment, installer/tag/public-release, peer ACK, or physical
+hardware acceptance is claimed. The next safe action is independent review
+and integration verification against the peer's v3 capability-10 contract;
+keep the working tree uncommitted until the supervising release checkpoint
+authorizes its handoff.
+
 ### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
 
 以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。
-provenanceのため保持しますが、current/next operator guidance、v1.1.9 config/CSV、または
+provenanceのため保持しますが、current/next operator guidance、v1.1.10 config/CSV、または
 any-deck authorityとして実行・再利用・解釈してはいけません。
 
 このcheckpointはtracked token-free template
@@ -167,7 +202,7 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 `syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
 指定時に拒否していました。全frameは当時
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
-現行authorityは本書冒頭のv1.1.9 any-deck/v3だけです。
+現行authorityは本書冒頭のv1.1.10 any-deck/v3だけです。
 
 この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
 任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
@@ -207,7 +242,7 @@ runtime event contractを現行環境へ設定してはいけません。
 
 当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
 `syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
-DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.9 any-deck/v3 authorityと、
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.10 any-deck/v3 authorityと、
 READMEの独立したcurrent source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
@@ -471,7 +506,7 @@ branch/commitは削除していない。
 この見出しから次のCURRENT見出し直前までのstrict-v2 runbookは過去の設計証拠であり、
 **実行・設定コピー禁止**です。現在形・命令形で残る記述も当時の契約を正確に保存するための
 引用範囲で、現行DJ PC、launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用しては
-いけません。現行authorityは本書冒頭と次節以降のv1.1.9 any-deck strict-v3だけです。
+いけません。現行authorityは本書冒頭と次節以降のv1.1.10 any-deck strict-v3だけです。
 この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
@@ -491,7 +526,7 @@ durable physical eventId台帳を消費せず、再接続時にはreplayしま�
 新しいTRACK_SYNCを待ち、旧socket/sessionはfenceします。ACTIVE/LOOP/RELEASE等の
 physical eventはACK対象です。
 
-## CURRENT v1.1.9 / strict-v3 接続と状態同期
+## CURRENT v1.1.10 / strict-v3 接続と状態同期
 
 WebSocket接続後、クライアントは順に`DJ_AGENT_HELLO`、`DJ_STATE_SYNC`、
 `DJ_TIMELINE_STATE_REQUEST`を送信します。再接続・再起動後も同じ順序で、
@@ -554,9 +589,9 @@ Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、�
 pendingまたはfailedとして記録し、snapshot待ちを理由にローカル操作を止めません。
 Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時までfail-closedです。
 
-## CURRENT v1.1.9 / Stage 1: Rekordbox操作とhandoff
+## CURRENT v1.1.10 / Stage 1: Rekordbox操作とhandoff
 
-v1.1.9 controlled sourceは`releaseMacro.enabled:true`かつ
+v1.1.10 controlled sourceは`releaseMacro.enabled:true`かつ
 `sequence:"filter-then-fade-then-stop"`だけを受理します。Stage 1のF13はadmitted
 owner deckのFilter HPF（CC16、64→127、1000ms、50ms間隔）を同期開始し、同じ初期edgeで
 相関済み`DJ_RELEASE`を一度だけrouteします。ReleaseはFilter/fade/Stop/resetなどの
@@ -577,7 +612,7 @@ LoopHalf、F15はStage 1ではinactive（MIDIもSyndocalも送信しない）で
 | Filter HP | CH1 CC16 (`B010`) | `deckChannels`設定時CH2 CC16 (`B110`) |
 | ChannelFader fade | CH1 CC17 (`B011`) | `deckChannels`設定時CH2 CC17 (`B111`) |
 
-v1.1.9 CSVはChannelFader CC17（`B011`/`B111`）を含み、strict launcherはFilter
+v1.1.10 CSVはChannelFader CC17（`B011`/`B111`）を含み、strict launcherはFilter
 CC16、fade CC17、enabled fade、exact duration/value/deck-channelを要求します。実機のLearn結果が異なる場合、この
 controlled sourceを推測で別CCへ切り替えず、fail-closedで新しいevidence trancheを開始します。
 
@@ -590,16 +625,16 @@ authority、delivery、play-session、shutdown generation、public action emissi
 だけを所有します。routerはauthority、delivery、session fence、public emission、shutdownを
 保持し、Stage 2 timeline-controlの意味は変更しません。
 
-## CURRENT v1.1.9 / Stage 2: current-loop loop-off、F14、F15 +4
+## CURRENT v1.1.10 / Stage 2: absolute loop toggle、F14 LOOP_HALF、F15 +4
 
-`running`後のtimeline-controlは現行v1.1.9の別境界です。すべてACK対象で、Stage 2では
+`running`後のtimeline-controlは現行v1.1.10の別境界です。すべてACK対象で、Stage 2では
 Rekordbox MIDIを一切呼びません。Stage 2の物理受入はStage 1のRelease実機証跡とは別で、
 現時点では未受入です。
 
 | Pedal | outbound | payload |
 | --- | --- | --- |
-| F13 | `DJ_TIMELINE_LOOP_SET` | `loopActive:true`時だけ `{ "active": false, "timelineId": "...", "playSessionId": "..." }`。通常のauthoring loopとpost-Follow holdは同じ操作 |
-| F14 | `DJ_TIMELINE_LOOP_SET` | `{ "active": true\|false, "timelineId": "...", "playSessionId": "..." }` |
+| F13 | `DJ_TIMELINE_LOOP_SET` | 現在の `loopActive` の反対を送る `{ "active": true\|false, "timelineId": "...", "playSessionId": "..." }`。通常のauthoring loopとpost-Follow holdは同じabsolute toggle |
+| F14 | `DJ_TIMELINE_LOOP_HALF` | active loop時だけ `{ "timelineId": "...", "playSessionId": "..." }`。inactive/unknownはfail-closed、Rekordbox MIDIなし |
 | F15 | `DJ_TIMELINE_BEAT_JUMP` | `{ "bars": 4, "timelineId": "...", "playSessionId": "..." }` |
 
 両commandのpayloadは上表のexact fieldだけからなり、`timelineId`と`playSessionId`には
@@ -610,19 +645,37 @@ wire frameへはstripされます。送信frameにlocal由来のfieldは現れ�
 判定し、stale/equal sequenceは状態を変えずに破棄します。再接続で新しいconnection
 generation/sessionIdになるとfenceは再keyingされ、旧sessionとの比較は行いません。
 `transitionHoldActive`はstrict snapshotの診断値として保持しますが、F13のgateには使いません。
-F13はloop false/unknown、pending loop-set、切断、snapshot不足、
-または相関不成立ではvisible reasonを残して一切送信しません。F13とF14は同じ
-pending loop-set latchを共有します。F14は前回の権威`loopActive`を反転した絶対値を送り、
-送信中は次のF13/F14を保留します。同じeventIdのterminal outcome（rejected/timed-out/send-failed）、
-または同じtimelineId/playSessionIdとdesired valueを示す次の権威snapshotだけが保留latchを
-解放します。別target・stale snapshot・foreign terminal outcomeは保留を解放しません。skipまたはterminal失敗したLOOP_SETは次の操作を
-妨げず、新しい絶対値として再試行可能です。F15だけがbeat jumpを送れ、encoderは`+4`だけを
+F13はloop unknown、pending F13 loop-set、切断、snapshot不足、または相関不成立では
+visible reasonを残して一切送信しません。F14はactive loopでない場合、または自分の
+LOOP_HALFがpendingの場合にfail-closedします。F13とF14は独立したpending latchを持ち、
+一方のACK/rejection/reconnect terminalで他方を解放しません。同じeventIdのterminal
+outcome（rejected/timed-out/send-failed）、またはF13なら同じtargetとdesired valueを
+示す次の権威snapshotだけが該当latchを解放します。別target・stale snapshot・foreign
+terminal outcomeは保留を解放しません。skipまたはterminal失敗したcommandは次の同じ
+操作を妨げず再試行可能です。F15だけがbeat jumpを送れ、encoderは`+4`だけを
 許可します。`-4` beat jumpはretiredでrejectします。
 ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` broadcastを
 待ちます。time signatureとbar gridはSyndocal側が決定し、`bars`は音楽的な
 小節数（秒数ではない）です。
 
-## CURRENT v1.1.9 / v3 eventId・ACK・順序
+### Local operator return boundary
+
+`handoff-pending`または`timeline-control`でTimelineとDJ PCの表示が食い違う
+場合だけ、DJ PC localhost UIに`Return to DJ control`を表示します。確認画面は
+「Timeline may still be running」と警告します。確認後もSyndocal Timelineへ
+play/stop/seek/jumpを送らず、Timelineをidleと合成せず、最後に受け取った権威
+snapshotを診断値として保持します。新しいcurrently-playing Deck 1 production
+candidateがfreshかつ1400msのselection gateを満たす場合だけ、local pedal target
+として`source:"operator-deck1-fallback"`を記録し、modeを`dj-control`へ戻します。
+candidateが未成熟・停止・欠落ならvisible/actionable failureを返し、状態を変更
+しません。routeは`POST /api/dj-agent/actions/return-to-dj-control`ですが、既存の
+`isActionRequestAllowed`と同じloopback-only fenceを通り、remote requestからは
+呼び出せません。bodyはexactly
+`{"confirmation":"return-to-dj-control"}`だけを許容し、欠落・不一致・余分な
+fieldはrouter呼出し前にrejectします。released Syndocal sessionをremote admission
+として復活させる経路でもありません。
+
+## CURRENT v1.1.10 / v3 eventId・ACK・順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
 eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次の7フィールド固定です。
@@ -644,7 +697,7 @@ eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次�
 拒否しwarningにします。
 
 送信直後は`pending`であり、`ok:true`ではありません。`retrying`と`disconnected`は
-再接続/replay待ちのnon-terminal状態ですが、current v1.1.9でこの境界を越えられるのは
+再接続/replay待ちのnon-terminal状態ですが、current v1.1.10でこの境界を越えられるのは
 相関済み`DJ_RELEASE`だけです。他のphysical eventはsocket teardown時点でterminal
 `send-failed`となり、replayしません。最終deliveryは`acknowledged`、`rejected`、
 `timed-out`、`send-failed`のいずれかです。UI/APIはpending・success・failureを同じ
@@ -658,8 +711,9 @@ action eventIdで表示します。
 3. Syndocalは`DJ_RELEASE`に対してTimeline loopをOFFにし、DJ clock ownershipを relinquish
    して現在bar位置から自然継続する。即時のstart/play/seek/jump/advance/stopは行わない。
 4. 相関済み`DJ_TIMELINE_STATE`が`timeline-control`を確定した後だけ、Stage 2のF13/F14/F15を
-   送信する。F13は`loopActive:true`の時だけloop OFF（通常loopとpost-Follow holdは同じ）、
-   F14はabsolute loop toggle、F15は`+4` beat jumpであり、`-4`はretiredである。
+   送信する。F13はcurrent `loopActive`の反対を`DJ_TIMELINE_LOOP_SET`で送り、F14は
+   active loopだけを`DJ_TIMELINE_LOOP_HALF`で送り、F15は`+4` beat jumpである。
+   `-4`はretiredである。
 5. 終演・停止・resetを`DJ_TIMELINE_STATE`でbroadcastし、`dj-control`へ戻す。
 
 切断・ACK timeout・不正state・bar grid不一致は成功扱いにせず、warningと

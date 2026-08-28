@@ -56,13 +56,16 @@ const djAgentMidiStatusEl = document.getElementById("djAgentMidiStatus");
 const djAgentModeEl = document.getElementById("djAgentMode");
 const djAgentOwnerRowEl = document.getElementById("djAgentOwnerRow");
 const djAgentOwnerEl = document.getElementById("djAgentOwner");
+const djAgentCandidateStageEl = document.getElementById("djAgentCandidateStage");
 const djAgentTimelineStateEl = document.getElementById("djAgentTimelineState");
 const djAgentTimelineLoopEl = document.getElementById("djAgentTimelineLoop");
 const djAgentReleaseMacroEl = document.getElementById("djAgentReleaseMacro");
 const djAgentLastEventEl = document.getElementById("djAgentLastEvent");
 const djAgentLastTimelineActionEl = document.getElementById("djAgentLastTimelineAction");
 const djAgentLastAckEl = document.getElementById("djAgentLastAck");
+const djAgentOperatorOverrideEl = document.getElementById("djAgentOperatorOverride");
 const djAgentActionResultEl = document.getElementById("djAgentActionResult");
+const djAgentReturnToDjControlEl = document.getElementById("djAgentReturnToDjControl");
 const djAgentSetupRefreshEl = document.getElementById("djAgentSetupRefresh");
 const djAgentSetupMessageEl = document.getElementById("djAgentSetupMessage");
 const djAgentSetupReadinessEl = document.getElementById("djAgentSetupReadiness");
@@ -96,7 +99,7 @@ let stateFetchInFlight = null;
 let djAgentSetupFetchInFlight = null;
 
 const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
-  version: "1.1.9",
+  version: "1.1.10",
   enabled: false,
   syndocal: {
     host: "",
@@ -135,8 +138,8 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.9.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.9.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.10.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.10.csv",
   valid: null,
 };
 const djAgentSetupDraft = {
@@ -325,6 +328,12 @@ function renderLoopState(loopState, loopStateEl, cardEl) {
 
 function renderDjAgentStatus(status) {
   const agent = status?.djAgent || {};
+  const operatorOverrideAllowed = agent.enabled === true &&
+    (agent.mode === "handoff-pending" || agent.mode === "timeline-control");
+  if (djAgentReturnToDjControlEl) {
+    djAgentReturnToDjControlEl.hidden = !operatorOverrideAllowed;
+    djAgentReturnToDjControlEl.disabled = !operatorOverrideAllowed;
+  }
   if (djAgentPanelEl) {
     djAgentPanelEl.hidden = agent.enabled !== true;
   }
@@ -350,6 +359,9 @@ function renderDjAgentStatus(status) {
   }
   if (djAgentOwnerEl && admittedOwner !== null) {
     djAgentOwnerEl.textContent = admittedOwner;
+  }
+  if (djAgentCandidateStageEl) {
+    djAgentCandidateStageEl.textContent = formatProductionCandidateStatus(agent.productionCandidateStatus);
   }
   if (djAgentTimelineStateEl) {
     const state = agent.timelineState || "unknown";
@@ -385,6 +397,12 @@ function renderDjAgentStatus(status) {
       ? `${String(ack.state || "ACK").toUpperCase()} · ${ack.type || "event"}${ack.message ? ` · ${ack.message}` : ""}`
       : syndocal.lastAckAt || "-";
   }
+  if (djAgentOperatorOverrideEl) {
+    const override = agent.lastOperatorOverride;
+    djAgentOperatorOverrideEl.textContent = override?.state
+      ? `${String(override.state).toUpperCase()} · ${override.ownerSource || override.source || "operator"}${override.warning ? ` · ${override.warning}` : ""}`
+      : "-";
+  }
   if (djAgentActionResultEl) {
     const action = agent.lastAction;
     const deliveryState = action?.delivery?.state || action?.delivery?.ackState || null;
@@ -408,10 +426,34 @@ function renderDjAgentStatus(status) {
   }
 }
 
-function formatAdmittedOwner(agent) {
-  if (agent?.released === true) {
-    return null;
+function formatProductionCandidateStatus(status) {
+  const stage = String(status?.stage || "unknown");
+  const labels = {
+    "no-track": "NO TRACK",
+    loaded: "LOADED",
+    "waiting-for-play": "WAITING FOR PLAY",
+    "waiting-for-fresh-playback": "WAITING FOR FRESH PLAYBACK",
+    "waiting-for-1400ms": "WAITING FOR 1400MS",
+    "waiting-for-text-identity": "WAITING FOR ARTIST",
+    "candidate-pending": "CANDIDATE PENDING",
+    "candidate-ready": "CANDIDATE READY",
+    "operator-fallback": "OPERATOR FALLBACK",
+    admitted: "ADMITTED",
+    released: "RELEASED",
+    "not-selected": "NOT SELECTED",
+    unavailable: "UNAVAILABLE",
+    unknown: "UNKNOWN",
+  };
+  let text = labels[stage] || stage.toUpperCase();
+  if (stage === "waiting-for-1400ms" && Number.isFinite(status?.sessionAgeMs)) {
+    const waitMs = Number(status.waitMs) || 1_400;
+    text += ` · ${Math.max(0, Math.ceil(waitMs - Number(status.sessionAgeMs)))}MS`;
   }
+  return text;
+}
+
+function formatAdmittedOwner(agent) {
+  const released = agent?.released === true;
   const deck = Number(agent?.ownerDeck);
   const deckId = typeof agent?.ownerDeckId === "string" ? agent.ownerDeckId : null;
   const sessionId = typeof agent?.activePlaySessionId === "string" ? agent.activePlaySessionId : null;
@@ -440,7 +482,10 @@ function formatAdmittedOwner(agent) {
     return null;
   }
   const shortSessionId = sessionId.length > 12 ? `${sessionId.slice(0, 12)}…` : sessionId;
-  return `Deck ${deck} (${deckId}) · session ${shortSessionId} · ${identity}`;
+  const source = agent?.ownerSource === "operator-deck1-fallback"
+    ? " · operator Deck 1 fallback"
+    : "";
+  return `Deck ${deck} (${deckId}) · session ${shortSessionId} · ${identity}${source}${released ? " · RELEASED" : ""}`;
 }
 
 function isLocalDjAgentHost() {
@@ -1763,6 +1808,56 @@ function initSortableFields() {
 
 initSortableFields();
 bindDjAgentSetupActions();
+
+if (djAgentReturnToDjControlEl) {
+  djAgentReturnToDjControlEl.addEventListener("click", async () => {
+    const action = "return-to-dj-control";
+    if (!isLocalDjAgentHost()) {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Failed · ${action} · DJ PC localhost required`;
+        djAgentActionResultEl.classList.add("error");
+      }
+      return;
+    }
+    const confirmed = window.confirm(
+      "Timeline may still be running. Return local pedal control to Deck 1? This sends no play/stop/seek/jump and does not change the Syndocal Timeline.",
+    );
+    if (!confirmed) {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Cancelled · ${action}`;
+        djAgentActionResultEl.classList.remove("error");
+      }
+      return;
+    }
+    djAgentReturnToDjControlEl.disabled = true;
+    try {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Pending · ${action}`;
+        djAgentActionResultEl.classList.remove("error");
+      }
+      const response = await fetch(`/api/dj-agent/actions/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: "return-to-dj-control" }),
+      });
+      const result = await response.json().catch(() => ({}));
+      const reason = result?.result?.reason || result?.error || `HTTP ${response.status}`;
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = response.ok && result.ok === true
+          ? `Success · ${action}`
+          : `Failed · ${action} · ${reason}`;
+        djAgentActionResultEl.classList.toggle("error", !(response.ok && result.ok === true));
+      }
+    } catch {
+      if (djAgentActionResultEl) {
+        djAgentActionResultEl.textContent = `Failed · ${action} · network error`;
+        djAgentActionResultEl.classList.add("error");
+      }
+    } finally {
+      djAgentReturnToDjControlEl.disabled = false;
+    }
+  });
+}
 
 for (const button of document.querySelectorAll("[data-dj-action]")) {
   button.addEventListener("click", async () => {

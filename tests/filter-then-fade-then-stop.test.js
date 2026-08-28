@@ -185,6 +185,61 @@ test("F13 routes one DJ_RELEASE at the HPF edge, then performs HPF -> ChannelFad
   fixture.router.stop();
 });
 
+test("endpoint callbacks at the nominal boundaries win over the post-duration filter and fade watchdogs", () => {
+  const fixture = createFixture();
+  fixture.router.triggerAction("release");
+
+  // The fallback is deliberately later than the configured one-second ramp,
+  // leaving the 50ms interval endpoint callback authoritative at the edge.
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [1050]);
+  fixture.filterOptions().onComplete({ targetDeck: 1, targetChannel: 1 });
+  assert.equal(fixture.router.getStatus().lastAction.localFailure ?? null, null);
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [1050]);
+
+  fixture.fadeOptions().onComplete({ targetDeck: 1, targetChannel: 1, resetValue: 127 });
+  assert.equal(fixture.router.getStatus().lastAction.localFailure ?? null, null);
+  assert.equal(fixture.operations.filter((entry) => entry.name === "stop").length, 1);
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [0]);
+
+  fixture.timer.runNext();
+  assert.equal(fixture.operations.filter((entry) => entry.name === "stop").length, 1);
+  assert.equal(fixture.operations.filter((entry) => entry.name === "filter").length, 1);
+  assert.equal(fixture.operations.filter((entry) => entry.name === "fade-reset").length, 1);
+  assert.equal(fixture.router.getStatus().lastAction.localFailure, null);
+  fixture.router.stop();
+});
+
+test("missing ramp callbacks fail closed only after their watchdogs and still Stop/reset once", () => {
+  const fixture = createFixture();
+  fixture.router.triggerAction("release");
+
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [1050]);
+  fixture.timer.runNext();
+  assert.equal(fixture.router.getStatus().releaseMacroPhase, "fade-ramp");
+  assert.deepEqual(
+    fixture.operations.filter((entry) => entry.name).map((entry) => entry.name),
+    ["filter-start", "fade-start"],
+  );
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [1050]);
+
+  fixture.timer.runNext();
+  assert.equal(fixture.router.getStatus().lastAction.localFailure ?? null, null);
+  assert.equal(fixture.router.getStatus().lastAction.fadeRamp.state, "failed");
+  assert.equal(fixture.operations.filter((entry) => entry.name === "stop").length, 1);
+  assert.deepEqual(fixture.timer.pending().map((task) => task.delayMs), [0]);
+
+  fixture.timer.runNext();
+  assert.equal(fixture.operations.filter((entry) => entry.name === "stop").length, 1);
+  assert.equal(fixture.operations.filter((entry) => entry.name === "filter").length, 1);
+  assert.equal(fixture.operations.filter((entry) => entry.name === "fade-reset").length, 1);
+  assert.equal(fixture.router.getStatus().lastReleaseReset.state, "completed");
+  assert.equal(fixture.router.getStatus().lastAction.filterRamp.state, "failed");
+  assert.equal(fixture.router.getStatus().lastAction.filterRamp.reason, "release-filter-ramp-incomplete");
+  assert.equal(fixture.router.getStatus().lastAction.fadeRamp.reason, "release-fade-ramp-incomplete");
+  assert.equal(fixture.router.getStatus().lastAction.localFailure, "release-filter-ramp-incomplete");
+  fixture.router.stop();
+});
+
 test("router F13 release sends the complete non-Master deck 2 MIDI byte sequence through the real adapter", () => {
   const timer = createManualTimer();
   let nowMs = 0;
@@ -447,9 +502,9 @@ test("router stop independently cancels both ramps and clears stale public actio
   assert.equal(fixture.operations.some((entry) => entry.name === "stop"), false);
 });
 
-test("v1.1.9 strict config accepts CC17 fade and rejects v1.1.7/legacy sequences", () => {
+test("v1.1.10 strict config accepts CC17 fade and rejects v1.1.7/legacy sequences", () => {
   const fs = require("node:fs");
-  const v119 = JSON.parse(fs.readFileSync(require("node:path").join(__dirname, "..", "config", "dj-agent-v1.1.9.example.json"), "utf8"));
+  const v119 = JSON.parse(fs.readFileSync(require("node:path").join(__dirname, "..", "config", "dj-agent-v1.1.10.example.json"), "utf8"));
   assert.equal(validateFilterThenFadeThenStopShowConfig(v119, { allowTokenPlaceholder: true }), true);
   const retired = structuredClone(v119);
   retired.version = "1.1.7";

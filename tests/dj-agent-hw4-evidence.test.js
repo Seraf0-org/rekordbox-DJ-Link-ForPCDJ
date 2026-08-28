@@ -164,7 +164,7 @@ function setupFixture() {
     enabled: true,
     tokenConfigured: true,
     configTemplate: {
-      version: "1.1.9",
+      version: "1.1.10",
       enabled: true,
       syndocal: { adapter: "syndocal-envelope-v3" },
     },

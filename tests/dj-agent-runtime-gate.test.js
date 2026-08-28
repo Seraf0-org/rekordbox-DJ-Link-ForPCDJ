@@ -15,7 +15,7 @@ const SERVER_ENTRY = path.join(REPO_ROOT, "server", "index.js");
 
 function strictShowConfig() {
   return {
-    version: "1.1.9",
+    version: "1.1.10",
     enabled: true,
     syndocal: {
       enabled: true,
@@ -159,7 +159,7 @@ test("source-direct server from another cwd rejects a checkout-internal show sou
   const { port, child } = await startDisabledSourceServer(t, {
     cwd: otherCwd,
     env: {
-      DJ_AGENT_CONFIG_PATH: path.join(REPO_ROOT, "config", "dj-agent-v1.1.9.example.json"),
+      DJ_AGENT_CONFIG_PATH: path.join(REPO_ROOT, "config", "dj-agent-v1.1.10.example.json"),
     },
   });
   const status = await getJson(port, "/api/dj-agent/status");

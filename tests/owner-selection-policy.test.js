@@ -77,6 +77,171 @@ function productionDetector(clock, ownerSelectionTimerApi = undefined) {
   return { detector, events };
 }
 
+function createOperatorOverrideFixture({ freshFallback = true } = {}) {
+  const clock = { value: 1_000 };
+  const timers = createTimerHarness(clock);
+  let nextId = 0;
+  const detector = createTrackActivityDetector({
+    now: () => clock.value,
+    idFactory: () => `operator-${++nextId}`,
+    ownerSelectionPolicy: PRODUCTION_POLICY,
+    ownerSelectionTimerApi: timers.api,
+  });
+  const detectorEvents = [];
+  detector.on("event", (event) => detectorEvents.push(event));
+  const sent = [];
+  const client = new EventEmitter();
+  let nextEventId = 0;
+  let timelineStateRequests = 0;
+  client.getStatus = () => ({ enabled: true, state: "connected" });
+  client.sendEvent = (event) => {
+    const eventId = event.eventId || `operator-event-${++nextEventId}`;
+    sent.push({ ...event, eventId });
+    return { eventId, type: event.type, sent: true, ok: false, state: "pending", ackState: "pending" };
+  };
+  client.sendTimelineStateRequest = () => {
+    timelineStateRequests += 1;
+    return true;
+  };
+  client.start = () => {};
+  client.stop = () => {};
+  const operations = [];
+  let filterOptions = null;
+  let fadeOptions = null;
+  const midi = {
+    resolveTarget: (_name, deck) => ({ targetDeck: deck, targetChannel: deck }),
+    startFilterRamp(options) {
+      filterOptions = options;
+      operations.push("filter-start");
+      return { started: true, ok: true, targetDeck: 1, targetChannel: 1 };
+    },
+    startReleaseFade(options) {
+      fadeOptions = options;
+      operations.push("fade-start");
+      return { started: true, ok: true, targetDeck: 1, targetChannel: 1, resetValue: 127 };
+    },
+    sendMapping(name) {
+      operations.push(name);
+      return true;
+    },
+    resetReleaseFade() {
+      operations.push("fade-reset");
+      return { ok: true };
+    },
+    cancelFilterRamp: () => true,
+    cancelReleaseFade: () => true,
+    getStatus: () => ({ rampActive: false, releaseFadeActive: false }),
+    start() {},
+    stop() {},
+  };
+  const router = createShowEventRouter({
+    detector,
+    syndocalClient: client,
+    midi,
+    pedal: { start() {}, stop() {}, getStatus: () => ({}) },
+    releaseFade: {
+      enabled: true,
+      mappingName: "releaseFade",
+      target: "deck",
+      startValue: 127,
+      endValue: 0,
+      durationMs: 1_000,
+      updateIntervalMs: 50,
+      resetAfterStop: true,
+      resetValue: 127,
+      resetDelayMs: 0,
+    },
+    releaseMacro: {
+      enabled: true,
+      sequence: "filter-then-fade-then-stop",
+      filter: {
+        startValue: 64,
+        endValue: 127,
+        durationMs: 1_000,
+        updateIntervalMs: 50,
+        resetValue: 64,
+      },
+      resetAfterStop: true,
+      resetDelayMs: 0,
+    },
+    timerApi: timers.api,
+    now: () => clock.value,
+  });
+
+  detector.onSnapshot({
+    deckNowPlaying: [{ deck: 1, title: "人生オーバー Show", artist: "Show Artist" }],
+    deckPlaybacks: [playback(1, 1, clock.value)],
+  });
+  const initial = detectorEvents.find((event) => event.type === "DJ_TRACK_ACTIVE");
+  assert.ok(initial, "expected the initial selected production candidate");
+  client.emit("delivery", {
+    eventId: initial.eventId,
+    type: "DJ_TRACK_ACTIVE",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
+  router.triggerAction("release");
+  filterOptions.onComplete({ targetDeck: 1, targetChannel: 1 });
+  fadeOptions.onComplete({ targetDeck: 1, targetChannel: 1, resetValue: 127 });
+  const resetTimer = timers.timers.find((timer) => !timer.cleared && timer.delayMs === 0);
+  assert.ok(resetTimer, "expected the post-Stop reset timer");
+  timers.fire(resetTimer);
+  resetTimer.cleared = true;
+  const releaseEvent = sent.find((event) => event.type === "DJ_RELEASE");
+  assert.ok(releaseEvent, "expected the initial DJ_RELEASE handoff");
+  client.emit("timeline-state", {
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: false,
+    timelineId: "operator-timeline",
+    positionBars: 8,
+    playSessionId: initial.payload.playSessionId,
+    pedalOwner: "timeline",
+    releaseEventId: releaseEvent.eventId,
+    sessionId: "operator-timeline-session",
+    sequence: 1,
+  });
+  assert.equal(router.getStatus().mode, "timeline-control");
+
+  if (freshFallback) {
+    clock.value = 2_500;
+    detector.onSnapshot({
+      deckNowPlaying: [{ deck: 1, title: "人生オーバー Show", artist: "Show Artist" }],
+      deckPlaybacks: [playback(1, 2, clock.value, { isPlaying: false })],
+    });
+    clock.value = 3_000;
+    detector.onSnapshot({
+      deckNowPlaying: [{ deck: 1, contentId: "operator-demo", title: "Demo Track 2", artist: "Loopmasters" }],
+      deckPlaybacks: [playback(1, 3, clock.value, { isPlaying: false })],
+    });
+    detector.onSnapshot({
+      deckNowPlaying: [{ deck: 1, contentId: "operator-demo", title: "Demo Track 2", artist: "Loopmasters" }],
+      deckPlaybacks: [playback(1, 4, clock.value, { isPlaying: true })],
+    });
+    clock.value = 4_400;
+  } else {
+    clock.value = 2_500;
+    detector.onSnapshot({
+      deckNowPlaying: [{ deck: 1, title: "人生オーバー Show", artist: "Show Artist" }],
+      deckPlaybacks: [playback(1, 2, clock.value, { isPlaying: false })],
+    });
+  }
+  return {
+    clock,
+    client,
+    detector,
+    operations,
+    releaseEventId: releaseEvent.eventId,
+    router,
+    sent,
+    get timelineStateRequests() {
+      return timelineStateRequests;
+    },
+    timelineSessionId: initial.payload.playSessionId,
+    timers,
+  };
+}
+
 test("default owner selection remains content-first", () => {
   assert.deepEqual(selectProductionOwnerCandidate([candidate(1)], CONTENT_FIRST_OWNER_SELECTION), null);
   const clock = { value: 1_000 };
@@ -338,6 +503,85 @@ test("production detector timer admits Deck 1 after 1400 ms plus bounded dispatc
   );
 });
 
+test("production candidate read exposes a fresh Deck 1 fallback without emitting or reusing an ACK", () => {
+  const clock = { value: 1_000 };
+  const timers = createTimerHarness(clock);
+  const { detector, events } = productionDetector(clock, timers.api);
+  detector.onSnapshot({
+    deckNowPlaying: [{ deck: 1, contentId: "operator-fallback-content", title: "Temporary Track", artist: "Deck One" }],
+    deckPlaybacks: [playback(1, 1, clock.value)],
+  });
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 0);
+  assert.equal(detector.getProductionCandidateStatus().stage, "waiting-for-1400ms");
+
+  clock.value = 2_400;
+  const beforeRead = events.length;
+  const candidate = detector.getCurrentProductionCandidate();
+  assert.deepEqual(
+    {
+      kind: candidate.kind,
+      deck: candidate.deck,
+      deckId: candidate.deckId,
+      playSessionId: candidate.playSessionId,
+      identity: candidate.identity,
+      fresh: candidate.fresh,
+      isPlaying: candidate.isPlaying,
+      sessionAgeMs: candidate.sessionAgeMs,
+    },
+    {
+      kind: "deck1-fallback",
+      deck: 1,
+      deckId: "rekordbox-deck-1",
+      playSessionId: candidate.playSessionId,
+      identity: "text:temporary track\u0000deck one",
+      fresh: true,
+      isPlaying: true,
+      sessionAgeMs: 1_400,
+    },
+  );
+  assert.equal(events.length, beforeRead, "read path must not emit DJ_TRACK_ACTIVE or reuse ACK state");
+  assert.deepEqual(candidate.wireIdentity, { title: "Temporary Track", artist: "Deck One" });
+  assert.equal(detector.getProductionCandidateStatus().stage, "candidate-ready");
+
+  clock.value = 2_601;
+  assert.equal(detector.getCurrentProductionCandidate(), null, "stale playback must fail closed");
+  detector.stop();
+});
+
+test("equal-revision projected-position conflicts keep the Deck 1 fallback fail-closed until a newer revision", () => {
+  const clock = { value: 1_000 };
+  const timers = createTimerHarness(clock);
+  const { detector, events } = productionDetector(clock, timers.api);
+  const snapshot = (revision, positionSec, observedAt = clock.value) => ({
+    deckNowPlaying: [{ deck: 1, contentId: "conflict-content", title: "Temporary Track", artist: "Deck One" }],
+    deckPlaybacks: [{
+      ...playback(1, revision, observedAt),
+      positionSec,
+    }],
+  });
+
+  detector.onSnapshot(snapshot(1, 1));
+  assert.equal(timers.timers.length, 1);
+  clock.value = 1_100;
+  detector.onSnapshot(snapshot(1, 2));
+  assert.equal(detector.getCurrentProductionCandidate(), null);
+  assert.equal(detector.getProductionCandidateStatus().stage, "waiting-for-fresh-playback");
+  assert.equal(events.some((event) => event.type === "DJ_TRACK_ACTIVE"), false);
+
+  // A strictly newer playback revision restores transport provenance and
+  // schedules the existing 1400ms fallback window; no freshness gate is
+  // weakened to accept the conflicting same-revision projection.
+  clock.value = 1_200;
+  detector.onSnapshot(snapshot(2, 3));
+  assert.equal(detector.getProductionCandidateStatus().stage, "waiting-for-1400ms");
+  const recoveryTimer = timers.timers.at(-1);
+  assert.equal(recoveryTimer.delayMs, 1_200);
+  timers.fire(recoveryTimer);
+  assert.equal(events.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+  assert.equal(detector.getCurrentProductionCandidate().kind, "deck1-fallback");
+  detector.stop();
+});
+
 test("Deck 1 fallback freezes a content identity when later metadata enriches the same session", () => {
   const clock = { value: 1_000 };
   const timers = createTimerHarness(clock);
@@ -528,4 +772,179 @@ test("production detector rejects stopped and stale Deck 1 fallback samples", ()
     deckPlaybacks: [playback(1, 2, staleClock.value, { positionObservedAt: new Date(1_000).toISOString() })],
   });
   assert.equal(stale.events.some((event) => event.type === "DJ_TRACK_ACTIVE"), false);
+});
+
+test("operator override adopts a fresh Deck 1 fallback without ACK or Timeline mutation", () => {
+  const fixture = createOperatorOverrideFixture();
+  const before = fixture.router.getStatus();
+  const sentCount = fixture.sent.length;
+  const operations = fixture.operations.slice();
+  const candidate = fixture.detector.getCurrentProductionCandidate();
+  assert.equal(candidate.kind, "deck1-fallback");
+  assert.equal(candidate.sessionAgeMs, 1_400);
+
+  const result = fixture.router.returnToDjControl();
+  const status = fixture.router.getStatus();
+  assert.equal(result.ok, true);
+  assert.equal(result.midiSent, false);
+  assert.equal(status.mode, "dj-control");
+  assert.equal(status.ownerDeck, 1);
+  assert.equal(status.ownerSource, "operator-deck1-fallback");
+  assert.equal(status.activePlaySessionId, candidate.playSessionId);
+  assert.equal(status.ownerWireIdentity, "text:demo track 2\u0000loopmasters");
+  assert.equal(status.released, false);
+  assert.equal(fixture.sent.length, sentCount, "local adoption must not emit or ACK a candidate");
+  assert.deepEqual(fixture.operations, operations, "local adoption must not send transport MIDI");
+  for (const key of [
+    "timelineState",
+    "timelineLoopActive",
+    "timelineTransitionHoldActive",
+    "timelineId",
+    "timelinePositionBars",
+    "timelinePlaySessionId",
+    "timelinePedalOwner",
+    "timelineReleaseEventId",
+    "timelineSnapshotReady",
+  ]) {
+    assert.deepEqual(status[key], before[key], `Timeline diagnostic ${key} changed`);
+  }
+  assert.equal(status.lastOperatorOverride.state, "completed");
+  assert.equal(status.lastOperatorOverride.candidateKind, "deck1-fallback");
+  assert.match(status.lastOperatorOverride.warning, /Timeline may still be running/);
+  assert.equal(status.productionCandidateStatus.stage, "operator-fallback");
+  const syndocalState = fixture.router.getSyndocalStateSync();
+  assert.equal(syndocalState.ownerDeck, null, "local fallback must not claim remote owner admission");
+  assert.equal(syndocalState.ownerDeckId, null);
+  assert.equal(syndocalState.activePlaySessionId, null);
+  assert.equal(syndocalState.ownerSource, "none");
+  fixture.router.stop();
+});
+
+test("operator override fails visibly without a fresh Deck 1 candidate and mutates nothing", () => {
+  const fixture = createOperatorOverrideFixture({ freshFallback: false });
+  const before = fixture.router.getStatus();
+  const sentCount = fixture.sent.length;
+  const operations = fixture.operations.slice();
+  const result = fixture.router.returnToDjControl();
+  const status = fixture.router.getStatus();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "fresh-playing-play-session-required");
+  assert.equal(status.mode, "timeline-control");
+  assert.equal(status.released, true);
+  assert.equal(status.ownerDeck, before.ownerDeck);
+  assert.equal(status.activePlaySessionId, before.activePlaySessionId);
+  assert.equal(fixture.sent.length, sentCount);
+  assert.deepEqual(fixture.operations, operations);
+  assert.equal(status.lastOperatorOverride.state, "failed");
+  assert.match(status.lastOperatorOverride.warning, /fresh currently-playing play session/);
+  assert.equal(status.productionCandidateStatus.stage, "released");
+  fixture.router.stop();
+});
+
+test("timeline_not_playing ACK suspends stale Stage 2 commands without auto-return and recovers on idle state", () => {
+  const fixture = createOperatorOverrideFixture({ freshFallback: false });
+  const f13 = fixture.router.triggerAction("release");
+  assert.equal(f13.action, "timeline-current-loop-toggle");
+  assert.equal(fixture.router.getStatus().mode, "timeline-control");
+  fixture.client.emit("delivery", {
+    eventId: f13.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "rejected",
+    ackState: "rejected",
+    ok: false,
+    reason: "timeline_not_playing",
+    ack: { code: "timeline_not_playing", outcome: "rejected" },
+  });
+  assert.equal(fixture.router.getStatus().mode, "timeline-control");
+  assert.equal(fixture.router.getStatus().timelineSnapshotReady, false);
+  assert.equal(fixture.timelineStateRequests, 1);
+  assert.equal(fixture.router.triggerAction("release").reason, "timeline-state-pending");
+  assert.equal(fixture.timelineStateRequests, 1);
+
+  fixture.client.emit("timeline-state", {
+    state: "idle",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: null,
+    pedalOwner: null,
+    releaseEventId: null,
+    sessionId: "operator-timeline-session",
+    sequence: 2,
+  });
+  assert.equal(fixture.router.getStatus().mode, "dj-control");
+  assert.equal(fixture.router.getStatus().timelineState, "idle");
+  fixture.router.stop();
+});
+
+test("timeline pedals keep F13 absolute, halve active loops through dedicated F14, and preserve F15 plus-four", () => {
+  const fixture = createOperatorOverrideFixture({ freshFallback: false });
+  const operationsBeforeF14 = fixture.operations.slice();
+  const f14 = fixture.router.triggerAction("loop-half");
+  assert.equal(f14.ok, false);
+  assert.equal(f14.action, "loop-half");
+  assert.equal(f14.delivery.state, "pending");
+  assert.equal(fixture.sent.at(-1).type, "DJ_TIMELINE_LOOP_HALF");
+  assert.deepEqual(fixture.sent.at(-1).payload, {
+    timelineId: "operator-timeline",
+    playSessionId: fixture.timelineSessionId,
+    source: "pedal",
+  });
+  assert.deepEqual(fixture.operations, operationsBeforeF14, "Stage 2 F14 must not emit Rekordbox MIDI");
+  assert.equal(fixture.router.getStatus().pendingTimelineLoopHalf.eventId, f14.delivery.eventId);
+
+  const f13 = fixture.router.triggerAction("release");
+  assert.equal(f13.ok, false, "the fixture client leaves the F13 delivery pending");
+  assert.equal(f13.action, "timeline-current-loop-toggle");
+  assert.equal(fixture.sent.at(-1).type, "DJ_TIMELINE_LOOP_SET");
+  assert.equal(fixture.sent.at(-1).payload.active, false);
+  assert.equal(fixture.router.getStatus().pendingTimelineLoopHalf.eventId, f14.delivery.eventId, "F13 must not clear F14 latch");
+
+  fixture.client.emit("timeline-state", {
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "operator-timeline",
+    positionBars: 8,
+    playSessionId: fixture.timelineSessionId,
+    pedalOwner: "timeline",
+    releaseEventId: fixture.releaseEventId,
+  });
+  assert.equal(fixture.router.getStatus().pendingTimelineLoopSet, null, "F13 latch clears only from its authoritative state");
+  assert.equal(fixture.router.getStatus().pendingTimelineLoopHalf.eventId, f14.delivery.eventId, "F14 remains independently pending");
+
+  fixture.client.emit("delivery", {
+    eventId: f14.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_HALF",
+    state: "acknowledged",
+    ack: { outcome: "accepted" },
+  });
+  assert.equal(fixture.router.getStatus().pendingTimelineLoopHalf, null, "F14 latch clears from its own terminal ACK");
+
+  const f13On = fixture.router.triggerAction("release");
+  assert.equal(f13On.ok, false, "the fixture client leaves the second F13 delivery pending");
+  assert.equal(fixture.sent.at(-1).type, "DJ_TIMELINE_LOOP_SET");
+  assert.equal(fixture.sent.at(-1).payload.active, true);
+
+  const f15 = fixture.router.triggerAction("filter-close");
+  assert.equal(f15.action, "beat-jump-plus-4");
+  assert.equal(fixture.sent.at(-1).type, "DJ_TIMELINE_BEAT_JUMP");
+  assert.equal(fixture.sent.at(-1).payload.bars, 4);
+
+  const beforeInactive = fixture.sent.length;
+  fixture.client.emit("timeline-state", {
+    state: "running",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: "operator-timeline",
+    positionBars: 8,
+    playSessionId: fixture.timelineSessionId,
+    pedalOwner: "timeline",
+    releaseEventId: fixture.releaseEventId,
+  });
+  const inactiveF14 = fixture.router.triggerAction("loop-half");
+  assert.equal(inactiveF14.reason, "timeline-loop-inactive");
+  assert.equal(fixture.sent.length, beforeInactive, "inactive F14 must not send a half command");
+  fixture.router.stop();
 });

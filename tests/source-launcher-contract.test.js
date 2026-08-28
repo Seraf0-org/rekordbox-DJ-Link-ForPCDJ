@@ -150,7 +150,7 @@ test(
     const macroPath = path.join(tempRoot, "fade-enabled.json");
     const missingPolicyPath = path.join(tempRoot, "missing-owner-policy.json");
     const valid = {
-      version: "1.1.9",
+      version: "1.1.10",
       enabled: true,
       syndocal: {
         enabled: true,

@@ -19,6 +19,7 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "DJ_TIMELINE_STATE_REQUEST",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
+  "DJ_TIMELINE_LOOP_HALF",
 ]);
 const PHYSICAL_EVENT_TYPES = new Set([
   "DJ_TRACK_ACTIVE",
@@ -27,6 +28,7 @@ const PHYSICAL_EVENT_TYPES = new Set([
   "DJ_RELEASE",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
+  "DJ_TIMELINE_LOOP_HALF",
 ]);
 // Reconnect replay is deliberately fail-closed: only a release handoff may
 // survive a socket teardown. All other physical commands are relative to the
@@ -567,6 +569,15 @@ function encodeV3LoopSet(payload) {
     : null;
 }
 
+function encodeV3LoopHalf(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["timelineId", "playSessionId"])) return null;
+  const timelineId = requiredString(payload, "timelineId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  return timelineId && playSessionId
+    ? { timelineId, playSessionId }
+    : null;
+}
+
 function encodeV3TypedEvent(type, payload) {
   switch (type) {
     case "DJ_TRACK_ACTIVE":
@@ -582,6 +593,8 @@ function encodeV3TypedEvent(type, payload) {
       return encodeV3BeatJump(payload);
     case "DJ_TIMELINE_LOOP_SET":
       return encodeV3LoopSet(payload);
+    case "DJ_TIMELINE_LOOP_HALF":
+      return encodeV3LoopHalf(payload);
     default:
       return null;
   }
@@ -677,6 +690,7 @@ function createSyndocalEnvelopeV3Adapter({ token = "" } = {}) {
           "DJ_RELEASE",
           "DJ_TIMELINE_BEAT_JUMP",
           "DJ_TIMELINE_LOOP_SET",
+          "DJ_TIMELINE_LOOP_HALF",
           "DJ_TIMELINE_STATE_REQUEST",
           "DJ_STATE_SYNC",
         ],

@@ -11,6 +11,7 @@ const PUBLIC_DIR = path.join(__dirname, "..", "server", "public");
 const html = fs.readFileSync(path.join(PUBLIC_DIR, "index.html"), "utf8");
 const app = fs.readFileSync(path.join(PUBLIC_DIR, "app.js"), "utf8");
 const styles = fs.readFileSync(path.join(PUBLIC_DIR, "styles.css"), "utf8");
+const server = fs.readFileSync(path.join(__dirname, "..", "server", "index.js"), "utf8");
 
 test("first-run setup card is always present and exposes read-only setup surfaces", () => {
   const cardStart = html.indexOf('<section id="djAgentSetupCard"');
@@ -41,7 +42,7 @@ test("first-run setup card is always present and exposes read-only setup surface
   assert.match(card, /not persisted, sent to the server, or stored in localStorage/);
 });
 
-test("static setup preview is complete nested v1.1.9 and validates after restoring only the token placeholder", () => {
+test("static setup preview is complete nested v1.1.10 and validates after restoring only the token placeholder", () => {
   const match = html.match(/<pre id="djAgentConfigPreview"[^>]*>([\s\S]*?)<\/pre>/);
   assert.ok(match);
   const preview = JSON.parse(match[1]);
@@ -51,7 +52,7 @@ test("static setup preview is complete nested v1.1.9 and validates after restori
   ]);
   assert.equal(Object.hasOwn(preview, "releaseMacro"), false);
   assert.equal(Object.hasOwn(preview, "releaseFade"), false);
-  assert.equal(preview.version, "1.1.9");
+  assert.equal(preview.version, "1.1.10");
   assert.equal(preview.syndocal.adapter, "syndocal-envelope-v3");
   assert.equal(preview.midi.releaseFade.enabled, true);
   assert.equal(preview.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
@@ -108,6 +109,58 @@ test("DJ Link setup offers only the v3 adapter", () => {
   assert.match(app, /const SETUP_ADAPTERS = \["syndocal-envelope-v3"\];/);
 });
 
+test("local operator override is gated to timeline handoff modes and preserves released owner diagnostics", () => {
+  assert.match(html, /id="djAgentReturnToDjControl"[^>]*hidden/);
+  assert.match(html, /id="djAgentCandidateStage"/);
+  assert.match(app, /agent.mode === "handoff-pending" \\|\\| agent.mode === "timeline-control"/);
+  assert.match(app, /Timeline may still be running/);
+  assert.match(app, /does not change the Syndocal Timeline/);
+  assert.match(app, /fetch\(`\/api\/dj-agent\/actions\/\$\{action\}`/);
+  const handlerStart = app.indexOf('if (djAgentReturnToDjControlEl)');
+  const handlerEnd = app.indexOf('for (const button of document.querySelectorAll("[data-dj-action]"))', handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
+  const handler = app.slice(handlerStart, handlerEnd);
+  assert.match(handler, /window\.confirm/);
+  assert.match(handler, /if \(!confirmed\)/);
+  assert.ok(handler.indexOf("if (!confirmed)") < handler.indexOf("fetch(`\/api\/dj-agent\/actions\/\$\{action\}`"));
+  assert.match(handler, /JSON\.stringify\(\{ confirmation: "return-to-dj-control" \}\)/);
+  assert.match(app, /stage === "waiting-for-1400ms"/);
+  assert.match(app, /"operator-fallback": "OPERATOR FALLBACK"/);
+  assert.match(app, /const released = agent\?\.released === true/);
+  assert.match(app, /ownerSource === "operator-deck1-fallback"/);
+
+  const ownerRenderer = app.slice(
+    app.indexOf("function formatAdmittedOwner"),
+    app.indexOf("function isLocalDjAgentHost"),
+  );
+  const formatOwner = vm.runInNewContext(`${ownerRenderer}; formatAdmittedOwner`, {});
+  const owner = {
+    released: true,
+    ownerDeck: 1,
+    ownerDeckId: "rekordbox-deck-1",
+    activePlaySessionId: "operator-session",
+    ownerWireIdentity: "text:demo track 2\u0000loopmasters",
+    ownerSource: "operator-deck1-fallback",
+  };
+  assert.match(formatOwner(owner), /Deck 1/);
+  assert.match(formatOwner(owner), /operator Deck 1 fallback/);
+  assert.match(formatOwner(owner), /RELEASED/);
+  assert.match(server, /app\.post\("\/api\/dj-agent\/actions\/return-to-dj-control"/);
+  const actionHandler = server.slice(
+    server.indexOf("function handleDjAgentAction"),
+    server.indexOf("// These diagnostics use the same action path"),
+  );
+  assert.match(actionHandler, /isActionRequestAllowed\(_req\)/);
+  assert.match(actionHandler, /action === "return-to-dj-control"/);
+  assert.match(actionHandler, /operator-confirmation-required/);
+  const confirmationHelper = server.slice(
+    server.indexOf("function hasExactOperatorReturnConfirmation"),
+    server.indexOf("function handleDjAgentAction"),
+  );
+  assert.match(confirmationHelper, /body\[OPERATOR_RETURN_CONFIRMATION_FIELD\] === OPERATOR_RETURN_CONFIRMATION_TOKEN/);
+  assert.match(server, /stateSyncProvider: \(\) => \(djAgentRouter \? djAgentRouter\.getSyndocalStateSync\(\) : \{\}\)/);
+});
+
 test("setup reflects only an exact enumerated MIDI name+port pair and fails closed after refresh", () => {
   const controlsBlock = app.slice(app.indexOf("function renderDjAgentSetupControls"), app.indexOf("function updateDjAgentConfigPreviewFromDraft"));
   assert.match(controlsBlock, /placeholder\.value\s*=\s*""/);
@@ -132,7 +185,7 @@ test("setup preview remains empty for an unselected MIDI pair", () => {
   assert.match(previewBlock, /adapter: djAgentSetupDraft\.adapter/);
 });
 
-test("setup preview keeps the v1.1.9 strict schema shape with MIDI macro nesting", () => {
+test("setup preview keeps the v1.1.10 strict schema shape with MIDI macro nesting", () => {
   const sourceStart = app.indexOf("const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE");
   const sourceEnd = app.indexOf("async function fetchDjAgentSetup");
   assert.ok(sourceStart >= 0 && sourceEnd > sourceStart);
@@ -149,7 +202,7 @@ test("setup preview keeps the v1.1.9 strict schema shape with MIDI macro nesting
     { djAgentConfigPreviewEl: previewElement },
   );
   const template = JSON.parse(fs.readFileSync(
-    path.join(__dirname, "..", "config", "dj-agent-v1.1.9.example.json"),
+    path.join(__dirname, "..", "config", "dj-agent-v1.1.10.example.json"),
     "utf8",
   ));
   const legacyRoot = {

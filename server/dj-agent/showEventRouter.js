@@ -1,6 +1,6 @@
 const { EventEmitter } = require("node:events");
+const { createOperatorDjControlReturn } = require("./operatorDjControlReturn");
 const { createStage1LoopFallback } = require("./stage1LoopFallback");
-const { resolveCurrentTimelineLoopOff } = require("./timelineLoopOffPolicy");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
@@ -63,14 +63,16 @@ function createShowEventRouter({
   let timelineStateUpdatedAt = null;
   let timelineSnapshotReady = false;
   let lastSyndocalState = syndocalClient.getStatus?.().state || "unknown";
-  // LOOP_SET never reconnect-replays: transport terminalizes it on teardown.
-  // Keep its target identity while it is pending/acknowledged so an unrelated
-  // (or still-true) timeline snapshot cannot make a second F13/F14 command
-  // race the original event.
-  let pendingLoopAction = null;
+  // Timeline physical commands never reconnect-replay. Keep F13's LOOP_SET
+  // target identity while it is pending/acknowledged so an unrelated (or
+  // still-true) snapshot cannot race a second toggle. F14 has its own latch:
+  // it is an independent command and must never clear or block this one.
+  let pendingLoopSetAction = null;
+  let pendingLoopHalfAction = null;
   let pendingHandoffEventId = null;
   let lastTimelineAction = null;
   let lastTimelineWarning = null;
+  let lastOperatorOverride = null;
   let releaseMacroActive = false;
   const releaseMacroSequence = releaseMacro.sequence === "filter-then-fade-then-stop"
     ? "filter-then-fade-then-stop"
@@ -102,6 +104,7 @@ function createShowEventRouter({
   let releaseMacroGeneration = 0;
   let activePlaySessionId = null;
   let admittedTrack = null;
+  let admittedTrackSource = null;
   const releasedPlaySessions = new Set();
   // The first WS connection can arrive after Rekordbox has already emitted a
   // candidate. Reannounce only after the peer's fresh timeline snapshot, for
@@ -238,6 +241,7 @@ function createShowEventRouter({
       return false;
     }
     if (sameTrackCandidate(admittedTrack, candidate)) {
+      admittedTrackSource = "acknowledged-track-candidate";
       return true;
     }
     if (admittedTrack && !releasedPlaySessions.has(admittedTrack.playSessionId)) {
@@ -247,6 +251,7 @@ function createShowEventRouter({
     }
     stage1LoopFallback.resetForSession();
     admittedTrack = candidate;
+    admittedTrackSource = "acknowledged-track-candidate";
     activePlaySessionId = candidate.playSessionId;
     released = false;
     timelineSnapshotReady = false;
@@ -261,6 +266,31 @@ function createShowEventRouter({
     detector.requestMeasuredLoopForSession?.(admittedTrackTarget());
     return true;
   }
+
+  const returnToDjControl = createOperatorDjControlReturn({
+    now,
+    getMode: () => mode,
+    getReleaseMacroActive: () => releaseMacroActive,
+    getCurrentProductionCandidate: () => detector.getCurrentProductionCandidate?.() || null,
+    getProductionCandidateStatus: () => detector.getProductionCandidateStatus?.() || null,
+    getReleasedPlaySessions: () => releasedPlaySessions,
+    getAdmittedTrack: () => admittedTrack,
+    getOwnerSource: () => admittedTrackSource,
+    setLocalOwner: (target) => {
+      // Local override is deliberately separate from ACK admission: it does
+      // not clear or rewrite the last authoritative timeline snapshot.
+      stage1LoopFallback.resetForSession();
+      admittedTrack = target;
+      admittedTrackSource = "operator-deck1-fallback";
+      activePlaySessionId = target.playSessionId;
+    },
+    setReleased: (value) => { released = value === true; },
+    getTimelineTarget: () => timelineTarget(),
+    setMode,
+    setLastOperatorOverride: (value) => { lastOperatorOverride = value; },
+    emitWarning,
+    emitAction,
+  });
 
   function midiTarget(mapping, targetDeck) {
     const resolved = midi.resolveTarget?.(mapping, targetDeck) || {};
@@ -392,8 +422,8 @@ function createShowEventRouter({
   // pending (awaiting ACK) or acknowledged (awaiting the authoritative
   // broadcast). Unlike DJ_RELEASE, LOOP_SET never reconnect-replays; socket
   // teardown is terminal send-failed. Every other state is terminal and will
-  // never emit another delivery update, so holding the latch would wedge
-  // manual timeline loop actions. Clear only the exact terminal latch.
+  // never emit another delivery update, so holding the F13 latch would wedge
+  // manual timeline loop actions. F14 has its own delivery latch below.
   const LOOP_LATCH_AWAIT_STATES = new Set(["pending", "acknowledged"]);
 
   function loopDeliveryIsFinalWithoutUpdate(delivery) {
@@ -402,30 +432,46 @@ function createShowEventRouter({
   }
 
   function pendingLoopDesired() {
-    return pendingLoopAction?.desiredLoopActive ?? null;
+    return pendingLoopSetAction?.desiredLoopActive ?? null;
   }
 
   function clearPendingLoopActionForDelivery(delivery) {
     if (
-      pendingLoopAction &&
+      pendingLoopSetAction &&
       loopDeliveryIsFinalWithoutUpdate(delivery) &&
-      typeof pendingLoopAction.eventId === "string" &&
-      pendingLoopAction.eventId === delivery?.eventId
+      typeof pendingLoopSetAction.eventId === "string" &&
+      pendingLoopSetAction.eventId === delivery?.eventId
     ) {
-      pendingLoopAction = null;
+      pendingLoopSetAction = null;
       return true;
     }
     return false;
   }
 
-  function clearPendingLoopActionForObservedState(state) {
+  function clearPendingLoopHalfActionForDelivery(delivery) {
+    const state = deliveryState(delivery);
     if (
-      pendingLoopAction &&
-      state?.loopActive === pendingLoopAction.desiredLoopActive &&
-      state?.timelineId === pendingLoopAction.timelineId &&
-      state?.playSessionId === pendingLoopAction.playSessionId
+      pendingLoopHalfAction &&
+      typeof state === "string" &&
+      state.length > 0 &&
+      state !== "pending" &&
+      typeof pendingLoopHalfAction.eventId === "string" &&
+      pendingLoopHalfAction.eventId === delivery?.eventId
     ) {
-      pendingLoopAction = null;
+      pendingLoopHalfAction = null;
+      return true;
+    }
+    return false;
+  }
+
+  function clearPendingLoopSetActionForObservedState(state) {
+    if (
+      pendingLoopSetAction &&
+      state?.loopActive === pendingLoopSetAction.desiredLoopActive &&
+      state?.timelineId === pendingLoopSetAction.timelineId &&
+      state?.playSessionId === pendingLoopSetAction.playSessionId
+    ) {
+      pendingLoopSetAction = null;
       return true;
     }
     return false;
@@ -438,7 +484,7 @@ function createShowEventRouter({
       playSessionId,
       eventId: null,
     };
-    pendingLoopAction = pending;
+    pendingLoopSetAction = pending;
     const result = sendTimelineAction(
       action,
       "DJ_TIMELINE_LOOP_SET",
@@ -447,10 +493,35 @@ function createShowEventRouter({
     );
     const delivery = result.delivery;
     if (!delivery || loopDeliveryIsFinalWithoutUpdate(delivery)) {
-      if (pendingLoopAction === pending) {
-        pendingLoopAction = null;
+      if (pendingLoopSetAction === pending) {
+        pendingLoopSetAction = null;
       }
-    } else if (pendingLoopAction === pending && typeof delivery.eventId === "string") {
+    } else if (pendingLoopSetAction === pending && typeof delivery.eventId === "string") {
+      pending.eventId = delivery.eventId;
+    }
+    return result;
+  }
+
+  function sendPendingLoopHalf(action, playSessionId) {
+    const pending = {
+      timelineId,
+      playSessionId,
+      eventId: null,
+    };
+    pendingLoopHalfAction = pending;
+    const result = sendTimelineAction(
+      action,
+      "DJ_TIMELINE_LOOP_HALF",
+      { timelineId, playSessionId },
+      { ...timelineTarget(), loopHalf: true },
+    );
+    const delivery = result.delivery;
+    const state = deliveryState(delivery);
+    if (!delivery || (typeof state === "string" && state !== "pending")) {
+      if (pendingLoopHalfAction === pending) {
+        pendingLoopHalfAction = null;
+      }
+    } else if (pendingLoopHalfAction === pending && typeof delivery.eventId === "string") {
       pending.eventId = delivery.eventId;
     }
     return result;
@@ -651,9 +722,9 @@ function createShowEventRouter({
     timelineStateUpdatedAt = new Date(now()).toISOString();
     timelineSnapshotReady = true;
     // ACK/retry/reconnect may be followed by a still-true snapshot from the
-    // same timeline. Only the state that proves this exact LOOP_SET's desired
-    // result is allowed to release the shared latch.
-    clearPendingLoopActionForObservedState(state);
+    // same timeline. Only the state that proves this exact F13 LOOP_SET's
+    // desired result is allowed to release its latch; F14 is delivery-only.
+    clearPendingLoopSetActionForObservedState(state);
     if (reannounceCandidatesAfterTimelineState && syndocalEnabled() && syndocalState() === "connected") {
       reannounceCandidatesAfterTimelineState = false;
       detector.requestCurrentTrackCandidates?.();
@@ -776,6 +847,37 @@ function createShowEventRouter({
         clearPendingLoopActionForDelivery(delivery);
         emitState();
       }
+      if (delivery?.type === "DJ_TIMELINE_LOOP_HALF") {
+        clearPendingLoopHalfActionForDelivery(delivery);
+        emitState();
+      }
+      const timelineCommandRejectedWhileNotPlaying =
+        ["DJ_TIMELINE_BEAT_JUMP", "DJ_TIMELINE_LOOP_SET", "DJ_TIMELINE_LOOP_HALF"].includes(delivery?.type) &&
+        delivery?.state === "rejected" &&
+        [delivery?.code, delivery?.reason, delivery?.ack?.code].includes("timeline_not_playing");
+      if (timelineCommandRejectedWhileNotPlaying) {
+        const wasReady = timelineSnapshotReady;
+        timelineSnapshotReady = false;
+        // A rejected Stage 2 command is not evidence that Timeline is idle.
+        // Keep the current mode and last snapshot for diagnosis, but suspend
+        // further commands until the peer supplies a fresh authoritative state.
+        emitWarning(
+          "Timeline command rejected because Timeline is not playing; awaiting authoritative state",
+          "syndocal",
+        );
+        if (
+          wasReady &&
+          mode === "timeline-control" &&
+          syndocalState() === "connected" &&
+          typeof syndocalClient.sendTimelineStateRequest === "function"
+        ) {
+          try {
+            syndocalClient.sendTimelineStateRequest();
+          } catch {
+            emitWarning("Timeline authoritative state request failed", "syndocal");
+          }
+        }
+      }
       if (delivery?.type?.startsWith?.("DJ_TIMELINE_")) {
         if (lastTimelineAction?.delivery?.eventId === delivery.eventId) {
           const acknowledged = delivery.state === "acknowledged";
@@ -861,32 +963,33 @@ function createShowEventRouter({
     if (!playSessionId) {
       return blockedAction(action, "timeline-play-session-unproven");
     }
-    if (action === "timeline-current-loop-off") {
+    if (action === "timeline-current-loop-toggle") {
       if (typeof timelineId !== "string" || timelineId.length === 0) {
         return blockedAction(action, "timeline-id-unproven");
       }
-      const resolution = resolveCurrentTimelineLoopOff({
-        loopActive: timelineLoopActive,
-        pendingLoopDesired: pendingLoopDesired(),
-      });
-      if (!resolution.allowed) {
-        return blockedAction(action, resolution.reason);
+      if (timelineLoopActive == null) {
+        return blockedAction(action, "timeline-loop-state-unknown");
       }
-      const desired = resolution.desiredLoopActive;
+      if (pendingLoopSetAction) {
+        return blockedAction(action, "timeline-loop-action-pending");
+      }
+      const desired = !timelineLoopActive;
       return sendPendingLoopSet(action, desired, playSessionId);
     }
     if (action === "beat-jump-plus-4") {
       return sendTimelineAction(action, "DJ_TIMELINE_BEAT_JUMP", { bars: 4, timelineId, playSessionId });
     }
-    if (action === "timeline-loop-toggle") {
+    if (action === "loop-half") {
       if (timelineLoopActive == null) {
         return blockedAction(action, "timeline-loop-state-unknown");
       }
-      if (pendingLoopAction) {
-        return blockedAction(action, "timeline-loop-action-pending");
+      if (timelineLoopActive !== true) {
+        return blockedAction(action, "timeline-loop-inactive");
       }
-      const desired = !timelineLoopActive;
-      return sendPendingLoopSet(action, desired, playSessionId);
+      if (pendingLoopHalfAction) {
+        return blockedAction(action, "timeline-loop-half-action-pending");
+      }
+      return sendPendingLoopHalf(action, playSessionId);
     }
     return blockedAction(action, "unknown-timeline-action");
   }
@@ -970,11 +1073,20 @@ function createShowEventRouter({
     const macroFilter = releaseMacro?.filter || {};
     const filterDurationMs = Math.max(1, Number(macroFilter.durationMs) || 1);
     const fadeDurationMs = Math.max(1, Number(releaseFade.durationMs) || 1);
+    // The adapter owns the nominal ramp duration and reports completion from
+    // its endpoint interval callback. Keep the router fallback as a watchdog
+    // only: give that callback one update interval of bounded grace so a
+    // timer queued at the same duration cannot pre-empt normal completion.
+    const filterUpdateIntervalMs = Math.max(1, Number(macroFilter.updateIntervalMs) || 1);
+    const fadeUpdateIntervalMs = Math.max(1, Number(releaseFade.updateIntervalMs) || 1);
+    const filterWatchdogDelayMs = filterDurationMs + filterUpdateIntervalMs;
+    const fadeWatchdogDelayMs = fadeDurationMs + fadeUpdateIntervalMs;
     let filterRamp = null;
     let fadeRamp = null;
     let filterFailure = null;
     let fadeFailure = null;
     let filterDone = false;
+    let fadeDone = false;
     let filterBoundaryReached = false;
     let fadeBoundaryReached = false;
     let filterBoundaryTimer = null;
@@ -1057,7 +1169,8 @@ function createShowEventRouter({
       if (filterFailure || stopFinished || generation !== releaseMacroGeneration) return;
       filterFailure = reason;
       setReleaseMacroPhase("filter-failed-awaiting-boundary", reason);
-      updatePending({ filterRamp: { ...(filterRamp || {}), state: "failed", reason } });
+      filterRamp = { ...(filterRamp || {}), state: "failed", reason };
+      updatePending({ filterRamp });
       emitWarning("Release filter ramp failed; fade and Stop remain scheduled", "release-macro");
     };
 
@@ -1065,7 +1178,8 @@ function createShowEventRouter({
       if (fadeFailure || stopFinished || generation !== releaseMacroGeneration) return;
       fadeFailure = reason;
       setReleaseMacroPhase("fade-failed-awaiting-boundary", reason);
-      updatePending({ fadeRamp: { ...(fadeRamp || {}), state: "failed", reason } });
+      fadeRamp = { ...(fadeRamp || {}), state: "failed", reason };
+      updatePending({ fadeRamp });
       emitWarning("Release fade ramp failed; Stop remains scheduled", "release-macro");
     };
 
@@ -1229,6 +1343,14 @@ function createShowEventRouter({
       scheduleResetAfterStop(stopSent, cancellationFailure);
     };
 
+    const onFadeBoundary = () => {
+      if (stopFinished || generation !== releaseMacroGeneration) return;
+      if (!fadeDone && !fadeFailure) {
+        recordFadeFailure("release-fade-ramp-incomplete");
+      }
+      finishStop();
+    };
+
     const startFade = () => {
       if (
         stopFinished ||
@@ -1255,6 +1377,7 @@ function createShowEventRouter({
           onComplete: (result) => {
             if (stopFinished || generation !== releaseMacroGeneration) return;
             fadeRamp = { ...(fadeRamp || {}), ...(result || {}), state: "completed" };
+            fadeDone = true;
             updatePending({ fadeRamp });
             if (releaseRouted) finishStop();
           },
@@ -1272,7 +1395,7 @@ function createShowEventRouter({
       }
       updatePending({ fadeRamp });
       if (!stopFinished) {
-        fadeBoundaryTimer = scheduleTimer(finishStop, fadeDurationMs);
+        fadeBoundaryTimer = scheduleTimer(onFadeBoundary, fadeWatchdogDelayMs);
       }
       return finalResult;
     };
@@ -1344,7 +1467,7 @@ function createShowEventRouter({
       // A failed or unavailable HPF still owns its planned one-second
       // boundary. Preserve the HPF -> fade order and keep the local tail
       // deterministic even when no first CC could be sent.
-      filterBoundaryTimer = scheduleTimer(onFilterBoundary, filterDurationMs);
+      filterBoundaryTimer = scheduleTimer(onFilterBoundary, filterWatchdogDelayMs);
     }
     if (!activeReleaseAction) return finalResult;
     return emitAction({
@@ -1356,12 +1479,15 @@ function createShowEventRouter({
 
   function triggerAction(action) {
     const normalized = String(action || "").trim().toLowerCase();
+    if (normalized === "return-to-dj-control" || normalized === "return_to_dj_control") {
+      return returnToDjControl();
+    }
     if (mode === "timeline-control") {
       if (normalized === "release") {
-        return triggerStage2Action("timeline-current-loop-off");
+        return triggerStage2Action("timeline-current-loop-toggle");
       }
       if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
-        return triggerStage2Action("timeline-loop-toggle");
+        return triggerStage2Action("loop-half");
       }
       if (normalized === "filter-close" || normalized === "filter_close" || normalized === "filter") {
         return triggerStage2Action("beat-jump-plus-4");
@@ -1460,6 +1586,28 @@ function createShowEventRouter({
     return { action: normalized, mode, ok: false, reason: "unknown-action" };
   }
 
+  function productionCandidateStatus(owner) {
+    const status = detector.getProductionCandidateStatus?.() || null;
+    if (!status || !owner || owner.deck !== status.deck || owner.playSessionId !== status.playSessionId) {
+      return status;
+    }
+    if (released) {
+      return {
+        ...status,
+        stage: "released",
+        reason: "play-session-released",
+      };
+    }
+    if (admittedTrackSource === "operator-deck1-fallback") {
+      return {
+        ...status,
+        stage: "operator-fallback",
+        reason: "operator-local-owner",
+      };
+    }
+    return { ...status, stage: "admitted", reason: null };
+  }
+
   function getStateSync() {
     const detectorState = detector.getState();
     const owner = admittedTrackTarget();
@@ -1478,6 +1626,7 @@ function createShowEventRouter({
       timelineStateUpdatedAt,
       lastTimelineAction,
       lastTimelineWarning,
+      lastOperatorOverride,
       stage1LoopFallback: stage1LoopFallback.getState(),
       releaseMacroSequence,
       releaseMacroPhase,
@@ -1500,9 +1649,28 @@ function createShowEventRouter({
             isPlaying: ownerState?.playback?.isPlaying === true,
           }
         : null,
-      ownerSource: owner ? "acknowledged-track-candidate" : "none",
+      ownerSource: owner ? (admittedTrackSource || "acknowledged-track-candidate") : "none",
+      productionCandidateStatus: productionCandidateStatus(owner),
       admittedTrack: owner,
       updatedAt: new Date(now()).toISOString(),
+    };
+  }
+
+  function getSyndocalStateSync() {
+    const state = getStateSync();
+    if (admittedTrackSource !== "operator-deck1-fallback") {
+      return state;
+    }
+    // A local fallback is a pedal target only. Do not put its owner context in
+    // the next v3 State Sync, where the peer could mistake it for admission.
+    return {
+      ...state,
+      ownerDeck: null,
+      ownerDeckId: null,
+      activePlaySessionId: null,
+      ownerWireIdentity: null,
+      ownerSource: "none",
+      admittedTrack: null,
     };
   }
 
@@ -1520,12 +1688,19 @@ function createShowEventRouter({
       timelineSnapshotReady,
       lastTimelineAction,
       lastTimelineWarning,
+      lastOperatorOverride,
       releaseMacroSequence,
       releaseMacroPhase,
       releaseMacroReason,
       releaseMacroActive,
       lastReleaseReset,
       lastAction,
+      pendingTimelineLoopSet: pendingLoopSetAction
+        ? { ...pendingLoopSetAction }
+        : null,
+      pendingTimelineLoopHalf: pendingLoopHalfAction
+        ? { ...pendingLoopHalfAction }
+        : null,
       loopDivision,
       stage1LoopFallback: stage1LoopFallback.getState(),
       released,
@@ -1533,6 +1708,8 @@ function createShowEventRouter({
       ownerDeckId: admittedTrack?.deckId || null,
       activePlaySessionId: admittedTrack ? activePlaySessionId : null,
       ownerWireIdentity: admittedTrack?.identity || null,
+      ownerSource: admittedTrack ? (admittedTrackSource || "acknowledged-track-candidate") : "none",
+      productionCandidateStatus: productionCandidateStatus(admittedTrackTarget()),
       ownerTrack: (() => {
         const owner = admittedTrackTarget();
         const state = owner ? detector.getState().decks?.[owner.deck] : null;
@@ -1565,7 +1742,8 @@ function createShowEventRouter({
       releaseMacroReason = null;
     }
     stage1LoopFallback.clear("router-stopped");
-    pendingLoopAction = null;
+    pendingLoopSetAction = null;
+    pendingLoopHalfAction = null;
     detector.stop?.();
     for (const timer of resetTimers) {
       releaseTimerApi.clearTimeout(timer);
@@ -1595,6 +1773,8 @@ function createShowEventRouter({
     onMasterChange,
     onSnapshot,
     onTrackLoaded,
+    getSyndocalStateSync,
+    returnToDjControl,
     start,
     stop,
     triggerAction,

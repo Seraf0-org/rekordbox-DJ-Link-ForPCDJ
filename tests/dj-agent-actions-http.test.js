@@ -12,6 +12,8 @@ const SERVER_ENTRY = path.join(REPO_ROOT, "server", "index.js");
 const fs = require("node:fs");
 const { STRICT_SHOW_CONFIG_DISABLED_REASON } = require("../server/dj-agent/config");
 
+const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
+
 function nonLoopbackIpv4() {
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries || []) {
@@ -68,6 +70,21 @@ function startServer(t, {
       reject(new Error(`server exited before bind (code=${code}, signal=${signal}):\n${output}`));
     });
   });
+}
+
+function writeEnabledConfig(t) {
+  const configPath = path.join(
+    os.tmpdir(),
+    `rb-output-actions-enabled-${process.pid}-${Date.now()}.json`,
+  );
+  const config = JSON.parse(fs.readFileSync(
+    path.join(REPO_ROOT, "config", "dj-agent-v1.1.10.example.json"),
+    "utf8",
+  ));
+  config.syndocal.token = TEST_TOKEN;
+  fs.writeFileSync(configPath, JSON.stringify(config), "utf8");
+  t.after(() => fs.rmSync(configPath, { force: true }));
+  return configPath;
 }
 
 function requestJson(connectHost, port, pathName, {
@@ -242,6 +259,7 @@ test("action CORS fence covers every Express-routable path variant without wildc
     "/Api/Dj-Agent/Actions/Filter-Close",
     "/api/dj-agent/actions/filter-close/",
     "/API/DJ-AGENT/ACTIONS/FILTER-CLOSE/",
+    "/api/dj-agent/actions/return-to-dj-control",
   ];
 
   for (const variant of variants) {
@@ -387,6 +405,56 @@ test("env DJ_AGENT_ALLOW_REMOTE_ACTIONS=true keeps the Agent disabled while LAN 
   const status = await requestJson("127.0.0.1", port, "/api/dj-agent/status", { method: "GET" });
   assert.equal(status.statusCode, 200);
   assert.equal(status.body?.allowRemoteActions, false);
+});
+
+test("local operator return requires the exact server confirmation before router invocation", async (t) => {
+  const configPath = writeEnabledConfig(t);
+  const { port } = await startServer(t, { configFile: configPath });
+  const host = `localhost:${port}`;
+  const route = "/api/dj-agent/actions/return-to-dj-control";
+  const statusBefore = await requestJson("127.0.0.1", port, "/api/dj-agent/status", { method: "GET" });
+  assert.equal(statusBefore.statusCode, 200);
+  assert.equal(statusBefore.body?.enabled, true);
+  const stateProjection = (body) => {
+    const state = body?.state || {};
+    return {
+      mode: state.mode,
+      ownerDeck: state.ownerDeck,
+      ownerDeckId: state.ownerDeckId,
+      activePlaySessionId: state.activePlaySessionId,
+      ownerSource: state.ownerSource,
+      admittedTrack: state.admittedTrack,
+      lastOperatorOverride: state.lastOperatorOverride,
+    };
+  };
+  const initialProjection = stateProjection(statusBefore.body);
+
+  for (const body of [
+    {},
+    { confirmation: "wrong-token" },
+    { confirmation: "return-to-dj-control", extra: true },
+  ]) {
+    const rejected = await requestJson("127.0.0.1", port, route, {
+      headers: { Host: host },
+      body,
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.body?.error, "operator-confirmation-required");
+    assert.equal(rejected.body?.action, "return-to-dj-control");
+    const statusAfter = await requestJson("127.0.0.1", port, "/api/dj-agent/status", { method: "GET" });
+    assert.deepEqual(stateProjection(statusAfter.body), initialProjection);
+  }
+
+  // The exact token passes the HTTP confirmation gate and reaches the router.
+  // This server starts in DJ control with no candidate, so the router's own
+  // mode/candidate guard is the expected visible failure rather than a 400.
+  const accepted = await requestJson("127.0.0.1", port, route, {
+    headers: { Host: host },
+    body: { confirmation: "return-to-dj-control" },
+  });
+  assert.equal(accepted.statusCode, 503);
+  assert.equal(accepted.body?.result?.reason, "dj-control-override-unavailable");
+  assert.equal(accepted.body?.result?.operatorOverride?.reason, "dj-control-override-unavailable");
 });
 
 test("invalid config-file content keeps the Agent disabled and leaks no caller values", async (t) => {

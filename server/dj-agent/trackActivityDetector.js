@@ -1089,6 +1089,152 @@ function createTrackActivityDetector({
     return candidates;
   }
 
+  // Read the exact production candidate that is selectable right now without
+  // emitting a candidate event. The router uses this only for an explicit
+  // local operator override; it must not turn a local observation into a
+  // Syndocal admission or replay a previously ACKed event. Reuse the same
+  // provenance, freshness, titleContains, and bounded Deck 1 fallback
+  // selector as the normal production path above.
+  function getCurrentProductionCandidate() {
+    if (stopped || !usesProductionOwnerSelection()) return null;
+    const descriptors = productionCandidateDescriptors();
+    const selected = selectProductionOwnerCandidate(
+      descriptors,
+      configuredOwnerSelectionPolicy,
+    );
+    if (!selected || selected.kind === "wait-for-text-identity") return null;
+    const state = decks.get(selected.deck);
+    if (!state) return null;
+    const selectedDescriptor = descriptors.find((candidate) => candidate.deck === selected.deck);
+    if (!selectedDescriptor) return null;
+    const payload = strictCandidateTrackPayload(selected.deck, state, selected.wireIdentity);
+    if (!payload) return null;
+    const wireIdentity = Object.hasOwn(payload, "contentId")
+      ? { contentId: payload.contentId }
+      : Object.hasOwn(payload, "title") && Object.hasOwn(payload, "artist")
+        ? { title: payload.title, artist: payload.artist }
+        : null;
+    if (!wireIdentity) return null;
+    const identity = Object.hasOwn(wireIdentity, "contentId")
+      ? `content:${wireIdentity.contentId}`
+      : `text:${wireIdentity.title.toLocaleLowerCase()}\u0000${wireIdentity.artist.toLocaleLowerCase()}`;
+    return {
+      kind: selected.kind,
+      deck: payload.deck,
+      deckId: payload.deckId,
+      playSessionId: payload.playSessionId,
+      wireIdentity,
+      identity,
+      fresh: payload.sampleAgeMs >= 0 && payload.sampleAgeMs <= boundedMaxSampleAgeMs,
+      isPlaying: payload.isPlaying === true,
+      title: state.track?.title || null,
+      artist: state.track?.artist || null,
+      contentId: state.track?.contentId || null,
+      trackBpm: Number.isFinite(state.track?.trackBpm) ? state.track.trackBpm : null,
+      startedAt: payload.startedAt,
+      sessionAgeMs: selectedDescriptor.sessionAgeMs,
+      sampleAgeMs: payload.sampleAgeMs,
+      positionAtSendSec: payload.positionAtSendSec,
+      effectiveBpm: payload.effectiveBpm,
+      positionRevision: payload.positionRevision,
+    };
+  }
+
+  // A compact diagnostic for the local UI. It deliberately reports why the
+  // exact production selector is not ready instead of treating a loaded
+  // title as an admitted playing owner.
+  function getProductionCandidateStatus() {
+    if (stopped || !usesProductionOwnerSelection()) {
+      return { stage: "unavailable", reason: "production-owner-selection-disabled" };
+    }
+    const state = decks.get(1);
+    if (!state?.track) {
+      return { stage: "no-track", reason: "track-not-loaded", deck: 1 };
+    }
+    if (!state.playback) {
+      return { stage: "loaded", reason: "waiting-for-playback-sample", deck: 1 };
+    }
+    if (
+      state.pendingTrackChange ||
+      state.awaitingPlayConfirmation ||
+      state.playback.isPlaying !== true ||
+      !state.playSessionId ||
+      !state.startedAt
+    ) {
+      return {
+        stage: "waiting-for-play",
+        reason: "fresh-playing-play-session-required",
+        deck: 1,
+        playSessionId: state.playSessionId || null,
+      };
+    }
+    const production = currentProductionSnapshotDescriptor(1, state);
+    if (!production || state.productionSnapshotGeneration !== productionSnapshotGeneration) {
+      return {
+        stage: "waiting-for-fresh-playback",
+        reason: "fresh-playing-playback-required",
+        deck: 1,
+        playSessionId: state.playSessionId,
+      };
+    }
+    const selected = selectProductionOwnerCandidate(
+      productionCandidateDescriptors(),
+      configuredOwnerSelectionPolicy,
+    );
+    if (selected?.kind === "wait-for-text-identity") {
+      return {
+        stage: "waiting-for-text-identity",
+        reason: "artist-metadata-required",
+        deck: selected.deck,
+        playSessionId: state.playSessionId,
+        sessionAgeMs: production.sessionAgeMs,
+      };
+    }
+    if (!selected) {
+      const waitMs = configuredOwnerSelectionPolicy.deck1MetadataWaitMs;
+      if (
+        Number.isInteger(waitMs) &&
+        production.sessionAgeMs < waitMs
+      ) {
+        return {
+          stage: "waiting-for-1400ms",
+          reason: "deck1-metadata-wait",
+          deck: 1,
+          playSessionId: state.playSessionId,
+          sessionAgeMs: production.sessionAgeMs,
+          waitMs,
+        };
+      }
+      return {
+        stage: "not-selected",
+        reason: "deck1-production-selection-unproven",
+        deck: 1,
+        playSessionId: state.playSessionId,
+        sessionAgeMs: production.sessionAgeMs,
+      };
+    }
+    const candidate = getCurrentProductionCandidate();
+    if (!candidate) {
+      return {
+        stage: selected.deck === 1 ? "candidate-pending" : "not-selected",
+        reason: selected.deck === 1
+          ? "production-candidate-not-ready"
+          : "deck1-not-selected",
+        deck: selected.deck,
+        playSessionId: state.playSessionId,
+        sessionAgeMs: production.sessionAgeMs,
+      };
+    }
+    return {
+      stage: "candidate-ready",
+      reason: null,
+      deck: candidate.deck,
+      playSessionId: candidate.playSessionId,
+      sessionAgeMs: candidate.sessionAgeMs,
+      candidateKind: candidate.kind,
+    };
+  }
+
   function getState() {
     const deckState = {};
     for (const [deck, state] of decks) {
@@ -1156,6 +1302,8 @@ function createTrackActivityDetector({
     onTrackLoaded,
     requestMeasuredLoopForSession,
     requestCurrentTrackCandidates,
+    getCurrentProductionCandidate,
+    getProductionCandidateStatus,
     reset,
     start,
     stop,

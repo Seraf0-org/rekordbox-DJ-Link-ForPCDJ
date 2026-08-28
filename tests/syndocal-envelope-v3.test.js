@@ -138,6 +138,7 @@ test("v3 generic active/sync payloads require exact identity, position, BPM, rev
     "DJ_RELEASE",
     "DJ_TIMELINE_BEAT_JUMP",
     "DJ_TIMELINE_LOOP_SET",
+    "DJ_TIMELINE_LOOP_HALF",
     "DJ_TIMELINE_STATE_REQUEST",
     "DJ_STATE_SYNC",
   ]);
@@ -451,10 +452,29 @@ test("v3 beat jump +4 and loop set encoders require a canonical playSessionId", 
   assertV3Frame(loopPedal, "DJ_TIMELINE_LOOP_SET");
   assert.deepEqual(loopPedal.payload, loopSet);
 
+  const loopHalf = { timelineId: "life-over", playSessionId: "play-session-1" };
+  const loopHalfFrame = adapter.encodeEvent({
+    type: "DJ_TIMELINE_LOOP_HALF",
+    eventId: "loop-half-canonical",
+    sequence: 6,
+    payload: loopHalf,
+  });
+  assertV3Frame(loopHalfFrame, "DJ_TIMELINE_LOOP_HALF");
+  assert.deepEqual(loopHalfFrame.payload, loopHalf);
+  const loopHalfPedal = adapter.encodeEvent({
+    type: "DJ_TIMELINE_LOOP_HALF",
+    eventId: "loop-half-pedal-source",
+    sequence: 7,
+    payload: { ...loopHalf, source: "pedal" },
+  });
+  assertV3Frame(loopHalfPedal, "DJ_TIMELINE_LOOP_HALF");
+  assert.deepEqual(loopHalfPedal.payload, loopHalf);
+
   // Hostile inputs are rejected, never silently stripped.
   for (const [type, canonical] of [
     ["DJ_TIMELINE_BEAT_JUMP", beatJump],
     ["DJ_TIMELINE_LOOP_SET", loopSet],
+    ["DJ_TIMELINE_LOOP_HALF", loopHalf],
   ]) {
     let variant = 0;
     for (const patch of [
@@ -505,6 +525,12 @@ test("v3 beat jump +4 and loop set encoders require a canonical playSessionId", 
       eventId: `loop-bad-${variant}`,
       sequence: 30 + variant,
       payload: { active: false, timelineId: "life-over", ...patch },
+    }), null);
+    assert.equal(adapter.encodeEvent({
+      type: "DJ_TIMELINE_LOOP_HALF",
+      eventId: `loop-half-bad-${variant}`,
+      sequence: 50 + variant,
+      payload: { timelineId: "life-over", ...patch },
     }), null);
   }
 });

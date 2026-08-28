@@ -77,6 +77,9 @@ function exactReleaseFade() {
 
 function createReleaseTimers() {
   const pending = [];
+  const nominalRampDurationMs = 1_000;
+  const rampUpdateIntervalMs = 50;
+  const watchdogDurationMs = nominalRampDurationMs + rampUpdateIntervalMs;
   return {
     timerApi: {
       setTimeout(callback, delayMs) { pending.push({ callback, delayMs }); return callback; },
@@ -87,11 +90,15 @@ function createReleaseTimers() {
     },
     runPlannedCompletion() {
       let completed = false;
-      // A current release has two planned one-second boundaries (HPF then
-      // ChannelFader) followed by the zero-delay reset. Drain that bounded
-      // local tail so callers can inspect the terminal action deterministically.
+      // A current release has two one-second nominal ramp boundaries (HPF
+      // then ChannelFader). The router's missing-callback watchdog is delayed
+      // by one update interval, so the deterministic fixture fires 1050ms
+      // only when the adapter did not deliver the normal endpoint callback.
+      // Drain that bounded local tail before the zero-delay reset so callers
+      // can inspect the terminal action without weakening the completion
+      // assertion.
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const index = pending.findIndex((pendingTimer) => pendingTimer.delayMs === 1000);
+        const index = pending.findIndex((pendingTimer) => pendingTimer.delayMs === watchdogDurationMs);
         if (index < 0) break;
         const completion = pending.splice(index, 1)[0]?.callback;
         if (typeof completion === "function") {
@@ -655,7 +662,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
     transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 32,
@@ -697,7 +704,7 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
     transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 32,
@@ -707,9 +714,20 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   });
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.ok, true);
-  assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_SET");
-  assert.equal(sent.at(-1).payload.active, true);
+  assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_HALF");
+  assert.deepEqual(sent.at(-1).payload, {
+    timelineId: "show-1",
+    playSessionId: timelineSession,
+    source: "pedal",
+  });
   assert.deepEqual(midiCalls, []);
+  client.emit("delivery", {
+    eventId: sent.at(-1).eventId,
+    type: "DJ_TIMELINE_LOOP_HALF",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+  });
 
   // An ACK does not invent authoritative state; the next broadcast releases
   // the idempotence guard and supplies the next absolute loop value.
@@ -740,7 +758,12 @@ test("timeline-control maps pedals to ACKed timeline actions without MIDI and fa
   assert.equal(router.getStatus().lastTimelineAction.ok, false);
   const loopOff = router.triggerAction("loop-half");
   assert.equal(loopOff.ok, true);
-  assert.equal(sent.at(-1).payload.active, false);
+  assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_HALF");
+  assert.deepEqual(sent.at(-1).payload, {
+    timelineId: "show-1",
+    playSessionId: timelineSession,
+    source: "pedal",
+  });
 
   connection = { enabled: true, state: "disconnected" };
   client.emit("status", connection);
@@ -874,7 +897,7 @@ function createStage2TimelineFixture({ sendState = "acknowledged" } = {}) {
   };
 }
 
-test("stage2 F13 stamps an exact authoritative loop-off without changing F14", () => {
+test("stage2 F13 toggles the current loop absolutely and F14 uses dedicated LOOP_HALF", () => {
   const { router, client, sent, sessionA, handoffEventId } = createStage2TimelineFixture();
   const transitionHoldOff = router.triggerAction("release");
   assert.equal(transitionHoldOff.ok, true);
@@ -895,22 +918,32 @@ test("stage2 F13 stamps an exact authoritative loop-off without changing F14", (
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
+  client.emit("timeline-state", {
+    type: "DJ_TIMELINE_STATE",
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: false,
+    timelineId: "show-1",
+    positionBars: 32,
+    playSessionId: sessionA,
+    pedalOwner: "timeline",
+    releaseEventId: handoffEventId,
+  });
   const loop = router.triggerAction("loop-half");
   assert.equal(loop.ok, true);
-  assert.deepEqual(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET").at(-1).payload, {
-    active: true,
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_HALF").at(-1).payload, {
     timelineId: "show-1",
     playSessionId: sessionA,
     source: "pedal",
   });
   assert.deepEqual(
     sent.filter((event) => event.type.startsWith("DJ_TIMELINE_")).map((event) => event.type),
-    ["DJ_TIMELINE_LOOP_SET", "DJ_TIMELINE_LOOP_SET"],
+    ["DJ_TIMELINE_LOOP_SET", "DJ_TIMELINE_LOOP_HALF"],
   );
   router.stop();
 });
 
-test("stage2 F13 removes an ordinary authored loop while transition hold is inactive", () => {
+test("stage2 F13 toggles an ordinary authored loop back on while transition hold is inactive", () => {
   const { router, client, sent, sessionA, handoffEventId, midiCalls } = createStage2TimelineFixture();
   const midiBeforeStage2 = [...midiCalls];
   client.emit("timeline-state", {
@@ -932,6 +965,13 @@ test("stage2 F13 removes an ordinary authored loop while transition hold is inac
     playSessionId: sessionA,
     source: "pedal",
   });
+  client.emit("delivery", {
+    eventId: sent.find((event) => event.type === "DJ_TIMELINE_LOOP_SET").eventId,
+    type: "DJ_TIMELINE_LOOP_SET",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+  });
   assert.deepEqual(midiCalls, midiBeforeStage2, "Stage 2 ordinary loop-off must not emit local MIDI");
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -944,11 +984,18 @@ test("stage2 F13 removes an ordinary authored loop while transition hold is inac
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
-  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
+  const ordinaryLoopOn = router.triggerAction("release");
+  assert.equal(ordinaryLoopOn.ok, true);
+  assert.deepEqual(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET").at(-1).payload, {
+    active: true,
+    timelineId: "show-1",
+    playSessionId: sessionA,
+    source: "pedal",
+  });
   router.stop();
 });
 
-test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails closed without MIDI", () => {
+test("stage2 F13 LOOP_SET and F14 LOOP_HALF use independent latches and fail closed without MIDI", () => {
   const {
     router,
     client,
@@ -971,6 +1018,15 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
   assert.equal(duplicate.reason, "timeline-loop-action-pending");
   assert.equal(loopSends().length, 1, "a pending F13 must not double-fire");
 
+  const half = router.triggerAction("loop-half");
+  assert.equal(half.delivery.state, "pending");
+  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_HALF").length, 1);
+  assert.equal(sent.at(-1).type, "DJ_TIMELINE_LOOP_HALF");
+  assert.equal(router.getStatus().pendingTimelineLoopHalf.eventId, half.delivery.eventId);
+  const duplicateHalf = router.triggerAction("loop-half");
+  assert.equal(duplicateHalf.reason, "timeline-loop-half-action-pending");
+  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_HALF").length, 1);
+
   client.emit("delivery", {
     eventId: first.delivery.eventId,
     type: "DJ_TIMELINE_LOOP_SET",
@@ -979,10 +1035,26 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
     ok: false,
     reason: "denied",
   });
+  assert.equal(router.getStatus().pendingTimelineLoopSet, null);
+  assert.equal(router.getStatus().pendingTimelineLoopHalf.eventId, half.delivery.eventId, "F13 terminal must not clear F14 latch");
+
+  const retry = router.triggerAction("release");
+  assert.equal(retry.delivery.state, "pending");
+  assert.equal(loopSends().length, 2, "F13 retry is independent of the pending F14 command");
+
+  client.emit("delivery", {
+    eventId: half.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_HALF",
+    state: "acknowledged",
+    ackState: "acknowledged",
+    ok: true,
+  });
+  assert.equal(router.getStatus().pendingTimelineLoopHalf, null, "F14 ACK clears only its own latch");
+
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
     transitionHoldActive: false,
     timelineId: "show-1",
     positionBars: 33,
@@ -990,13 +1062,14 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
-  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
-  assert.equal(loopSends().length, 1);
+  assert.equal(router.getStatus().pendingTimelineLoopSet.eventId, retry.delivery.eventId);
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
+  assert.equal(loopSends().length, 2);
 
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
     state: "running",
-    loopActive: false,
+    loopActive: true,
     transitionHoldActive: true,
     timelineId: "show-1",
     positionBars: 34,
@@ -1004,8 +1077,8 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
-  assert.equal(router.triggerAction("release").reason, "timeline-loop-inactive");
-  assert.equal(loopSends().length, 1);
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
+  assert.equal(loopSends().length, 2);
 
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -1019,7 +1092,7 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
     releaseEventId: null,
   });
   assert.equal(router.triggerAction("release").reason, "handoff-pending");
-  assert.equal(loopSends().length, 1);
+  assert.equal(loopSends().length, 2);
 
   client.emit("timeline-state", {
     type: "DJ_TIMELINE_STATE",
@@ -1032,20 +1105,21 @@ test("stage2 F13 current loop-off is one-shot, shares F14's latch, and fails clo
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
-  const f14Pending = router.triggerAction("loop-half");
-  assert.equal(f14Pending.delivery.state, "pending");
-  assert.equal(loopSends().length, 2);
+  const f14Again = router.triggerAction("loop-half");
+  assert.equal(f14Again.delivery.state, "pending");
+  assert.equal(sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_HALF").length, 2);
   assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
-  assert.equal(loopSends().length, 2, "F13 shares F14's pending LOOP_SET latch");
+  assert.equal(loopSends().length, 2, "F13 retains its own pending LOOP_SET latch");
   setConnection("disconnected");
   client.emit("status", { enabled: true, state: "disconnected" });
   assert.equal(router.triggerAction("release").reason, "timeline-network-disconnected");
+  assert.equal(router.triggerAction("loop-half").reason, "timeline-network-disconnected");
   assert.equal(loopSends().length, 2);
   assert.deepEqual(midiCalls, midiBeforeStage2, "Stage 2 F13 must not add Rekordbox MIDI");
   router.stop();
 });
 
-test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh correlated snapshot permits one new manual edge", () => {
+test("stage2 F13/F14 do not replay terminal commands after reconnect and regain independent manual edges", () => {
   const {
     router,
     client,
@@ -1056,14 +1130,16 @@ test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh co
     setConnection,
   } = createStage2TimelineFixture({ sendState: "pending" });
   const loopSends = () => sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_SET");
+  const halfSends = () => sent.filter((event) => event.type === "DJ_TIMELINE_LOOP_HALF");
   const midiBeforeStage2 = [...midiCalls];
 
   const first = router.triggerAction("release");
   assert.equal(first.delivery.state, "pending");
   assert.equal(loopSends().length, 1);
 
-  // A foreign terminal delivery and an authoritative state for the wrong
-  // target must not release the exact F13/F14 latch.
+  // A foreign terminal delivery must not release the exact F13 latch. F14
+  // has its own command and can be queued independently while F13 awaits its
+  // LOOP_SET outcome.
   client.emit("delivery", {
     eventId: "foreign-loop-set-terminal",
     type: "DJ_TIMELINE_LOOP_SET",
@@ -1084,12 +1160,15 @@ test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh co
     releaseEventId: handoffEventId,
   });
   assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
-  assert.equal(router.triggerAction("loop-half").reason, "timeline-loop-action-pending");
+  const firstHalf = router.triggerAction("loop-half");
+  assert.equal(firstHalf.delivery.state, "pending");
+  assert.equal(halfSends().length, 1);
+  assert.equal(router.triggerAction("loop-half").reason, "timeline-loop-half-action-pending");
 
   // The real Syndocal transport terminalizes LOOP_SET as send-failed on a
-  // socket close; it never queues it for reconnect replay. The exact terminal
-  // delivery clears only this latch, while reconnect resets timeline snapshot
-  // authority and cannot send an automatic replacement command.
+  // socket close; neither command queues for reconnect replay. Each exact
+  // terminal delivery clears only its own latch, while reconnect resets
+  // timeline snapshot authority and cannot send automatic replacements.
   setConnection("disconnected");
   client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
   client.emit("delivery", {
@@ -1100,6 +1179,16 @@ test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh co
     ok: false,
     reason: "connection-closed",
   });
+  client.emit("delivery", {
+    eventId: firstHalf.delivery.eventId,
+    type: "DJ_TIMELINE_LOOP_HALF",
+    state: "send-failed",
+    ackState: "send-failed",
+    ok: false,
+    reason: "connection-closed",
+  });
+  assert.equal(router.getStatus().pendingTimelineLoopSet, null);
+  assert.equal(router.getStatus().pendingTimelineLoopHalf, null);
   assert.equal(router.triggerAction("release").reason, "timeline-network-disconnected");
   setConnection("connected");
   client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
@@ -1123,7 +1212,10 @@ test("stage2 F13 does not replay a terminal LOOP_SET after reconnect; a fresh co
   const retry = router.triggerAction("release");
   assert.equal(retry.delivery.state, "pending");
   assert.equal(loopSends().length, 2);
-  assert.deepEqual(midiCalls, midiBeforeStage2, "shared Stage 2 loop latch must not emit local MIDI");
+  const halfRetry = router.triggerAction("loop-half");
+  assert.equal(halfRetry.delivery.state, "pending");
+  assert.equal(halfSends().length, 2);
+  assert.deepEqual(midiCalls, midiBeforeStage2, "Stage 2 timeline commands must not emit local MIDI");
   router.stop();
 });
 
@@ -1235,7 +1327,7 @@ test("reconnect requires a fresh authoritative snapshot before stage2 sends resu
   router.stop();
 });
 
-test("terminal LOOP_SET outcomes clear the pending latch immediately and stay retryable", () => {
+test("terminal F13 LOOP_SET outcomes clear its pending latch immediately and stay retryable", () => {
   const releaseTimers = createReleaseTimers();
   const detector = createTrackActivityDetector({ idFactory: (() => {
     let id = 0;
@@ -1321,11 +1413,11 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     ackState: "skipped",
     reason: "invalid-payload",
   });
-  const skipped = router.triggerAction("loop-half");
+  const skipped = router.triggerAction("release");
   assert.equal(skipped.ok, false);
   assert.equal(skipped.delivery.state, "skipped");
   assert.equal(skipped.delivery.sent, false);
-  const retryable = router.triggerAction("loop-half");
+  const retryable = router.triggerAction("release");
   assert.notEqual(retryable.reason, "timeline-loop-action-pending");
   assert.equal(retryable.delivery.state, "skipped");
   assert.equal(loopSends().length, 2);
@@ -1333,9 +1425,9 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
 
   // Pending still holds the exact latch against double-fire.
   scriptedDelivery = () => ({ sent: true, ok: false, state: "pending", ackState: "pending" });
-  const held = router.triggerAction("loop-half");
+  const held = router.triggerAction("release");
   assert.equal(held.delivery.state, "pending");
-  const blockedWhilePending = router.triggerAction("loop-half");
+  const blockedWhilePending = router.triggerAction("release");
   assert.equal(blockedWhilePending.ok, false);
   assert.equal(blockedWhilePending.reason, "timeline-loop-action-pending");
   assert.equal(blockedWhilePending.delivery, null);
@@ -1350,7 +1442,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     ok: false,
     reason: "ack-timeout",
   });
-  const retriedAfterTimeout = router.triggerAction("loop-half");
+  const retriedAfterTimeout = router.triggerAction("release");
   assert.notEqual(retriedAfterTimeout.reason, "timeline-loop-action-pending");
   assert.equal(retriedAfterTimeout.delivery.state, "pending");
   assert.equal(loopSends().length, 4);
@@ -1364,7 +1456,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     ackState: "acknowledged",
     ok: true,
   });
-  assert.equal(router.triggerAction("loop-half").reason, "timeline-loop-action-pending");
+  assert.equal(router.triggerAction("release").reason, "timeline-loop-action-pending");
   assert.equal(loopSends().length, 4);
 
   // A terminal rejection also releases, and the retry recomputes desired
@@ -1378,7 +1470,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     reason: "denied",
   });
   scriptedDelivery = null;
-  const afterReject = router.triggerAction("loop-half");
+  const afterReject = router.triggerAction("release");
   assert.equal(afterReject.ok, true);
   assert.equal(afterReject.delivery.state, "acknowledged");
   assert.equal(sent.at(-1).payload.active, true);
@@ -1396,7 +1488,7 @@ test("terminal LOOP_SET outcomes clear the pending latch immediately and stay re
     pedalOwner: "timeline",
     releaseEventId: handoffEventId,
   });
-  const flipped = router.triggerAction("loop-half");
+  const flipped = router.triggerAction("release");
   assert.equal(flipped.ok, true);
   assert.equal(sent.at(-1).payload.active, false);
   assert.equal(loopSends().length, 6);

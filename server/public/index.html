@@ -149,6 +149,10 @@
           <span id="djAgentOwner" class="dj-agent-value dj-agent-owner">-</span>
         </div>
         <div class="row">
+          <span class="label">Deck 1 Candidate</span>
+          <span id="djAgentCandidateStage" class="dj-agent-status">-</span>
+        </div>
+        <div class="row">
           <span class="label">Timeline State</span>
           <span id="djAgentTimelineState" class="dj-agent-status">-</span>
         </div>
@@ -172,10 +176,15 @@
           <span class="label">Last ACK</span>
           <span id="djAgentLastAck" class="dj-agent-value">-</span>
         </div>
+        <div class="row">
+          <span class="label">Operator Override</span>
+          <span id="djAgentOperatorOverride" class="dj-agent-value">-</span>
+        </div>
         <div id="djAgentActionResult" class="dj-agent-action-result" role="status" aria-live="polite" aria-atomic="true">
           Ready
         </div>
         <div class="dj-agent-actions">
+          <button id="djAgentReturnToDjControl" type="button" hidden>Return to DJ control</button>
           <button type="button" data-dj-action="loop-half">Test Loop Half</button>
           <button type="button" data-dj-action="filter-close">Test Filter</button>
           <button type="button" data-dj-action="release">Test Release</button>
@@ -250,7 +259,7 @@
           <section class="dj-agent-setup-section" aria-labelledby="djAgentConfigTitle">
             <h2 id="djAgentConfigTitle">Token-free config preview</h2>
               <pre id="djAgentConfigPreview" class="dj-agent-config-preview" aria-label="Token-free DJ Agent config preview">{
-  "version": "1.1.9",
+  "version": "1.1.10",
   "enabled": true,
   "syndocal": {
     "enabled": true,
@@ -309,7 +318,7 @@
               <button id="djAgentConfigDownload" type="button">Download config preview</button>
               <button id="djAgentConfigCopy" type="button">Copy config preview</button>
             </div>
-            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. The production title selector is 人生オーバー; a matching title waits for Rekordbox artist metadata before v3 network admission. Deck 1 fallback waits 1400 ms, reserving 100 ms inside the v3 1500-ms freshness bound. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.9 configuration.</p>
+            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. The production title selector is 人生オーバー; a matching title waits for Rekordbox artist metadata before v3 network admission. Deck 1 fallback waits 1400 ms, reserving 100 ms inside the v3 1500-ms freshness bound. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.10 configuration.</p>
           </section>
         </div>
 
@@ -322,8 +331,8 @@
                 <tr><th scope="col">Pedal</th><th scope="col">Stage 1</th><th scope="col">Stage 2</th></tr>
               </thead>
               <tbody>
-                <tr><th scope="row">F13</th><td>Local HPF start + correlated DJ_RELEASE at the same edge → ChannelFader fade → Cue/Stop</td><td>−4 bars BeatJump; no Rekordbox MIDI</td></tr>
-                <tr><th scope="row">F14</th><td>Local LoopHalf MIDI and DJ_LOOP_STATE</td><td>Absolute loop set from authoritative loopActive; no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F13</th><td>Local HPF start + correlated DJ_RELEASE at the same edge → ChannelFader fade → Cue/Stop</td><td>Absolute Timeline loop ON/OFF toggle; no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F14</th><td>Local LoopHalf MIDI and DJ_LOOP_STATE</td><td>Active Timeline loop → ACKed DJ_TIMELINE_LOOP_HALF (exact timeline/play session); inactive or unknown loop fails closed, no Rekordbox MIDI</td></tr>
                 <tr><th scope="row">F15</th><td>Inactive</td><td>+4 bars BeatJump; only while authoritative timeline is running</td></tr>
               </tbody>
             </table>
