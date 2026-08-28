@@ -406,7 +406,7 @@ test("loop state updates preserve boundaries when native hook only sends inactiv
   assert.deepEqual(upsertLoopState([], merged), [merged]);
 });
 
-test("unknown loop activity clears stale active state while retaining the configured range", () => {
+test("unknown loop activity without identity clears stale active state while retaining the configured range", () => {
   const active = normalizeLoopState({
     deck: 1,
     active: true,
@@ -425,6 +425,50 @@ test("unknown loop activity clears stale active state while retaining the config
   assert.equal(merged.activeKnown, false);
   assert.equal(merged.startMs, 37_513);
   assert.equal(merged.endMs, 38_513);
+});
+
+test("same-track unknown loop activity preserves ACTIVE only with an exact identity", () => {
+  const active = normalizeLoopState({
+    deck: 1,
+    trackIdentity: "track-501",
+    active: true,
+    activeKnown: true,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  const rangeOnly = normalizeLoopState({
+    deck: 1,
+    trackIdentity: "track-501",
+    activeKnown: false,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  const differentTrack = normalizeLoopState({
+    deck: 1,
+    trackIdentity: "track-502",
+    activeKnown: false,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  const missingActivityAndIdentity = normalizeLoopState({
+    deck: 1,
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  const differentTrackWithoutActivity = normalizeLoopState({
+    deck: 1,
+    trackIdentity: "track-502",
+    startMs: 27_513,
+    endMs: 28_513,
+  });
+  assert.equal(mergeLoopState(active, rangeOnly).active, true);
+  assert.equal(mergeLoopState(active, rangeOnly).activeKnown, true);
+  assert.equal(mergeLoopState(active, differentTrack).active, null);
+  assert.equal(mergeLoopState(active, differentTrack).startMs, 27_513);
+  assert.equal(mergeLoopState(active, missingActivityAndIdentity).active, null);
+  assert.equal(mergeLoopState(active, missingActivityAndIdentity).activeKnown, null);
+  assert.equal(mergeLoopState(active, differentTrackWithoutActivity).active, null);
+  assert.equal(mergeLoopState(active, differentTrackWithoutActivity).activeKnown, null);
 });
 
 test("cleared or inverted loop boundaries are not treated as a configured range", () => {
@@ -2531,6 +2575,7 @@ test("hook preserves measured loop activity while inferred playback state remain
     sender.send(body, port, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
   });
 
+  await send({ type: "olvc", deck: 1, name: "@TrackBrowserID", value: 501 });
   await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 42_280 });
   await send({
     type: "loop_state",
@@ -2557,7 +2602,7 @@ test("hook preserves measured loop activity while inferred playback state remain
   await send({ type: "olvc", deck: 1, name: "@CurrentTime", value: 27_520 });
   await new Promise((resolve) => setTimeout(resolve, 15));
   assert.equal(loopEvents.at(-1).active, true);
-  assert.equal(loopEvents.at(-1).activeSource, "playhead-loop-wrap");
+  assert.equal(loopEvents.at(-1).activeSource, null);
   assert.equal(snapshots.at(-1).loopStates[0].active, true);
 });
 

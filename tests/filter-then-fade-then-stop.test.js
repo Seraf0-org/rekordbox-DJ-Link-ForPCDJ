@@ -502,18 +502,18 @@ test("router stop independently cancels both ramps and clears stale public actio
   assert.equal(fixture.operations.some((entry) => entry.name === "stop"), false);
 });
 
-test("v1.1.10 strict config accepts CC17 fade and rejects v1.1.7/legacy sequences", () => {
+test("v1.1.11 strict config accepts CC17 fade and rejects v1.1.7/legacy sequences", () => {
   const fs = require("node:fs");
-  const v119 = JSON.parse(fs.readFileSync(require("node:path").join(__dirname, "..", "config", "dj-agent-v1.1.10.example.json"), "utf8"));
-  assert.equal(validateFilterThenFadeThenStopShowConfig(v119, { allowTokenPlaceholder: true }), true);
-  const retired = structuredClone(v119);
+  const current = JSON.parse(fs.readFileSync(require("node:path").join(__dirname, "..", "config", "dj-agent-v1.1.11.example.json"), "utf8"));
+  assert.equal(validateFilterThenFadeThenStopShowConfig(current, { allowTokenPlaceholder: true }), true);
+  const retired = structuredClone(current);
   retired.version = "1.1.7";
   retired.midi.releaseFade = { enabled: false };
   retired.midi.releaseMacro.sequence = "filter-then-stop";
   retired.midi.mappings.releaseFade = undefined;
   delete retired.midi.mappings.releaseFade;
   assert.equal(validateFilterThenFadeThenStopShowConfig(retired, { allowTokenPlaceholder: true }), false);
-  const legacy = structuredClone(v119);
+  const legacy = structuredClone(current);
   legacy.midi.releaseMacro.sequence = "filter-then-fade";
   assert.equal(validateFilterThenFadeThenStopShowConfig(legacy, { allowTokenPlaceholder: true }), false);
 });

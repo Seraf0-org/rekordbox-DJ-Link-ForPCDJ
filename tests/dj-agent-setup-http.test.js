@@ -99,7 +99,7 @@ test("DJ Agent setup snapshot is localhost-only, token-free, and macro-safe", as
   assert.equal(local.body.configTemplate.midi.releaseMacro.enabled, true);
   assert.equal(local.body.configTemplate.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
   assert.equal(local.body.mappingArtifact.valid, true);
-  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.10.csv");
+  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.11.csv");
   assert.match(local.body.mappingArtifact.semanticFingerprint, /^[0-9a-f]{64}$/);
   assert.equal(local.body.mappingArtifact.operatorVerified, false);
   assert.equal(local.body.readiness.actions.releaseMacro, false);
@@ -156,7 +156,7 @@ test("invalid injected mapping artifact remains observable while first-run actio
     "server",
     "public",
     "setup",
-    "CustomMIDI1-Syndocal-v1.1.10.csv"
+    "CustomMIDI1-Syndocal-v1.1.11.csv"
   );
   const bundledBefore = fs.readFileSync(bundledCsvPath);
   // The corrupt fixture lives in the OS temp dir and is injected via
@@ -178,7 +178,7 @@ test("invalid injected mapping artifact remains observable while first-run actio
   assert.equal(local.body.mappingArtifact.code, "invalid-header");
   assert.equal(local.body.mappingArtifact.semanticFingerprint, null);
   assert.equal(local.body.mappingArtifact.summary, null);
-  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.10.csv");
+  assert.equal(local.body.mappingArtifact.url, "/setup/CustomMIDI1-Syndocal-v1.1.11.csv");
   assert.equal(local.body.readiness.gates.mapping.state, "disabled");
   assert.equal(local.body.readiness.gates.mapping.reason, "root-disabled");
   assert.equal(local.body.readiness.gates.mapping.allowed, false);

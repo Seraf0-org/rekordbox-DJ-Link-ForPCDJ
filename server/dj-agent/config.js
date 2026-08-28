@@ -131,7 +131,7 @@ function hasExactValues(value, expected) {
 // is the raw external show file and it never returns that file or its token.
 function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
   if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi", "trackActivity"])) return false;
-  if (value.version !== "1.1.10" || value.enabled !== true) return false;
+  if (value.version !== "1.1.11" || value.enabled !== true) return false;
 
   const syndocal = value.syndocal;
   if (!hasExactKeys(syndocal, ["enabled", "host", "port", "path", "nic", "token", "adapter", "heartbeatMs"])) return false;
@@ -207,7 +207,7 @@ function normalizeDeckChannels(value) {
 }
 
 const STRICT_SHOW_CONFIG_DISABLED_REASON =
-  "DJ Agent disabled: exact external v1.1.10 filter-then-fade-then-stop configuration is required";
+  "DJ Agent disabled: exact external v1.1.11 filter-then-fade-then-stop configuration is required";
 const PRODUCTION_OWNER_SELECTION_POLICY = Object.freeze({
   // titleContains is selection only. A matching track is sent as v3 text
   // identity only after both title and artist exist; artist-missing matches

@@ -12,6 +12,7 @@ rem its own trusted executable-directory pseudo-variable on the next line.
 set "__APPDIR__="
 set "_RB_PREFLIGHT_ONLY=0"
 set "_RB_INIT_CONFIG=0"
+set "_RB_UPGRADE_CONFIG=0"
 if "%1"=="" goto launcher_arguments_validated
 if "%~1"=="--preflight-only" (
   set "_RB_PREFLIGHT_ONLY=1"
@@ -21,18 +22,23 @@ if "%~1"=="--init-config" (
   set "_RB_INIT_CONFIG=1"
   goto launcher_argument_accepted
 )
-echo [ERROR] Unknown launcher argument. Use no arguments, exactly --preflight-only, or exactly --init-config.
+if "%~1"=="--upgrade-config" (
+  set "_RB_UPGRADE_CONFIG=1"
+  goto launcher_argument_accepted
+)
+echo [ERROR] Unknown launcher argument. Use no arguments, exactly --preflight-only, exactly --init-config, or exactly --upgrade-config.
 exit /b 64
 
 :launcher_argument_accepted
 shift
 if not "%1"=="" (
-  echo [ERROR] Unexpected launcher arguments. Use no arguments, exactly --preflight-only, or exactly --init-config.
+  echo [ERROR] Unexpected launcher arguments. Use no arguments, exactly --preflight-only, exactly --init-config, or exactly --upgrade-config.
   exit /b 64
 )
 
 :launcher_arguments_validated
 
+if "%_RB_UPGRADE_CONFIG%"=="1" goto upgrade_show_config
 if "%_RB_INIT_CONFIG%"=="1" goto initialize_show_config
 
 call :reject_retired_rekordbox_override
@@ -117,6 +123,31 @@ exit /b 0
 node scripts\init-show-config.js
 exit /b %errorlevel%
 
+:upgrade_show_config
+rem The one-way migration creates the current external config and then checks
+rem that same target through the production strict preflight. It never enters
+rem the source build/server/injection path in this invocation.
+call :reject_retired_rekordbox_override
+if errorlevel 1 (
+  exit /b 1
+)
+
+node scripts\upgrade-show-config.js
+if errorlevel 1 (
+  exit /b 1
+)
+
+set "DJ_AGENT_CONFIG_PATH=C:\SyndocalShow\dj-agent-v1.1.11.json"
+call :validate_show_config
+if errorlevel 1 (
+  exit /b 1
+)
+
+echo [rb-output] strict current v1.1.11 preflight passed; no show-side process or build action was taken.
+echo [rb-output] Next PowerShell command:
+echo $env:DJ_AGENT_CONFIG_PATH = 'C:\SyndocalShow\dj-agent-v1.1.11.json'
+exit /b 0
+
 :reject_retired_rekordbox_override
 rem REKORDBOX_EXE_PATH is a retired launch override.  A configured value in any
 rem scope is ambiguous, so the controlled source path refuses to launch.
@@ -165,7 +196,7 @@ if not defined DJ_AGENT_CONFIG_PATH (
 node -e "const fs=require('node:fs'),path=require('node:path');try{const forbidden=new Set(['DJ_AGENT_CONFIG','DJ_AGENT_ENABLED','DJ_AGENT_ALLOW_REMOTE_ACTIONS','SYNDOCAL_ENABLED','SYNDOCAL_HOST','SYNDOCAL_PORT','SYNDOCAL_PATH','SYNDOCAL_NIC','SYNDOCAL_TOKEN','SYNDOCAL_WS_ADAPTER','SYNDOCAL_HEARTBEAT_MS','PEDAL_ENABLED','PEDAL_MODULE','MIDI_ENABLED','MIDI_MODULE','MIDI_DEVICE','MIDI_PORT','MIDI_RELEASE_FADE','MIDI_RELEASE_MACRO','MIDI_DECK_CHANNELS','PORT','RB_OUTPUT_HOST','RB_OUTPUT_SETUP_MAPPING_PATH']);if(Object.keys(process.env).some(k=>forbidden.has(k.toUpperCase())))process.exit(2);const raw=process.env.DJ_AGENT_CONFIG_PATH||'';if(!path.isAbsolute(raw))process.exit(3);const requested=path.resolve(raw),stat=fs.lstatSync(requested);if(!stat.isFile()||stat.isSymbolicLink())process.exit(4);const file=fs.realpathSync.native(requested),root=fs.realpathSync.native(process.cwd())+path.sep;if(file.toLowerCase().startsWith(root.toLowerCase()))process.exit(5);const source=JSON.parse(fs.readFileSync(file,'utf8'));const {loadDjAgentConfig,validateFilterThenFadeThenStopShowConfig}=require('./server/dj-agent/config');const c=loadDjAgentConfig();if(c.warning||!validateFilterThenFadeThenStopShowConfig(source))process.exit(6);process.exit(0)}catch{process.exit(7)}"
 if errorlevel 1 (
   echo.
-  echo [ERROR] The checkout-external DJ Agent show config failed strict readiness validation: exact production owner selection is required.
+  echo [ERROR] The checkout-external v1.1.11 DJ Agent show config failed strict readiness validation: exact production owner selection is required.
   echo         Require enabled DJ/Syndocal/pedal/MIDI, exact adapter syndocal-envelope-v3,
   echo         192.168.50.1:9100/dj-link via NIC 192.168.50.2, heartbeat 5000 ms, a 32..256-byte token,
   echo         CustomMIDI1 strict Filter/Cue mappings with deck 1/2 channels, 1000 ms 64-to-127 Filter,

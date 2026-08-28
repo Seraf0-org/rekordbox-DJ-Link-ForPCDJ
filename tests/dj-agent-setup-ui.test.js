@@ -42,7 +42,7 @@ test("first-run setup card is always present and exposes read-only setup surface
   assert.match(card, /not persisted, sent to the server, or stored in localStorage/);
 });
 
-test("static setup preview is complete nested v1.1.10 and validates after restoring only the token placeholder", () => {
+test("static setup preview is complete nested v1.1.11 and validates after restoring only the token placeholder", () => {
   const match = html.match(/<pre id="djAgentConfigPreview"[^>]*>([\s\S]*?)<\/pre>/);
   assert.ok(match);
   const preview = JSON.parse(match[1]);
@@ -52,7 +52,7 @@ test("static setup preview is complete nested v1.1.10 and validates after restor
   ]);
   assert.equal(Object.hasOwn(preview, "releaseMacro"), false);
   assert.equal(Object.hasOwn(preview, "releaseFade"), false);
-  assert.equal(preview.version, "1.1.10");
+  assert.equal(preview.version, "1.1.11");
   assert.equal(preview.syndocal.adapter, "syndocal-envelope-v3");
   assert.equal(preview.midi.releaseFade.enabled, true);
   assert.equal(preview.midi.releaseMacro.sequence, "filter-then-fade-then-stop");
@@ -185,7 +185,7 @@ test("setup preview remains empty for an unselected MIDI pair", () => {
   assert.match(previewBlock, /adapter: djAgentSetupDraft\.adapter/);
 });
 
-test("setup preview keeps the v1.1.10 strict schema shape with MIDI macro nesting", () => {
+test("setup preview keeps the v1.1.11 strict schema shape with MIDI macro nesting", () => {
   const sourceStart = app.indexOf("const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE");
   const sourceEnd = app.indexOf("async function fetchDjAgentSetup");
   assert.ok(sourceStart >= 0 && sourceEnd > sourceStart);
@@ -202,7 +202,7 @@ test("setup preview keeps the v1.1.10 strict schema shape with MIDI macro nestin
     { djAgentConfigPreviewEl: previewElement },
   );
   const template = JSON.parse(fs.readFileSync(
-    path.join(__dirname, "..", "config", "dj-agent-v1.1.10.example.json"),
+    path.join(__dirname, "..", "config", "dj-agent-v1.1.11.example.json"),
     "utf8",
   ));
   const legacyRoot = {

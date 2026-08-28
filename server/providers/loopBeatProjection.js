@@ -23,6 +23,11 @@ function finiteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function finiteInteger(value) {
+  const number = finiteNumber(value);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
 function explicitBeatFields(packet) {
   const fields = {};
   for (const [field, names] of Object.entries(EXPLICIT_BEAT_FIELD_NAMES)) {
@@ -64,8 +69,8 @@ function projectMeasuredLoopBeats({ packet, loop, bpm, bpmObservedAt, now = Date
   if (!packet || typeof packet !== "object" || !loop || typeof loop !== "object") {
     return null;
   }
-  const startMs = finiteNumber(loop.startMs);
-  const endMs = finiteNumber(loop.endMs);
+  const startMs = finiteInteger(loop.startMs);
+  const endMs = finiteInteger(loop.endMs);
   const measuredBpm = finiteNumber(bpm);
   const observedAt = finiteNumber(bpmObservedAt);
   const nowMs = finiteNumber(now);
@@ -91,34 +96,60 @@ function projectMeasuredLoopBeats({ packet, loop, bpm, bpmObservedAt, now = Date
 
   const rawStartBeat = (startMs * measuredBpm) / 60_000;
   const rawEndBeat = (endMs * measuredBpm) / 60_000;
-  if (!Number.isFinite(rawStartBeat) || !Number.isFinite(rawEndBeat) || rawStartBeat < 0 || rawEndBeat <= rawStartBeat) {
-    return null;
-  }
-  const startBeat = quantizeBeat(rawStartBeat);
-  const endBeat = quantizeBeat(rawEndBeat);
-  if (!Number.isFinite(startBeat) || !Number.isFinite(endBeat) || endBeat <= startBeat) {
-    return null;
-  }
-  if (!closeEnough(rawStartBeat, startBeat) || !closeEnough(rawEndBeat, endBeat)) {
-    return null;
-  }
-  const lengthBeats = endBeat - startBeat;
+  const rawLengthBeats = ((endMs - startMs) * measuredBpm) / 60_000;
   if (
-    !Number.isFinite(lengthBeats) ||
-    lengthBeats < 1 / REKORDBOX_BEAT_GRID ||
-    lengthBeats > MAX_LENGTH_BEATS ||
-    !Number.isSafeInteger(Math.round(lengthBeats * REKORDBOX_BEAT_GRID))
+    !Number.isFinite(rawStartBeat) ||
+    !Number.isFinite(rawEndBeat) ||
+    !Number.isFinite(rawLengthBeats) ||
+    rawStartBeat < 0 ||
+    rawEndBeat <= rawStartBeat ||
+    rawLengthBeats <= 0
   ) {
     return null;
   }
+
+  // The Hook gives us absolute millisecond boundaries but not the track's
+  // beat-zero offset.  Consequently the absolute start/end values can be
+  // between grid lines even when the measured *duration* is an exact loop.
+  // Project the duration independently; expose absolute beat boundaries only
+  // when both measurements are themselves on the documented grid.  This
+  // prevents an unavailable absolute origin from turning a valid 2-beat loop
+  // into a stale or invented range.
+  const projectedLengthBeats = quantizeBeat(rawLengthBeats);
+  if (!Number.isFinite(projectedLengthBeats) || projectedLengthBeats <= 0) {
+    return null;
+  }
+  if (
+    !closeEnough(rawLengthBeats, projectedLengthBeats) ||
+    projectedLengthBeats < 1 / REKORDBOX_BEAT_GRID ||
+    projectedLengthBeats > MAX_LENGTH_BEATS ||
+    !Number.isSafeInteger(Math.round(projectedLengthBeats * REKORDBOX_BEAT_GRID))
+  ) {
+    return null;
+  }
+
+  const quantizedStartBeat = quantizeBeat(rawStartBeat);
+  const quantizedEndBeat = quantizeBeat(rawEndBeat);
+  const absoluteBoundariesAvailable =
+    Number.isFinite(quantizedStartBeat) &&
+    Number.isFinite(quantizedEndBeat) &&
+    quantizedEndBeat > quantizedStartBeat &&
+    closeEnough(rawStartBeat, quantizedStartBeat) &&
+    closeEnough(rawEndBeat, quantizedEndBeat) &&
+    closeEnough(quantizedEndBeat - quantizedStartBeat, projectedLengthBeats);
+  const startBeat = absoluteBoundariesAvailable ? quantizedStartBeat : null;
+  const endBeat = absoluteBoundariesAvailable ? quantizedEndBeat : null;
+  const lengthBeats = projectedLengthBeats;
 
   const explicit = explicitBeatFields(packet);
   if (!explicit) {
     return null;
   }
   if (
-    (Number.isFinite(explicit.startBeat) && (!closeEnough(explicit.startBeat, startBeat) || explicit.startBeat < 0)) ||
-    (Number.isFinite(explicit.endBeat) && (!closeEnough(explicit.endBeat, endBeat) || explicit.endBeat <= startBeat)) ||
+    (Number.isFinite(explicit.startBeat) &&
+      (!Number.isFinite(startBeat) || !closeEnough(explicit.startBeat, startBeat) || explicit.startBeat < 0)) ||
+    (Number.isFinite(explicit.endBeat) &&
+      (!Number.isFinite(endBeat) || !closeEnough(explicit.endBeat, endBeat) || explicit.endBeat <= startBeat)) ||
     (Number.isFinite(explicit.lengthBeats) &&
       (!closeEnough(explicit.lengthBeats, lengthBeats) || explicit.lengthBeats <= 0)) ||
     (Number.isFinite(explicit.startBeat) && Number.isFinite(explicit.endBeat) && explicit.endBeat <= explicit.startBeat) ||

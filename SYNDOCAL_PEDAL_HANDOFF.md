@@ -2,18 +2,35 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-27 current v1.1.10 any-deck strict show-sync v3
+## 2026-08-28 current v1.1.11 any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.10`です。v1.1.10のinstaller、tag、public release、または
+product source versionは`1.1.11`です。v1.1.11のinstaller、tag、public release、または
 hardware acceptanceはこの文書で主張しません。current/next operator routeはtracked
-`config/dj-agent-v1.1.10.example.json`と
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.10.csv`を使います。exact
+`config/dj-agent-v1.1.11.example.json`と
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.11.csv`を使います。exact
 `start-all.bat --init-config`は存在しない場合だけ
-`C:\SyndocalShow\dj-agent-v1.1.10.json`を作成し、deployed historical
+`C:\SyndocalShow\dj-agent-v1.1.11.json`を作成し、deployed historical
 `C:\SyndocalShow\dj-agent-v1.1.5.json`をread/copy/overwrite/deleteしません。
+
+既存の厳密なv1.1.10外部JSONは、同じPowerShellで
+`$env:DJ_AGENT_CONFIG_PATH`にその絶対パスを設定してから
+`start-all.bat --upgrade-config`を一度だけ実行します。migrationは既知の
+v1.1.10 schemaと32〜256-byte whitespace-free tokenだけを受理し、tokenを
+v1.1.11 token-free templateへ移して、sourceを変更せず、targetを排他的に作成します。
+作成後はcurrent strict preflightだけを実行し、次のPowerShell assignmentを表示して
+runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor pathを削除します。
+
+Windows target security is bounded by the NTFS ACL inherited from the exact
+`C:\SyndocalShow` parent; the updater does not claim Unix mode bits as a Windows
+ACL. Its pinned PowerShell writer uses `FileMode.CreateNew` plus `FileShare.None`
+through flush and rejects a reparse-point parent. The Node parent path/identity
+evidence is passed into the helper; its `OPEN_REPARSE_POINT` parent handle's
+own reparse attribute and File ID must exactly match before token write. Parent
+ACL ownership and inheritance remain operator-managed; no broader Windows ACL
+guarantee is claimed.
 
 branch `beta-v1.1.2`の再接続ABA fenceはcommit
 `eb9d131f7b57c29231bdf605f498c877180ad553`としてpush済みです。この次の
@@ -59,7 +76,7 @@ focused helper + smokeは**67/67** pass。これはsource-onlyであり、対象
 再配備して点滅停止・waveform復帰を観測するまでhardware fixを主張しない。Deck 2の
 大きなseek戻りは採取時に実測loopがONで、そのloop範囲のwrap自体は正常だった。
 
-v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.10
+v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.11
 controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
 trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
 physical HW-4 12項目の受入を主張しません。
@@ -141,9 +158,9 @@ installer/tag/public releaseは未確認・未主張です。
 
 ### 2026-08-28 CURRENT watchdog and Stage 2 pedal contract checkpoint
 
-The source-only v1.1.10 tranche is present on branch `beta-v1.1.2` at
-HEAD `53db21d620ac417faefffd1c66c8e622bb7d2405`, equal to its upstream
-tracking ref. It remains intentionally uncommitted and unpushed. Release ramp
+The source-only v1.1.11 tranche is a dirty worktree based on HEAD `4e26da2`;
+it remains intentionally uncommitted and unpushed; base HEAD equals its upstream
+tracking ref. Release ramp
 configuration remains exactly 1000 ms with a 50 ms update interval; the
 watchdog is now scheduled only after the nominal duration plus one update
 interval, so an adapter endpoint callback at the nominal boundary remains
@@ -163,20 +180,47 @@ control` route remains loopback-fenced and can adopt only a fresh, playing
 Deck 1 fallback; it does not mutate Timeline or revive a released remote
 owner.
 
-Focused owner/auth tests pass **21/21** and **17/17**; the full `npm test` pass is
-**478 total / 476 pass / 0 fail / 2 intentional pkg skips**. All changed JS
-files pass `node --check`; `git diff --check` exits 0. First-party warning
-count is **0** (Git's LF-to-CRLF working-copy notices are not source warnings).
+Focused owner/auth tests pass **21/21** and **17/17**; the v1.1.10 → v1.1.11
+one-way migration/security suite passes **15/15**. The complete full `npm test`
+has not been rerun after this dirty extension, so no current full-suite pass is
+claimed. All changed JS files pass `node --check`; `git diff --check` exits 0.
+First-party warning count is **0**
+(Git's LF-to-CRLF working-copy notices are not source warnings).
 No restart, deployment, installer/tag/public-release, peer ACK, or physical
 hardware acceptance is claimed. The next safe action is independent review
 and integration verification against the peer's v3 capability-10 contract;
 keep the working tree uncommitted until the supervising release checkpoint
 authorizes its handoff.
 
+### 2026-08-28 CURRENT live-state coherence and broadcast checkpoint
+
+The current v1.1.11 source-only live-state fix is based on branch
+`beta-v1.1.2`, pre-commit HEAD/upstream
+`4e26da201fef2ff204c28c7041b368e7283faebe`. The previous runtime could make
+Pause/Play flicker, make an active loop alternate between ACTIVE and SET, and
+reported the measured 2-beat loop `106782..107610 ms @ 145 BPM` as
+`116.03125` beats. Its state stream also emitted approximately **4,000 state
+events / 3 s** and **74 MB**.
+
+The new source path gives explicit playback edges precedence over inferred
+position state, builds each deck once per snapshot, preserves a partial ACTIVE
+update only when its non-empty track identity exactly matches, and projects a
+measured loop as duration-only **2 beats** when absolute beat zero is unknown.
+It does not invent absolute endpoints. SSE/state publication is bounded by a
+50 ms latest-wins coalescer. Focused verification is **79/79 pass** and an
+independent Terra xHigh review is **GO**.
+
+This remains a source/test checkpoint. The DJ PC pull and agent restart, plus
+physical remeasurement of stable Pause/Play, ACTIVE/SET, and 2-beat display,
+are still unverified; no deployment or hardware acceptance is claimed. The
+full `npm test` is now **502 tests / 500 pass / 0 fail / 2 skipped** in
+`297277.8748 ms`. This is source/test evidence only; the DJ-PC pull/restart
+and physical remeasurement remain unverified.
+
 ### DEPLOYED HISTORICAL / DO NOT EXECUTE — v1.1.5 controlled-source handoff
 
 以下はv1.1.5のdeployed controlled-source handoffと当時のsoftware/hardware evidenceです。
-provenanceのため保持しますが、current/next operator guidance、v1.1.10 config/CSV、または
+provenanceのため保持しますが、current/next operator guidance、v1.1.11 config/CSV、または
 any-deck authorityとして実行・再利用・解釈してはいけません。
 
 このcheckpointはtracked token-free template
@@ -202,7 +246,7 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 `syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
 指定時に拒否していました。全frameは当時
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
-現行authorityは本書冒頭のv1.1.10 any-deck/v3だけです。
+現行authorityは本書冒頭のv1.1.11 any-deck/v3だけです。
 
 この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
 任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
@@ -242,7 +286,7 @@ runtime event contractを現行環境へ設定してはいけません。
 
 当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
 `syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
-DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.10 any-deck/v3 authorityと、
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.11 any-deck/v3 authorityと、
 READMEの独立したcurrent source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
@@ -506,7 +550,7 @@ branch/commitは削除していない。
 この見出しから次のCURRENT見出し直前までのstrict-v2 runbookは過去の設計証拠であり、
 **実行・設定コピー禁止**です。現在形・命令形で残る記述も当時の契約を正確に保存するための
 引用範囲で、現行DJ PC、launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用しては
-いけません。現行authorityは本書冒頭と次節以降のv1.1.10 any-deck strict-v3だけです。
+いけません。現行authorityは本書冒頭と次節以降のv1.1.11 any-deck strict-v3だけです。
 この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
@@ -526,7 +570,7 @@ durable physical eventId台帳を消費せず、再接続時にはreplayしま�
 新しいTRACK_SYNCを待ち、旧socket/sessionはfenceします。ACTIVE/LOOP/RELEASE等の
 physical eventはACK対象です。
 
-## CURRENT v1.1.10 / strict-v3 接続と状態同期
+## CURRENT v1.1.11 / strict-v3 接続と状態同期
 
 WebSocket接続後、クライアントは順に`DJ_AGENT_HELLO`、`DJ_STATE_SYNC`、
 `DJ_TIMELINE_STATE_REQUEST`を送信します。再接続・再起動後も同じ順序で、
@@ -589,9 +633,9 @@ Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、�
 pendingまたはfailedとして記録し、snapshot待ちを理由にローカル操作を止めません。
 Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時までfail-closedです。
 
-## CURRENT v1.1.10 / Stage 1: Rekordbox操作とhandoff
+## CURRENT v1.1.11 / Stage 1: Rekordbox操作とhandoff
 
-v1.1.10 controlled sourceは`releaseMacro.enabled:true`かつ
+v1.1.11 controlled sourceは`releaseMacro.enabled:true`かつ
 `sequence:"filter-then-fade-then-stop"`だけを受理します。Stage 1のF13はadmitted
 owner deckのFilter HPF（CC16、64→127、1000ms、50ms間隔）を同期開始し、同じ初期edgeで
 相関済み`DJ_RELEASE`を一度だけrouteします。ReleaseはFilter/fade/Stop/resetなどの
@@ -612,7 +656,7 @@ LoopHalf、F15はStage 1ではinactive（MIDIもSyndocalも送信しない）で
 | Filter HP | CH1 CC16 (`B010`) | `deckChannels`設定時CH2 CC16 (`B110`) |
 | ChannelFader fade | CH1 CC17 (`B011`) | `deckChannels`設定時CH2 CC17 (`B111`) |
 
-v1.1.10 CSVはChannelFader CC17（`B011`/`B111`）を含み、strict launcherはFilter
+v1.1.11 CSVはChannelFader CC17（`B011`/`B111`）を含み、strict launcherはFilter
 CC16、fade CC17、enabled fade、exact duration/value/deck-channelを要求します。実機のLearn結果が異なる場合、この
 controlled sourceを推測で別CCへ切り替えず、fail-closedで新しいevidence trancheを開始します。
 
@@ -625,9 +669,9 @@ authority、delivery、play-session、shutdown generation、public action emissi
 だけを所有します。routerはauthority、delivery、session fence、public emission、shutdownを
 保持し、Stage 2 timeline-controlの意味は変更しません。
 
-## CURRENT v1.1.10 / Stage 2: absolute loop toggle、F14 LOOP_HALF、F15 +4
+## CURRENT v1.1.11 / Stage 2: absolute loop toggle、F14 LOOP_HALF、F15 +4
 
-`running`後のtimeline-controlは現行v1.1.10の別境界です。すべてACK対象で、Stage 2では
+`running`後のtimeline-controlは現行v1.1.11の別境界です。すべてACK対象で、Stage 2では
 Rekordbox MIDIを一切呼びません。Stage 2の物理受入はStage 1のRelease実機証跡とは別で、
 現時点では未受入です。
 
@@ -675,7 +719,7 @@ candidateが未成熟・停止・欠落ならvisible/actionable failureを返し
 fieldはrouter呼出し前にrejectします。released Syndocal sessionをremote admission
 として復活させる経路でもありません。
 
-## CURRENT v1.1.10 / v3 eventId・ACK・順序
+## CURRENT v1.1.11 / v3 eventId・ACK・順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
 eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次の7フィールド固定です。
@@ -697,7 +741,7 @@ eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次�
 拒否しwarningにします。
 
 送信直後は`pending`であり、`ok:true`ではありません。`retrying`と`disconnected`は
-再接続/replay待ちのnon-terminal状態ですが、current v1.1.10でこの境界を越えられるのは
+再接続/replay待ちのnon-terminal状態ですが、current v1.1.11でこの境界を越えられるのは
 相関済み`DJ_RELEASE`だけです。他のphysical eventはsocket teardown時点でterminal
 `send-failed`となり、replayしません。最終deliveryは`acknowledged`、`rejected`、
 `timed-out`、`send-failed`のいずれかです。UI/APIはpending・success・failureを同じ

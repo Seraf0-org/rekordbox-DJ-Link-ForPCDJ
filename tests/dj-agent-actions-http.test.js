@@ -78,7 +78,7 @@ function writeEnabledConfig(t) {
     `rb-output-actions-enabled-${process.pid}-${Date.now()}.json`,
   );
   const config = JSON.parse(fs.readFileSync(
-    path.join(REPO_ROOT, "config", "dj-agent-v1.1.10.example.json"),
+    path.join(REPO_ROOT, "config", "dj-agent-v1.1.11.example.json"),
     "utf8",
   ));
   config.syndocal.token = TEST_TOKEN;

@@ -1,6 +1,11 @@
 const dgram = require("node:dgram");
 const { EventEmitter } = require("node:events");
-const { normalizeLoopState, upsertLoopState } = require("../loopState");
+const {
+  defineLoopUpdateMeta,
+  loopUpdateMeta,
+  normalizeLoopState,
+  upsertLoopState,
+} = require("../loopState");
 const { applyDeckTrackLoadIdentity } = require("../trackIdentityTransition");
 const { projectMeasuredLoopBeats } = require("./loopBeatProjection");
 
@@ -44,6 +49,20 @@ function isExplicitPlaybackStateEventName(name) {
     return false;
   }
   return /@(IsPlaying|PlayState|PlayerState)$/i.test(name.trim());
+}
+
+function explicitPlaybackStateFromEdgeEvent(name, value) {
+  if (typeof name !== "string" || !Number.isFinite(value) || value !== 1) {
+    return null;
+  }
+  const normalized = name.trim().toLowerCase();
+  if (normalized === "@play") {
+    return true;
+  }
+  if (normalized === "@pause" || normalized === "@stop") {
+    return false;
+  }
+  return null;
 }
 
 function isLikelyTrackText(value) {
@@ -178,6 +197,53 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     deckState.set(deck, current);
   }
 
+  function attachLoopUpdateMeta(target, source, extra = {}) {
+    const sourceMeta = loopUpdateMeta(source) || {};
+    return defineLoopUpdateMeta(target, { ...sourceMeta, ...extra });
+  }
+
+  function createTrackLoopReset(deck, trackIdentity) {
+    const reset = {
+      deck: deck + 1,
+      trackIdentity: trackIdentity == null ? null : String(trackIdentity),
+      active: null,
+      activeKnown: false,
+      activeSource: null,
+      startMs: null,
+      endMs: null,
+      startBeat: null,
+      endBeat: null,
+      lengthBeats: null,
+      revision: null,
+      updatedAt: new Date().toISOString(),
+      source: "rekordbox-hook-track-reset",
+    };
+    return defineLoopUpdateMeta(reset, {
+      hasStartMs: true,
+      hasEndMs: true,
+      hasStartBeat: true,
+      hasEndBeat: true,
+      hasLengthBeats: true,
+      boundariesCleared: true,
+      loopReset: true,
+    });
+  }
+
+  function resetLoopForTrack(data, deck) {
+    data.loopRevision += 1;
+    data.loopState = createTrackLoopReset(deck, data.trackBrowserId);
+    return data.loopState;
+  }
+
+  function applyTrackIdentity(data, deck, contentId) {
+    const hadLoopWithoutIdentity = data.loopState && data.trackBrowserId == null;
+    const replaced = applyDeckTrackLoadIdentity(data, contentId);
+    if (replaced || hadLoopWithoutIdentity) {
+      return resetLoopForTrack(data, deck);
+    }
+    return null;
+  }
+
   function reconcileLoopActivityFromPlayback(data, previousCurrentTime = null) {
     const loop = data?.loopState;
     const currentMs = data?.currentTime == null ? NaN : Number(data.currentTime);
@@ -221,6 +287,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       updatedAt: new Date().toISOString(),
       source: "rekordbox-hook-playback-observed",
     };
+    attachLoopUpdateMeta(updated, loop);
     data.loopState = updated;
     return updated;
   }
@@ -328,7 +395,7 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     const now = Date.now();
     let isPlaying =
       typeof data.explicitIsPlaying === "boolean" ? data.explicitIsPlaying : data.lastIsPlaying;
-    if (Number.isFinite(positionSec)) {
+    if (typeof data.explicitIsPlaying !== "boolean" && Number.isFinite(positionSec)) {
       const prevPos = Number(data.lastPositionSec);
       const prevAt = Number(data.lastPositionAt || 0);
       if (Number.isFinite(prevPos) && prevAt > 0) {
@@ -382,9 +449,27 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       return;
     }
 
-    const masterPlayback = buildDeckPlayback(masterDeck, data);
-    const deckPlaybacks = Array.from(deckState.entries())
+    // Build each deck exactly once. buildDeckPlayback updates the inference
+    // cursor, so evaluating the master a second time in the list can turn one
+    // snapshot into contradictory PLAY/PAUSE values.
+    const allDeckPlaybacks = Array.from(deckState.entries())
       .map(([deck, deckData]) => buildDeckPlayback(deck, deckData))
+      .sort((a, b) => a.deck - b.deck);
+    const masterPlayback =
+      allDeckPlaybacks.find((deckPlayback) => deckPlayback.deck === masterDeck + 1) ||
+      {
+        deck: masterDeck + 1,
+        bpm: bpmFromRaw(data.bpm),
+        positionSec: null,
+        positionObservedAt: new Date().toISOString(),
+        positionRevision: null,
+        remainingSec: null,
+        totalSec: null,
+        isEstimated: false,
+        isPlaying: null,
+        updatedAt: new Date().toISOString(),
+      };
+    const deckPlaybacks = allDeckPlaybacks
       .filter(
         (deckPlayback) =>
           Number.isFinite(deckPlayback.positionSec) ||
@@ -786,8 +871,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         return;
       }
       const deck = resolvedDeck.deck;
+      let resetLoop = null;
       updateDeckState(deck, (data) => {
-        applyDeckTrackLoadIdentity(data, contentId);
+        resetLoop = applyTrackIdentity(data, deck, contentId);
       });
       markDeckSignal(deck, "track-load");
       emitter.emit("track-loaded", {
@@ -796,6 +882,9 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         contentId: String(Math.trunc(contentId)),
         updatedAt: new Date().toISOString(),
       });
+      if (resetLoop) {
+        emitter.emit("loop-state", resetLoop);
+      }
       emitter.emit("deck-resolution", {
         type: "track_load",
         deck: deck + 1,
@@ -823,18 +912,30 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       const deck = ((sourceDeckIndex % logicalDeckCount) + logicalDeckCount) % logicalDeckCount;
       const logicalLoop = { ...loop, deck: deck + 1 };
       let measuredLoop = null;
+      let mergedLoop = null;
       updateDeckState(deck, (data) => {
         data.loopRevision += 1;
+        const trackIdentity = data.trackBrowserId != null
+          ? String(data.trackBrowserId)
+          : logicalLoop.trackIdentity;
+        logicalLoop.trackIdentity = trackIdentity;
         const projectedBeats = projectMeasuredLoopBeats({
           packet,
           loop: logicalLoop,
           bpm: bpmFromRaw(data.bpm),
           bpmObservedAt: data.bpmUpdatedAt,
         });
-        measuredLoop = { ...logicalLoop, ...projectedBeats, revision: data.loopRevision };
-        data.loopState = upsertLoopState(data.loopState ? [data.loopState] : [], measuredLoop)[0] || measuredLoop;
+        measuredLoop = { ...logicalLoop, ...(projectedBeats || {}), revision: data.loopRevision };
+        attachLoopUpdateMeta(measuredLoop, loop, {
+          hasStartBeat: projectedBeats ? Number.isFinite(projectedBeats.startBeat) : loopUpdateMeta(loop)?.hasStartBeat,
+          hasEndBeat: projectedBeats ? Number.isFinite(projectedBeats.endBeat) : loopUpdateMeta(loop)?.hasEndBeat,
+          hasLengthBeats: projectedBeats ? Number.isFinite(projectedBeats.lengthBeats) : loopUpdateMeta(loop)?.hasLengthBeats,
+          beatProjection: projectedBeats !== null,
+        });
+        mergedLoop = upsertLoopState(data.loopState ? [data.loopState] : [], measuredLoop)[0] || measuredLoop;
+        data.loopState = mergedLoop;
       });
-      emitter.emit("loop-state", measuredLoop);
+      emitter.emit("loop-state", mergedLoop || measuredLoop);
       if (!connected) {
         connected = true;
         emitStatus(true, "Hook events detected");
@@ -908,7 +1009,10 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         markDeckSignal(deck, "playback");
       } else if (name === "@TrackBrowserID") {
         if (Number.isFinite(value) && value > 0 && value < Number.MAX_SAFE_INTEGER) {
-          applyDeckTrackLoadIdentity(data, value);
+          const resetLoop = applyTrackIdentity(data, deck, value);
+          if (resetLoop) {
+            queueMicrotask(() => emitter.emit("loop-state", resetLoop));
+          }
           markDeckSignal(deck, "track-id");
         }
       } else if (
@@ -917,7 +1021,10 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
         /Track.*ID/i.test(name)
       ) {
         if (Number.isFinite(value) && value > 0 && value < Number.MAX_SAFE_INTEGER) {
-          applyDeckTrackLoadIdentity(data, value);
+          const resetLoop = applyTrackIdentity(data, deck, value);
+          if (resetLoop) {
+            queueMicrotask(() => emitter.emit("loop-state", resetLoop));
+          }
           markDeckSignal(deck, "track-id");
         }
       } else if (isPlayStateName) {
@@ -936,6 +1043,12 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
             }
           }
           data.lastIsPlaying = data.explicitIsPlaying;
+        } else {
+          const edgePlayback = explicitPlaybackStateFromEdgeEvent(name, value);
+          if (typeof edgePlayback === "boolean") {
+            data.explicitIsPlaying = edgePlayback;
+            data.lastIsPlaying = edgePlayback;
+          }
         }
         markDeckSignal(deck, "playback");
       } else if (name === "@TrackNo") {

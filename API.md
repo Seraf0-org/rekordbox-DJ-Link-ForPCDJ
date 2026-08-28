@@ -8,19 +8,19 @@ only when the extension is explicitly enabled.
 
 ## Current state
 
-### Current Syndocal authority — v1.1.10 any-deck strict v3
+### Current Syndocal authority — v1.1.11 any-deck strict v3
 
 The current and next operator route uses
-`config/dj-agent-v1.1.10.example.json` and
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.10.csv`. The initializer creates
-only `C:\SyndocalShow\dj-agent-v1.1.10.json` when absent; it does not overwrite,
+`config/dj-agent-v1.1.11.example.json` and
+`server/public/setup/CustomMIDI1-Syndocal-v1.1.11.csv`. The initializer creates
+only `C:\SyndocalShow\dj-agent-v1.1.11.json` when absent; it does not overwrite,
 copy, delete, or read the deployed historical v1.1.5 file. A mapped track may
 be admitted from any actually playing Rekordbox deck. MASTER/master-change is
 diagnostic only and never assigns show-control ownership. The v1.1.5
 controlled-source handoff remains deployed historical evidence, not current or
 next operator guidance.
 
-The controlled v1.1.10 source change is the current controlled-source tranche
+The controlled v1.1.11 source change is the current controlled-source tranche
 and checkpoint. This document does not claim an installer, tag, public release,
 deployment, or physical hardware acceptance.
 
@@ -94,13 +94,22 @@ once for each known deck.
 
 ## DJ Agent extension
 
-The DJ Agent extension is disabled unless an exact external v1.1.10
+The DJ Agent extension is disabled unless an exact external v1.1.11
 `filter-then-fade-then-stop` JSON file is supplied through `DJ_AGENT_CONFIG_PATH`.
 `DJ_AGENT_ENABLED`, inline JSON, and every Syndocal/MIDI/pedal environment
 override fail closed with one fixed secret-free reason. When disabled,
 `GET /api/dj-agent/status` still returns HTTP 200 with
 `enabled:false`; the POST action routes return 404 and the existing APIs
 remain unchanged.
+
+An exact v1.1.10 external show source can be upgraded once with
+`start-all.bat --upgrade-config` after `DJ_AGENT_CONFIG_PATH` points to that
+source. The bounded tool validates the known predecessor, preserves only its
+valid token, creates the exclusive external v1.1.11 target from the token-free
+template, leaves the source unchanged, and runs the current strict preflight
+against the target before printing the next PowerShell assignment. It never
+starts the runtime or prints token/config content. Remove this predecessor
+path after all controlled DJ PCs have adopted v1.1.11.
 
 GET /api/dj-agent/status reports the optional Syndocal, MIDI, and pedal
 adapter states. The diagnostic action routes use the same router as the
@@ -197,7 +206,7 @@ admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
 three owner-correlation fields are present. Rekordbox MASTER is never encoded
 as show-control ownership. `DJ_LOOP_STATE` and `DJ_LOOP_FALLBACK` likewise
 correlate only to the admitted deck/deckId/playSessionId; foreign, mixed, or
-master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.10
+master-scoped payloads fail closed. `DJ_MASTER_*` is not a current v1.1.11
 operator capability; it remains only deployed historical v1.1.5 evidence.
 `DJ_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
 connection-generation + wire-sequence eventId, never enters the durable

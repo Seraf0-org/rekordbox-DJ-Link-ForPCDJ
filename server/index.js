@@ -73,9 +73,10 @@ const { validateCustomMidiCsv } = require("./dj-agent/rekordboxMapping");
 const { SYNDOCAL_ADAPTERS, buildSetupChecklist } = require("./dj-agent/setupChecklist");
 const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupSelection");
 const { resolveBuildIdentity } = require("./buildIdentity");
+const { createLatestStateBroadcaster } = require("./stateBroadcast");
 
 const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
-const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.10.csv";
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.11.csv";
 const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
 // Readiness-validation seam for operators and tests: point the semantic CSV
 // validator at an alternate artifact without touching the bundled file that
@@ -258,6 +259,19 @@ function broadcastSse(eventName, payload) {
 
 let lastStateFingerprint = "";
 
+const stateBroadcaster = createLatestStateBroadcaster({
+  // A 50 ms frame keeps the public stream responsive for the 500 ms physical
+  // action budget while preventing Hook OLVC packets from queueing thousands
+  // of obsolete browser states.
+  intervalMs: 50,
+  emitSnapshot: () => {
+    state.updatedAt = new Date().toISOString();
+    const snapshot = buildSnapshot();
+    io.emit("state", snapshot);
+    broadcastSse("state", snapshot);
+  },
+});
+
 function mergeWarning(message) {
   if (!message) {
     return;
@@ -277,14 +291,13 @@ function pushDebugLog(method, message, extra = {}) {
     message: String(message),
     ...extra,
   };
-  const last = state.debugLogs[state.debugLogs.length - 1];
-  const sameAsLast =
-    last &&
-    last.method === entry.method &&
-    last.message === entry.message &&
-    String(last.deck || "") === String(entry.deck || "") &&
-    String(last.contentId || "") === String(entry.contentId || "");
-  if (sameAsLast) {
+  const isDuplicate = state.debugLogs.some((existing) =>
+    existing.method === entry.method &&
+    existing.message === entry.message &&
+    String(existing.deck || "") === String(entry.deck || "") &&
+    String(existing.contentId || "") === String(entry.contentId || "")
+  );
+  if (isDuplicate) {
     return;
   }
   state.debugLogs.push(entry);
@@ -350,7 +363,7 @@ function buildSnapshot() {
   };
 }
 
-function emitState() {
+function emitState({ defer = false } = {}) {
   const fingerprintSource = {
     nowPlaying: state.nowPlaying,
     recentTracks: state.recentTracks,
@@ -371,11 +384,8 @@ function emitState() {
     return;
   }
 
-  state.updatedAt = new Date().toISOString();
   lastStateFingerprint = fingerprint;
-  const snapshot = buildSnapshot();
-  io.emit("state", snapshot);
-  broadcastSse("state", snapshot);
+  stateBroadcaster.request({ immediate: !defer });
 }
 
 function applyLoopState(loopState, { emitEvent = true } = {}) {
@@ -1236,7 +1246,7 @@ djAgentRouter.on("event", (event) => {
 // another UDP socket and it never injects another DLL.
 hookUdpProvider.on("snapshot", (snapshot) => {
   if (DJ_AGENT_CONFIG.enabled) {
-    djAgentRouter.onSnapshot(snapshot);
+    stateBroadcaster.runDeferred(() => djAgentRouter.onSnapshot(snapshot));
   }
 });
 hookUdpProvider.on("track-loaded", (event) => {
@@ -1382,12 +1392,12 @@ hookUdpProvider.on("snapshot", (snapshot) => {
   }
   applyMasterNowPlayingFromDecks();
   hydrateDeckNowPlayingMetadata();
-  emitState();
+  emitState({ defer: true });
 });
 
 hookUdpProvider.on("loop-state", (loopState) => {
   if (applyLoopState(loopState)) {
-    emitState();
+    emitState({ defer: true });
   }
 });
 
@@ -1819,7 +1829,7 @@ function buildDjAgentSetupSnapshot() {
     midiPorts,
     mappingArtifact,
     configTemplate: {
-      version: "1.1.10",
+      version: "1.1.11",
       enabled: true,
       syndocal: {
         enabled: true,
@@ -1929,7 +1939,7 @@ function handleDjAgentAction(action, _req, res) {
   if (!DJ_AGENT_CONFIG.enabled) {
     res.status(404).json({
       ok: false,
-      error: "DJ Agent extension is disabled; exact external v1.1.10 filter-then-fade-then-stop configuration is required",
+      error: "DJ Agent extension is disabled; exact external v1.1.11 filter-then-fade-then-stop configuration is required",
     });
     return;
   }
@@ -2026,6 +2036,7 @@ function shutdown() {
   if (pythonBridge) {
     pythonBridge.stop();
   }
+  stateBroadcaster.stop();
   server.close(() => process.exit(0));
 }
 

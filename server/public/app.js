@@ -99,7 +99,7 @@ let stateFetchInFlight = null;
 let djAgentSetupFetchInFlight = null;
 
 const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
-  version: "1.1.10",
+  version: "1.1.11",
   enabled: false,
   syndocal: {
     host: "",
@@ -138,8 +138,8 @@ const DEFAULT_DJ_AGENT_CONFIG_TEMPLATE = {
 
 const SETUP_ADAPTERS = ["syndocal-envelope-v3"];
 const DEFAULT_MAPPING_ARTIFACT = {
-  url: "/setup/CustomMIDI1-Syndocal-v1.1.10.csv",
-  filename: "CustomMIDI1-Syndocal-v1.1.10.csv",
+  url: "/setup/CustomMIDI1-Syndocal-v1.1.11.csv",
+  filename: "CustomMIDI1-Syndocal-v1.1.11.csv",
   valid: null,
 };
 const djAgentSetupDraft = {
@@ -287,28 +287,50 @@ function formatBpm(value) {
   return Number.isFinite(value) && value > 0 ? value.toFixed(2) : "-";
 }
 
+function finiteLoopNumber(value) {
+  if (value == null || (typeof value === "string" && value.trim() === "")) {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function formatLoopState(loopState) {
   if (!loopState || typeof loopState !== "object") {
     return { text: "-", active: false };
   }
   const active = loopState.active === true;
-  const lengthBeats = Number(loopState.lengthBeats);
-  const startBeat = Number(loopState.startBeat);
-  const endBeat = Number(loopState.endBeat);
-  const startMs = Number(loopState.startMs);
-  const endMs = Number(loopState.endMs);
-  const hasBoundaries =
-    (Number.isFinite(startBeat) && Number.isFinite(endBeat)) ||
-    (Number.isFinite(startMs) && Number.isFinite(endMs));
+  const lengthBeats = finiteLoopNumber(loopState.lengthBeats);
+  const startBeat = finiteLoopNumber(loopState.startBeat);
+  const endBeat = finiteLoopNumber(loopState.endBeat);
+  const startMs = finiteLoopNumber(loopState.startMs);
+  const endMs = finiteLoopNumber(loopState.endMs);
+  const hasBeatTuple =
+    Number.isFinite(startBeat) &&
+    Number.isFinite(endBeat) &&
+    Number.isFinite(lengthBeats) &&
+    startBeat >= 0 &&
+    endBeat > startBeat &&
+    lengthBeats > 0 &&
+    Math.abs(endBeat - startBeat - lengthBeats) <= 1 / 64;
+  const hasTimeTuple =
+    Number.isFinite(startMs) &&
+    Number.isFinite(endMs) &&
+    startMs >= 0 &&
+    endMs > startMs;
+  const hasBoundaries = hasBeatTuple || hasTimeTuple;
   const status = active ? "ACTIVE" : loopState.active === false ? "OFF" : hasBoundaries ? "SET" : "UNKNOWN";
-  if (Number.isFinite(lengthBeats) && lengthBeats > 0) {
+  if (hasBeatTuple) {
     const lengthText = `${Number(lengthBeats.toFixed(2))} beats`;
-    if (Number.isFinite(startBeat) && Number.isFinite(endBeat)) {
-      return { text: `${status} · ${lengthText} · ${Number(startBeat.toFixed(2))}→${Number(endBeat.toFixed(2))}`, active };
-    }
-    return { text: `${status} · ${lengthText}`, active };
+    return { text: `${status} · ${lengthText} · ${Number(startBeat.toFixed(2))}→${Number(endBeat.toFixed(2))}`, active };
   }
-  if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+  if (hasTimeTuple && Number.isFinite(lengthBeats) && lengthBeats > 0) {
+    // The loop duration can be exact even when the track's absolute beat-zero
+    // offset is unavailable. Keep the independently measured length visible,
+    // but never manufacture an absolute 0→N beat range.
+    return { text: `${status} · ${Number(lengthBeats.toFixed(2))} beats`, active };
+  }
+  if (hasTimeTuple) {
     return { text: `${status} · ${(startMs / 1000).toFixed(2)}→${(endMs / 1000).toFixed(2)}s`, active };
   }
   return { text: status, active };
@@ -1440,8 +1462,10 @@ function estimatePosition(playback, loopState, nowMs) {
     const ageSec = Math.min(1.25, Math.max(0, (nowMs - observedAt) / 1000));
     position += ageSec;
   }
-  const loopStart = Number(loopState?.startMs) / 1000;
-  const loopEnd = Number(loopState?.endMs) / 1000;
+  const loopStartValue = finiteLoopNumber(loopState?.startMs);
+  const loopEndValue = finiteLoopNumber(loopState?.endMs);
+  const loopStart = loopStartValue == null ? NaN : loopStartValue / 1000;
+  const loopEnd = loopEndValue == null ? NaN : loopEndValue / 1000;
   if (loopState?.active === true && Number.isFinite(loopStart) && Number.isFinite(loopEnd) && loopEnd > loopStart) {
     const length = loopEnd - loopStart;
     if (position >= loopEnd) {
