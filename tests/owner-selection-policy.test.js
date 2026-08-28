@@ -77,7 +77,7 @@ function productionDetector(clock, ownerSelectionTimerApi = undefined) {
   return { detector, events };
 }
 
-function createOperatorOverrideFixture({ freshFallback = true } = {}) {
+function createTimelineControlFixture({ freshFallback = true } = {}) {
   const clock = { value: 1_000 };
   const timers = createTimerHarness(clock);
   let nextId = 0;
@@ -774,75 +774,8 @@ test("production detector rejects stopped and stale Deck 1 fallback samples", ()
   assert.equal(stale.events.some((event) => event.type === "DJ_TRACK_ACTIVE"), false);
 });
 
-test("operator override adopts a fresh Deck 1 fallback without ACK or Timeline mutation", () => {
-  const fixture = createOperatorOverrideFixture();
-  const before = fixture.router.getStatus();
-  const sentCount = fixture.sent.length;
-  const operations = fixture.operations.slice();
-  const candidate = fixture.detector.getCurrentProductionCandidate();
-  assert.equal(candidate.kind, "deck1-fallback");
-  assert.equal(candidate.sessionAgeMs, 1_400);
-
-  const result = fixture.router.returnToDjControl();
-  const status = fixture.router.getStatus();
-  assert.equal(result.ok, true);
-  assert.equal(result.midiSent, false);
-  assert.equal(status.mode, "dj-control");
-  assert.equal(status.ownerDeck, 1);
-  assert.equal(status.ownerSource, "operator-deck1-fallback");
-  assert.equal(status.activePlaySessionId, candidate.playSessionId);
-  assert.equal(status.ownerWireIdentity, "text:demo track 2\u0000loopmasters");
-  assert.equal(status.released, false);
-  assert.equal(fixture.sent.length, sentCount, "local adoption must not emit or ACK a candidate");
-  assert.deepEqual(fixture.operations, operations, "local adoption must not send transport MIDI");
-  for (const key of [
-    "timelineState",
-    "timelineLoopActive",
-    "timelineTransitionHoldActive",
-    "timelineId",
-    "timelinePositionBars",
-    "timelinePlaySessionId",
-    "timelinePedalOwner",
-    "timelineReleaseEventId",
-    "timelineSnapshotReady",
-  ]) {
-    assert.deepEqual(status[key], before[key], `Timeline diagnostic ${key} changed`);
-  }
-  assert.equal(status.lastOperatorOverride.state, "completed");
-  assert.equal(status.lastOperatorOverride.candidateKind, "deck1-fallback");
-  assert.match(status.lastOperatorOverride.warning, /Timeline may still be running/);
-  assert.equal(status.productionCandidateStatus.stage, "operator-fallback");
-  const syndocalState = fixture.router.getSyndocalStateSync();
-  assert.equal(syndocalState.ownerDeck, null, "local fallback must not claim remote owner admission");
-  assert.equal(syndocalState.ownerDeckId, null);
-  assert.equal(syndocalState.activePlaySessionId, null);
-  assert.equal(syndocalState.ownerSource, "none");
-  fixture.router.stop();
-});
-
-test("operator override fails visibly without a fresh Deck 1 candidate and mutates nothing", () => {
-  const fixture = createOperatorOverrideFixture({ freshFallback: false });
-  const before = fixture.router.getStatus();
-  const sentCount = fixture.sent.length;
-  const operations = fixture.operations.slice();
-  const result = fixture.router.returnToDjControl();
-  const status = fixture.router.getStatus();
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "fresh-playing-play-session-required");
-  assert.equal(status.mode, "timeline-control");
-  assert.equal(status.released, true);
-  assert.equal(status.ownerDeck, before.ownerDeck);
-  assert.equal(status.activePlaySessionId, before.activePlaySessionId);
-  assert.equal(fixture.sent.length, sentCount);
-  assert.deepEqual(fixture.operations, operations);
-  assert.equal(status.lastOperatorOverride.state, "failed");
-  assert.match(status.lastOperatorOverride.warning, /fresh currently-playing play session/);
-  assert.equal(status.productionCandidateStatus.stage, "released");
-  fixture.router.stop();
-});
-
 test("timeline_not_playing ACK suspends stale Stage 2 commands without auto-return and recovers on idle state", () => {
-  const fixture = createOperatorOverrideFixture({ freshFallback: false });
+  const fixture = createTimelineControlFixture({ freshFallback: false });
   const f13 = fixture.router.triggerAction("release");
   assert.equal(f13.action, "timeline-current-loop-toggle");
   assert.equal(fixture.router.getStatus().mode, "timeline-control");
@@ -879,7 +812,7 @@ test("timeline_not_playing ACK suspends stale Stage 2 commands without auto-retu
 });
 
 test("timeline pedals keep F13 absolute, halve active loops through dedicated F14, and preserve F15 plus-four", () => {
-  const fixture = createOperatorOverrideFixture({ freshFallback: false });
+  const fixture = createTimelineControlFixture({ freshFallback: false });
   const operationsBeforeF14 = fixture.operations.slice();
   const f14 = fixture.router.triggerAction("loop-half");
   assert.equal(f14.ok, false);

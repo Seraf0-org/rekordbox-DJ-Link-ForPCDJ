@@ -1090,9 +1090,9 @@ function createTrackActivityDetector({
   }
 
   // Read the exact production candidate that is selectable right now without
-  // emitting a candidate event. The router uses this only for an explicit
-  // local operator override; it must not turn a local observation into a
-  // Syndocal admission or replay a previously ACKed event. Reuse the same
+  // emitting a candidate event. The router uses this for authority diagnostics
+  // and explicit Syndocal reconciliation; it must not turn a local observation
+  // into a Syndocal admission or replay a previously ACKed event. Reuse the same
   // provenance, freshness, titleContains, and bounded Deck 1 fallback
   // selector as the normal production path above.
   function getCurrentProductionCandidate() {

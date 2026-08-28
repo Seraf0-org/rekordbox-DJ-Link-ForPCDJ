@@ -10,6 +10,13 @@ function makeId() {
 }
 
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
+const OPERATOR_RETURN_REQUEST_ID_PREFIX = "syndocal-dj-operator-return-";
+const OPERATOR_RETURN_EPOCH_LENGTH = 32;
+const OPERATOR_RETURN_COUNTER_MAX = (1n << 64n) - 1n;
+const OPERATOR_RETURN_REQUEST_ID_PATTERN = new RegExp(
+  `^${OPERATOR_RETURN_REQUEST_ID_PREFIX}([0-9a-f]{${OPERATOR_RETURN_EPOCH_LENGTH}})-([1-9][0-9]*)$`,
+  "u",
+);
 const SUPPORTED_EVENT_TYPES = new Set([
   "DJ_TRACK_ACTIVE",
   "DJ_TRACK_SYNC",
@@ -114,6 +121,30 @@ function normalizeDeck(value) {
 
 function normalizeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseOperatorReturnRequestId(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = OPERATOR_RETURN_REQUEST_ID_PATTERN.exec(value);
+  if (!match || match[2].length > 20) {
+    return null;
+  }
+  let counter;
+  try {
+    counter = BigInt(match[2]);
+  } catch {
+    return null;
+  }
+  if (counter < 1n || counter > OPERATOR_RETURN_COUNTER_MAX) {
+    return null;
+  }
+  return {
+    id: value,
+    epoch: match[1],
+    counter,
+  };
 }
 
 function optionalField(source, name, normalizer) {
@@ -620,19 +651,28 @@ function decodeV3TimelineState(message) {
     "playSessionId",
     "pedalOwner",
     "releaseEventId",
+    "operatorReturnRequestId",
   ];
-  if (!isPlainRecord(payload) || !hasExactFields(payload, fields)) return null;
+  if (!isPlainRecord(payload)) return null;
+  // `operatorReturnRequestId` is part of the current v3 correlation contract.
+  // Keep the payload exact: missing and unknown fields must not reach the
+  // router. Its only valid values are null or the exact canonical ID format.
+  if (!hasExactFields(payload, fields)) return null;
   if (typeof payload.state !== "string" || !TIMELINE_STATES.has(payload.state)) return null;
   if (typeof payload.loopActive !== "boolean") return null;
   if (typeof payload.transitionHoldActive !== "boolean") return null;
   const timelineId = payload.timelineId === null ? null : requiredString(payload, "timelineId");
   const playSessionId = payload.playSessionId === null ? null : requiredString(payload, "playSessionId");
   const releaseEventId = payload.releaseEventId === null ? null : requiredString(payload, "releaseEventId");
+  const operatorReturnRequestId = payload.operatorReturnRequestId === null
+    ? null
+    : parseOperatorReturnRequestId(payload.operatorReturnRequestId)?.id || null;
   const positionBars = strictFinite(payload, "positionBars", { min: 0, integer: true });
   if (
     (payload.timelineId !== null && !timelineId) ||
     (payload.playSessionId !== null && !playSessionId) ||
     (payload.releaseEventId !== null && !releaseEventId) ||
+    (payload.operatorReturnRequestId !== null && !operatorReturnRequestId) ||
     positionBars == null ||
     (payload.pedalOwner !== null && !ENVELOPE_V3_PEDAL_OWNERS.has(payload.pedalOwner))
   ) return null;
@@ -648,6 +688,7 @@ function decodeV3TimelineState(message) {
     playSessionId,
     pedalOwner: payload.pedalOwner,
     releaseEventId,
+    operatorReturnRequestId,
     // Session identity plus the monotonic per-session sequence let the
     // router fence same-session stale/equal replays without mutation.
     sessionId: message.sessionId,
@@ -1075,6 +1116,16 @@ function createSyndocalClient({
             message: delivery.message || null,
             outcome: delivery.ack?.outcome || null,
             code: delivery.ack?.code || null,
+            connectionGeneration: pending.generation,
+            deck: Number.isSafeInteger(pending.event?.payload?.deck)
+              ? pending.event.payload.deck
+              : null,
+            deckId: typeof pending.event?.payload?.deckId === "string"
+              ? pending.event.payload.deckId
+              : null,
+            playSessionId: typeof pending.event?.payload?.playSessionId === "string"
+              ? pending.event.payload.playSessionId
+              : null,
             stateGeneration: Number.isSafeInteger(delivery.ack?.stateGeneration)
               ? delivery.ack.stateGeneration
               : null,
@@ -1219,6 +1270,7 @@ function createSyndocalClient({
       outcome: validation.outcome,
       code: safeCode,
       stateGeneration: message.stateGeneration,
+      connectionGeneration: generation,
       receivedAt,
     };
     lastAckResult = ackResult;
@@ -1510,7 +1562,7 @@ function createSyndocalClient({
     ) {
       const timelineState = adapterObject.decodeTimelineState?.(message);
       if (!timelineState) {
-        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive";
+        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, required boolean transitionHoldActive, and canonical operatorReturnRequestId";
         updateStatus({ lastError: warning });
         emitter.emit("warning", { message: warning, type: "DJ_TIMELINE_STATE", raw: message });
         return;
@@ -2394,6 +2446,7 @@ module.exports = {
   encodeV3MeasuredLoop,
   encodeV3Release,
   encodeV3TrackCandidate,
+  parseOperatorReturnRequestId,
   resolveAdapter,
   resolveWebSocketImplementation,
   validateEnvelopeV3Ack,

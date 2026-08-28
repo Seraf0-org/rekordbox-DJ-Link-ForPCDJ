@@ -119,7 +119,6 @@ physical pedal:
 * POST /api/dj-agent/actions/filter-close
 * POST /api/dj-agent/actions/release
 * POST /api/dj-agent/actions/track-active
-* POST /api/dj-agent/actions/return-to-dj-control
 
 The exact configuration fixes `midi.deckChannels` to `{ "1": 1, "2": 2 }`.
 The admitted owner deck (not the current MASTER diagnostic) selects the channel
@@ -131,15 +130,12 @@ Action results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads expose `targetDeck` and
 
 POST actions are permanently loopback-only. IPv4 `127.0.0.0/8`, IPv4-mapped
 IPv6 loopback, and `::1` are accepted; a remote request receives HTTP 403. The
-read-only status route remains remotely readable. `return-to-dj-control` is a
-local operator-only override: the UI confirmation warns that Timeline may still
-be running, and the route changes only the local pedal mode/Deck target. It
-sends no play/stop/seek/jump, does not mutate Timeline, and cannot revive a
-released Syndocal session as a remote owner. Without a fresh, currently-playing
-Deck 1 production candidate after the configured 1400 ms gate, it returns a
-visible failure and leaves state unchanged. The POST body must be exactly
-`{ "confirmation": "return-to-dj-control" }`; a missing, mismatched, or extra
-body field is rejected before the router is invoked.
+read-only status route remains remotely readable. The retired
+`return-to-dj-control` route is not registered and returns 404; ownership cannot
+be changed by a browser-local fallback. An operator return is initiated by
+Syndocal through the correlated `operatorReturnRequestId` in the authoritative
+Timeline state. rb-output only reannounces the current candidate and the normal
+`DJ_TRACK_ACTIVE` ACK decides admission.
 
 For actions that send `DJ_RELEASE`, HTTP 202 with
 `ok:false`/`ackState:"pending"` means the Syndocal leg is waiting for an ACK.
@@ -256,6 +252,13 @@ alone does not enter Stage 2; only the correlated, authoritative running
 timeline state does. Stage 2 sends zero Rekordbox MIDI.
 Stage 1 F15 returns an explicit `ignored:true`, `state:"inactive"` result and
 HTTP 200 so an intentional no-op is not rendered as a hardware/network error.
+`authorityConsistency` combines the latest authoritative Timeline owner/session
+with local candidate state and the last ACTIVE ACK from the current Syndocal
+connection generation. A rejected ACTIVE is considered only when its
+playSessionId matches the current authoritative Timeline owner; reconnects and
+idle snapshots therefore clear stale `SYNC REQUIRED` conditions. The status is
+diagnostic only and never changes the local admitted owner or silently takes
+ownership.
 
 When Stage 2 is active, the pedal aliases are:
 
@@ -280,9 +283,20 @@ reconnect instead of comparing across sessions. A skipped or terminally failed
 toggle latch immediately and stays retryable as a fresh absolute value on the
 next press of the same control.
 
-`DJ_TIMELINE_STATE` is an exact v3 envelope. Its payload has exactly
+`DJ_TIMELINE_STATE` is an exact v3 envelope. Its current payload has exactly
 `state`, `loopActive`, `transitionHoldActive`, `timelineId`, `positionBars`, `playSessionId`,
-`pedalOwner`, and `releaseEventId`. A generic `running` state never transfers
+`pedalOwner`, `releaseEventId`, and `operatorReturnRequestId`.
+The request ID is either `null` or the exact canonical
+`syndocal-dj-operator-return-<epoch>-<counter>` form, where `<epoch>` is 32
+lowercase ASCII hex characters and `<counter>` is canonical decimal
+`1..18446744073709551615` (u64::MAX), with no leading zero. Missing, unknown,
+arbitrary, and noncanonical payload fields/IDs are rejected fail-closed.
+The active epoch retains a BigInt counter high-water across reconnects, so
+lower/equal replays remain ignored after 257+ IDs. A different epoch is
+accepted only with a different authoritative Timeline `sessionId`; the prior
+epoch is retired permanently. Retired epochs are bounded at 64 and capacity
+failure latches visibly instead of evicting an old epoch. Reconnect snapshots
+carrying the same ID do not trigger a second reannouncement. A generic `running` state never transfers
 pedal ownership. `pedalOwner:"timeline"` is accepted only when playSessionId
 matches the current show session and releaseEventId matches its correlated
 DJ_RELEASE. Late sync for a released session is fenced and cannot reacquire

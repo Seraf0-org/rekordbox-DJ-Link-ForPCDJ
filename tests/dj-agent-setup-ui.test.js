@@ -109,55 +109,19 @@ test("DJ Link setup offers only the v3 adapter", () => {
   assert.match(app, /const SETUP_ADAPTERS = \["syndocal-envelope-v3"\];/);
 });
 
-test("local operator override is gated to timeline handoff modes and preserves released owner diagnostics", () => {
-  assert.match(html, /id="djAgentReturnToDjControl"[^>]*hidden/);
+test("Web Agent is diagnostic-only; operator return is owned by Syndocal", () => {
+  assert.doesNotMatch(html, /djAgentReturnToDjControl|Return to DJ control/);
   assert.match(html, /id="djAgentCandidateStage"/);
-  assert.match(app, /agent.mode === "handoff-pending" \\|\\| agent.mode === "timeline-control"/);
-  assert.match(app, /Timeline may still be running/);
-  assert.match(app, /does not change the Syndocal Timeline/);
-  assert.match(app, /fetch\(`\/api\/dj-agent\/actions\/\$\{action\}`/);
-  const handlerStart = app.indexOf('if (djAgentReturnToDjControlEl)');
-  const handlerEnd = app.indexOf('for (const button of document.querySelectorAll("[data-dj-action]"))', handlerStart);
-  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
-  const handler = app.slice(handlerStart, handlerEnd);
-  assert.match(handler, /window\.confirm/);
-  assert.match(handler, /if \(!confirmed\)/);
-  assert.ok(handler.indexOf("if (!confirmed)") < handler.indexOf("fetch(`\/api\/dj-agent\/actions\/\$\{action\}`"));
-  assert.match(handler, /JSON\.stringify\(\{ confirmation: "return-to-dj-control" \}\)/);
-  assert.match(app, /stage === "waiting-for-1400ms"/);
-  assert.match(app, /"operator-fallback": "OPERATOR FALLBACK"/);
-  assert.match(app, /const released = agent\?\.released === true/);
-  assert.match(app, /ownerSource === "operator-deck1-fallback"/);
-
-  const ownerRenderer = app.slice(
-    app.indexOf("function formatAdmittedOwner"),
-    app.indexOf("function isLocalDjAgentHost"),
-  );
-  const formatOwner = vm.runInNewContext(`${ownerRenderer}; formatAdmittedOwner`, {});
-  const owner = {
-    released: true,
-    ownerDeck: 1,
-    ownerDeckId: "rekordbox-deck-1",
-    activePlaySessionId: "operator-session",
-    ownerWireIdentity: "text:demo track 2\u0000loopmasters",
-    ownerSource: "operator-deck1-fallback",
-  };
-  assert.match(formatOwner(owner), /Deck 1/);
-  assert.match(formatOwner(owner), /operator Deck 1 fallback/);
-  assert.match(formatOwner(owner), /RELEASED/);
-  assert.match(server, /app\.post\("\/api\/dj-agent\/actions\/return-to-dj-control"/);
+  assert.match(html, /id="djAgentAuthorityConsistency"/);
+  assert.match(app, /SYNC REQUIRED/);
+  assert.match(app, /authorityConsistency/);
+  assert.doesNotMatch(app, /return-to-dj-control|operator-deck1-fallback|lastOperatorOverride/);
+  assert.doesNotMatch(server, /return-to-dj-control|operatorDjControlReturn|lastOperatorOverride/);
   const actionHandler = server.slice(
     server.indexOf("function handleDjAgentAction"),
     server.indexOf("// These diagnostics use the same action path"),
   );
   assert.match(actionHandler, /isActionRequestAllowed\(_req\)/);
-  assert.match(actionHandler, /action === "return-to-dj-control"/);
-  assert.match(actionHandler, /operator-confirmation-required/);
-  const confirmationHelper = server.slice(
-    server.indexOf("function hasExactOperatorReturnConfirmation"),
-    server.indexOf("function handleDjAgentAction"),
-  );
-  assert.match(confirmationHelper, /body\[OPERATOR_RETURN_CONFIRMATION_FIELD\] === OPERATOR_RETURN_CONFIRMATION_TOKEN/);
   assert.match(server, /stateSyncProvider: \(\) => \(djAgentRouter \? djAgentRouter\.getSyndocalStateSync\(\) : \{\}\)/);
 });
 

@@ -57,15 +57,14 @@ const djAgentModeEl = document.getElementById("djAgentMode");
 const djAgentOwnerRowEl = document.getElementById("djAgentOwnerRow");
 const djAgentOwnerEl = document.getElementById("djAgentOwner");
 const djAgentCandidateStageEl = document.getElementById("djAgentCandidateStage");
+const djAgentAuthorityConsistencyEl = document.getElementById("djAgentAuthorityConsistency");
 const djAgentTimelineStateEl = document.getElementById("djAgentTimelineState");
 const djAgentTimelineLoopEl = document.getElementById("djAgentTimelineLoop");
 const djAgentReleaseMacroEl = document.getElementById("djAgentReleaseMacro");
 const djAgentLastEventEl = document.getElementById("djAgentLastEvent");
 const djAgentLastTimelineActionEl = document.getElementById("djAgentLastTimelineAction");
 const djAgentLastAckEl = document.getElementById("djAgentLastAck");
-const djAgentOperatorOverrideEl = document.getElementById("djAgentOperatorOverride");
 const djAgentActionResultEl = document.getElementById("djAgentActionResult");
-const djAgentReturnToDjControlEl = document.getElementById("djAgentReturnToDjControl");
 const djAgentSetupRefreshEl = document.getElementById("djAgentSetupRefresh");
 const djAgentSetupMessageEl = document.getElementById("djAgentSetupMessage");
 const djAgentSetupReadinessEl = document.getElementById("djAgentSetupReadiness");
@@ -350,12 +349,7 @@ function renderLoopState(loopState, loopStateEl, cardEl) {
 
 function renderDjAgentStatus(status) {
   const agent = status?.djAgent || {};
-  const operatorOverrideAllowed = agent.enabled === true &&
-    (agent.mode === "handoff-pending" || agent.mode === "timeline-control");
-  if (djAgentReturnToDjControlEl) {
-    djAgentReturnToDjControlEl.hidden = !operatorOverrideAllowed;
-    djAgentReturnToDjControlEl.disabled = !operatorOverrideAllowed;
-  }
+  const authority = agent.authorityConsistency || {};
   if (djAgentPanelEl) {
     djAgentPanelEl.hidden = agent.enabled !== true;
   }
@@ -384,6 +378,17 @@ function renderDjAgentStatus(status) {
   }
   if (djAgentCandidateStageEl) {
     djAgentCandidateStageEl.textContent = formatProductionCandidateStatus(agent.productionCandidateStatus);
+  }
+  if (djAgentAuthorityConsistencyEl) {
+    const authorityState = String(authority.state || "unknown").toLowerCase();
+    const authorityReason = authority.reason ? ` · ${authority.reason}` : "";
+    djAgentAuthorityConsistencyEl.textContent = authorityState === "mismatch"
+      ? `SYNC REQUIRED${authorityReason}`
+      : authorityState === "consistent"
+        ? "IN SYNC"
+        : "WAITING FOR AUTHORITATIVE STATE";
+    djAgentAuthorityConsistencyEl.classList.toggle("connected", authorityState === "consistent");
+    djAgentAuthorityConsistencyEl.classList.toggle("error", authorityState === "mismatch");
   }
   if (djAgentTimelineStateEl) {
     const state = agent.timelineState || "unknown";
@@ -419,12 +424,6 @@ function renderDjAgentStatus(status) {
       ? `${String(ack.state || "ACK").toUpperCase()} · ${ack.type || "event"}${ack.message ? ` · ${ack.message}` : ""}`
       : syndocal.lastAckAt || "-";
   }
-  if (djAgentOperatorOverrideEl) {
-    const override = agent.lastOperatorOverride;
-    djAgentOperatorOverrideEl.textContent = override?.state
-      ? `${String(override.state).toUpperCase()} · ${override.ownerSource || override.source || "operator"}${override.warning ? ` · ${override.warning}` : ""}`
-      : "-";
-  }
   if (djAgentActionResultEl) {
     const action = agent.lastAction;
     const deliveryState = action?.delivery?.state || action?.delivery?.ackState || null;
@@ -459,7 +458,6 @@ function formatProductionCandidateStatus(status) {
     "waiting-for-text-identity": "WAITING FOR ARTIST",
     "candidate-pending": "CANDIDATE PENDING",
     "candidate-ready": "CANDIDATE READY",
-    "operator-fallback": "OPERATOR FALLBACK",
     admitted: "ADMITTED",
     released: "RELEASED",
     "not-selected": "NOT SELECTED",
@@ -504,10 +502,7 @@ function formatAdmittedOwner(agent) {
     return null;
   }
   const shortSessionId = sessionId.length > 12 ? `${sessionId.slice(0, 12)}…` : sessionId;
-  const source = agent?.ownerSource === "operator-deck1-fallback"
-    ? " · operator Deck 1 fallback"
-    : "";
-  return `Deck ${deck} (${deckId}) · session ${shortSessionId} · ${identity}${source}${released ? " · RELEASED" : ""}`;
+  return `Deck ${deck} (${deckId}) · session ${shortSessionId} · ${identity}${released ? " · RELEASED" : ""}`;
 }
 
 function isLocalDjAgentHost() {
@@ -1832,56 +1827,6 @@ function initSortableFields() {
 
 initSortableFields();
 bindDjAgentSetupActions();
-
-if (djAgentReturnToDjControlEl) {
-  djAgentReturnToDjControlEl.addEventListener("click", async () => {
-    const action = "return-to-dj-control";
-    if (!isLocalDjAgentHost()) {
-      if (djAgentActionResultEl) {
-        djAgentActionResultEl.textContent = `Failed · ${action} · DJ PC localhost required`;
-        djAgentActionResultEl.classList.add("error");
-      }
-      return;
-    }
-    const confirmed = window.confirm(
-      "Timeline may still be running. Return local pedal control to Deck 1? This sends no play/stop/seek/jump and does not change the Syndocal Timeline.",
-    );
-    if (!confirmed) {
-      if (djAgentActionResultEl) {
-        djAgentActionResultEl.textContent = `Cancelled · ${action}`;
-        djAgentActionResultEl.classList.remove("error");
-      }
-      return;
-    }
-    djAgentReturnToDjControlEl.disabled = true;
-    try {
-      if (djAgentActionResultEl) {
-        djAgentActionResultEl.textContent = `Pending · ${action}`;
-        djAgentActionResultEl.classList.remove("error");
-      }
-      const response = await fetch(`/api/dj-agent/actions/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmation: "return-to-dj-control" }),
-      });
-      const result = await response.json().catch(() => ({}));
-      const reason = result?.result?.reason || result?.error || `HTTP ${response.status}`;
-      if (djAgentActionResultEl) {
-        djAgentActionResultEl.textContent = response.ok && result.ok === true
-          ? `Success · ${action}`
-          : `Failed · ${action} · ${reason}`;
-        djAgentActionResultEl.classList.toggle("error", !(response.ok && result.ok === true));
-      }
-    } catch {
-      if (djAgentActionResultEl) {
-        djAgentActionResultEl.textContent = `Failed · ${action} · network error`;
-        djAgentActionResultEl.classList.add("error");
-      }
-    } finally {
-      djAgentReturnToDjControlEl.disabled = false;
-    }
-  });
-}
 
 for (const button of document.querySelectorAll("[data-dj-action]")) {
   button.addEventListener("click", async () => {

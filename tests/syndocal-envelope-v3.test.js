@@ -16,6 +16,8 @@ const { createHookUdpProvider } = require("../server/providers/hookUdpProvider")
 
 const TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 const NOW = Date.parse("2026-08-25T00:00:00.000Z");
+const OPERATOR_RETURN_EPOCH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OPERATOR_RETURN_EPOCH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ENVELOPE_FIELDS = ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"];
 const EXACT_RELEASE_MACRO = Object.freeze({
   enabled: true,
@@ -92,6 +94,10 @@ function strictCandidateTrackPayload(overrides = {}) {
   };
 }
 
+function operatorReturnId(epoch, counter) {
+  return `syndocal-dj-operator-return-${epoch}-${counter}`;
+}
+
 function strictTimelineState(overrides = {}) {
   return {
     v: 3,
@@ -109,6 +115,7 @@ function strictTimelineState(overrides = {}) {
       playSessionId: "play-session-1",
       pedalOwner: "dj",
       releaseEventId: null,
+      operatorReturnRequestId: null,
       ...overrides,
     },
   };
@@ -1652,6 +1659,137 @@ test("pending ACTIVE fails closed on socket close and is not replayed", async (t
   assert.equal(second.sent.some((frame) => frame.eventId === "active-reconnect"), false);
 });
 
+test("actual client teardown, fresh operator-return snapshot, and null-snapshot reannounce stay fenced", async (t) => {
+  V3WebSocket.instances = [];
+  const client = createSyndocalClient({
+    enabled: true,
+    token: TEST_TOKEN,
+    adapter: "syndocal-envelope-v3",
+    WebSocketImpl: V3WebSocket,
+    reconnectMinMs: 50,
+    reconnectMaxMs: 50,
+    heartbeatMs: 60_000,
+    ackTimeoutMs: 60_000,
+    stateSyncProvider: () => ({ released: false }),
+  });
+  t.after(() => client.stop());
+  const { detector, router } = createFakeRouter({ syndocalClient: client });
+  const candidate = strictCandidateTrackPayload();
+  let reannounceCalls = 0;
+  detector.requestCurrentTrackCandidates = () => {
+    reannounceCalls += 1;
+    detector.emit("event", {
+      type: "DJ_TRACK_ACTIVE",
+      eventId: `reannounce-current-${reannounceCalls}`,
+      payload: candidate,
+    });
+  };
+  const timelineState = (sessionId, sequence, requestId) => ({
+    ...strictTimelineState({
+      state: "idle",
+      timelineId: null,
+      positionBars: 0,
+      playSessionId: null,
+      pedalOwner: null,
+      releaseEventId: null,
+      operatorReturnRequestId: requestId,
+    }),
+    sessionId,
+    sequence,
+    eventId: `timeline-${sessionId}-${sequence}`,
+  });
+  const activeFrames = (socket) => socket.sent.filter((frame) => frame.type === "DJ_TRACK_ACTIVE");
+  const acknowledge = (socket, frame, outcome = "accepted") => {
+    socket.emit("message", JSON.stringify({
+      v: 3,
+      type: "ACK",
+      eventId: frame.eventId,
+      sequence: frame.sequence,
+      outcome,
+      code: null,
+      stateGeneration: 1,
+    }));
+  };
+
+  client.start();
+  await flush();
+  const first = V3WebSocket.instances[0];
+  const id1 = operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1);
+  first.emit("message", JSON.stringify(timelineState("timeline-first", 1, id1)));
+  assert.equal(reannounceCalls, 1);
+  const firstCandidate = activeFrames(first).at(-1);
+  assertV3Frame(firstCandidate, "DJ_TRACK_ACTIVE");
+  assert.equal(firstCandidate.eventId, "reannounce-current-1");
+  assert.equal(router.getStateSync().ownerDeck, null, "a sent candidate is not locally admitted");
+
+  const secondConnected = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 2,
+    { label: "operator-return first replacement" },
+  );
+  first.readyState = 3;
+  first.emit("close", 1006, "lost-first-active-ack");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.eventId, firstCandidate.eventId);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+  assert.equal(router.getStateSync().ownerDeck, null, "closed-socket ACTIVE cannot admit ownership");
+
+  await secondConnected;
+  const second = V3WebSocket.instances[1];
+  const id2 = operatorReturnId(OPERATOR_RETURN_EPOCH_A, 2);
+  second.emit("message", JSON.stringify(timelineState("timeline-replacement", 1, id2)));
+  assert.equal(reannounceCalls, 2, "the fresh replacement ID requests candidates exactly once");
+  const secondCandidate = activeFrames(second).at(-1);
+  assertV3Frame(secondCandidate, "DJ_TRACK_ACTIVE");
+  assert.equal(secondCandidate.eventId, "reannounce-current-2");
+  assert.notEqual(secondCandidate.eventId, firstCandidate.eventId, "the reconnect candidate has a new physical ID");
+  assert.equal(router.getStateSync().ownerDeck, null);
+  acknowledge(second, secondCandidate);
+  assert.equal(router.getStateSync().ownerDeck, 2, "only the terminal accepted ACTIVE ACK admits the owner");
+  assert.equal(router.getStateSync().activePlaySessionId, candidate.playSessionId);
+
+  // A second physical ACTIVE can still lose its ACK after ownership exists.
+  // It is terminal on this client and cannot become a hidden reconnect retry.
+  detector.emit("event", {
+    type: "DJ_TRACK_ACTIVE",
+    eventId: "lost-after-admission",
+    payload: candidate,
+  });
+  const lostAfterAdmission = activeFrames(second).at(-1);
+  assert.equal(lostAfterAdmission.eventId, "lost-after-admission");
+  const thirdConnected = waitForEvent(
+    client,
+    "connected",
+    (event) => event?.generation === 3,
+    { label: "operator-return null-snapshot replacement" },
+  );
+  second.readyState = 3;
+  second.emit("close", 1006, "lost-after-admission-ack");
+  assert.equal(client.getStatus().pendingAcks, 0);
+  assert.equal(client.getStatus().lastDelivery.eventId, lostAfterAdmission.eventId);
+  assert.equal(client.getStatus().lastDelivery.state, "send-failed");
+
+  await thirdConnected;
+  const third = V3WebSocket.instances[2];
+  third.emit("message", JSON.stringify(timelineState("timeline-null-snapshot", 1, null)));
+  assert.equal(reannounceCalls, 3, "a fresh connection with no pending intent performs its one generic reannounce");
+  const nullSnapshotCandidate = activeFrames(third).at(-1);
+  assertV3Frame(nullSnapshotCandidate, "DJ_TRACK_ACTIVE");
+  assert.equal(nullSnapshotCandidate.eventId, "reannounce-current-3");
+  assert.notEqual(nullSnapshotCandidate.eventId, lostAfterAdmission.eventId);
+  acknowledge(third, nullSnapshotCandidate, "duplicate");
+  assert.equal(router.getStateSync().ownerDeck, 2, "duplicate acknowledgement preserves the admitted owner");
+  assert.equal(client.getStatus().lastDelivery.ack.outcome, "duplicate");
+
+  // The old same-epoch ID is below the high-water even though it arrives on
+  // the newest socket with a newer envelope sequence, so it cannot request
+  // candidates or produce another physical frame.
+  third.emit("message", JSON.stringify(timelineState("timeline-null-snapshot", 2, id1)));
+  assert.equal(reannounceCalls, 3, "old operator-return ID replay is a no-op");
+  assert.equal(activeFrames(third).length, 1, "same-connection generic reannounce stays one-shot");
+});
+
 test("candidate ACTIVE is ACK-tracked while candidate SYNC is transient telemetry", async (t) => {
   V3WebSocket.instances = [];
   const client = createSyndocalClient({
@@ -1687,6 +1825,10 @@ test("candidate ACTIVE is ACK-tracked while candidate SYNC is transient telemetr
     stateGeneration: 1,
   }));
   assert.equal(client.getStatus().lastDelivery.state, "acknowledged");
+  assert.equal(client.getStatus().lastAckResult.connectionGeneration, 1);
+  assert.equal(client.getStatus().lastAckResult.deck, 2);
+  assert.equal(client.getStatus().lastAckResult.deckId, "rekordbox-deck-2");
+  assert.equal(client.getStatus().lastAckResult.playSessionId, "candidate-session-2");
 
   const sync = client.sendEvent({
     type: "DJ_TRACK_SYNC",
@@ -2564,6 +2706,43 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   assert.equal(decoded.sessionId, "syndocal-session");
   assert.equal(decoded.sequence, 9);
   assert.equal(decoded.eventId, "timeline-state-9");
+  assert.equal(decoded.operatorReturnRequestId, null);
+  assert.equal(
+    decodeV3TimelineState(strictTimelineState({ operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1) })).operatorReturnRequestId,
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1),
+  );
+  assert.equal(
+    decodeV3TimelineState(strictTimelineState({ operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, "18446744073709551615") })).operatorReturnRequestId,
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, "18446744073709551615"),
+  );
+  assert.equal(
+    decodeV3TimelineState(strictTimelineState({ operatorReturnRequestId: "" })),
+    null,
+  );
+  assert.equal(
+    decodeV3TimelineState(strictTimelineState({ operatorReturnRequestId: " return-request-1" })),
+    null,
+  );
+  for (const invalid of [
+    "return-request-1",
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A.toUpperCase(), 1),
+    operatorReturnId("a".repeat(31), 1),
+    operatorReturnId("a".repeat(33), 1),
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, 0),
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, "01"),
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, "18446744073709551616"),
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, "1 "),
+    operatorReturnId(OPERATOR_RETURN_EPOCH_A, "+1"),
+  ]) {
+    assert.equal(
+      decodeV3TimelineState(strictTimelineState({ operatorReturnRequestId: invalid })),
+      null,
+      `noncanonical operator return ID must be rejected: ${invalid}`,
+    );
+  }
+  const missingOperatorReturnRequestId = strictTimelineState();
+  delete missingOperatorReturnRequestId.payload.operatorReturnRequestId;
+  assert.equal(decodeV3TimelineState(missingOperatorReturnRequestId), null);
   assert.equal(decodeV3TimelineState({ ...strictTimelineState(), bonus: true }), null);
   const missingTransitionHold = strictTimelineState();
   delete missingTransitionHold.payload.transitionHoldActive;
@@ -2578,12 +2757,12 @@ test("inbound flat/v1/v2 frames are visible protocol failures and v3 timeline st
   socket.emit("message", JSON.stringify(strictTimelineState({ transitionHoldActive: "true" })));
   assert.equal(states.length, 1);
   assert.deepEqual(warnings.map((warning) => warning.message), [
-    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
-    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, required boolean transitionHoldActive, and canonical operatorReturnRequestId",
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, required boolean transitionHoldActive, and canonical operatorReturnRequestId",
   ]);
   assert.equal(
     client.getStatus().lastError,
-    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, and required boolean transitionHoldActive",
+    "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, required boolean transitionHoldActive, and canonical operatorReturnRequestId",
   );
 });
 
@@ -2647,7 +2826,7 @@ test("ACK v3 schema rejects missing, extra, stale, and nonfinite fields", () => 
   ]) assert.equal(validateEnvelopeV3Ack(invalid).valid, false);
 });
 
-function createFakeRouter() {
+function createFakeRouter({ syndocalClient: suppliedClient = null } = {}) {
   const timerTasks = [];
   const timerApi = {
     setTimeout(callback, delayMs) {
@@ -2677,23 +2856,25 @@ function createFakeRouter() {
   detector.onSnapshot = () => detector.state;
   detector.onTrackLoaded = () => null;
   detector.onMasterChange = () => null;
-  const client = new EventEmitter();
-  client.status = { enabled: true, state: "connected" };
-  client.getStatus = () => ({ ...client.status });
-  client.sent = [];
-  client.sendEvent = (event) => {
-    client.sent.push(event);
-    return {
-      eventId: event.eventId || `sent-${client.sent.length}`,
-      type: event.type,
-      state: "pending",
-      ackState: "pending",
-      ok: false,
-      sent: true,
+  const client = suppliedClient || new EventEmitter();
+  if (!suppliedClient) {
+    client.status = { enabled: true, state: "connected" };
+    client.getStatus = () => ({ ...client.status });
+    client.sent = [];
+    client.sendEvent = (event) => {
+      client.sent.push(event);
+      return {
+        eventId: event.eventId || `sent-${client.sent.length}`,
+        type: event.type,
+        state: "pending",
+        ackState: "pending",
+        ok: false,
+        sent: true,
+      };
     };
-  };
-  client.start = () => {};
-  client.stop = () => {};
+    client.start = () => {};
+    client.stop = () => {};
+  }
   const midi = {
     sent: [],
     resolveTarget: (_mapping, deck) => ({ targetDeck: deck, targetChannel: 1 }),
@@ -2923,6 +3104,236 @@ test("router reannounces fresh candidates only after each connection's timeline-
   client.emit("timeline-state", { state: "idle", loopActive: false, transitionHoldActive: false });
   assert.equal(reannounceCalls, 2);
   assert.deepEqual(client.sent.map((event) => event.type), ["DJ_TRACK_ACTIVE"]);
+});
+
+test("router enforces canonical operator-return epochs and bounded retired-epoch fail-closed behavior", () => {
+  const { detector, client, router } = createFakeRouter();
+  const candidate = strictCandidateTrackPayload({ deck: 1, deckId: "rekordbox-deck-1" });
+  let requestCalls = 0;
+  detector.requestCurrentTrackCandidates = () => {
+    requestCalls += 1;
+    detector.emit("event", {
+      type: "DJ_TRACK_ACTIVE",
+      eventId: `operator-return-active-${requestCalls}`,
+      payload: candidate,
+    });
+  };
+  const state = {
+    state: "idle",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: null,
+    pedalOwner: null,
+    releaseEventId: null,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1),
+    sessionId: "timeline-session-a",
+    sequence: 1,
+  };
+
+  client.emit("timeline-state", state);
+  assert.equal(requestCalls, 1);
+  assert.equal(client.sent.filter((event) => event.type === "DJ_TRACK_ACTIVE").length, 1);
+  assert.equal(router.getStateSync().ownerDeck, null, "request reannouncement is not local admission");
+  assert.equal(router.getStatus().operatorReturnRequestId, operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1));
+  assert.equal(router.getStatus().operatorReturnActiveEpoch, OPERATOR_RETURN_EPOCH_A);
+  assert.equal(router.getStatus().operatorReturnActiveEpochHighWater, "1");
+
+  // Same-session replay, including a lower counter, is rejected by the
+  // BigInt high-water and does not need an ID set.
+  client.emit("timeline-state", {
+    ...state,
+    sequence: 2,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1),
+  });
+  client.emit("timeline-state", {
+    ...state,
+    sequence: 3,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 0),
+  });
+  assert.equal(requestCalls, 1);
+
+  // More than 257 IDs still advance one exact high-water, and replaying
+  // counter 1 remains rejected.
+  for (let index = 2; index <= 257; index += 1) {
+    client.emit("timeline-state", {
+      ...state,
+      sequence: index + 2,
+      operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, index),
+    });
+  }
+  assert.equal(requestCalls, 257);
+  assert.equal(router.getStatus().operatorReturnActiveEpochHighWater, "257");
+  client.emit("timeline-state", {
+    ...state,
+    sequence: 260,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 1),
+  });
+  assert.equal(requestCalls, 257, "lower/equal replay remains rejected after 257+ IDs");
+
+  // A rejected ACTIVE remains unadmitted and actionable; the request path
+  // does not synthesize or mutate the local owner.
+  client.emit("delivery", {
+    eventId: "operator-return-active-1",
+    type: "DJ_TRACK_ACTIVE",
+    state: "rejected",
+    ack: { outcome: "rejected", code: "track_owner_unreleased" },
+  });
+  assert.equal(router.getStateSync().ownerDeck, null);
+
+  // Reconnects preserve the active epoch's high-water. A strictly newer
+  // counter in the same epoch is accepted on the replacement session.
+  client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
+  client.emit("timeline-state", {
+    ...state,
+    sessionId: "timeline-session-a-reconnected",
+    sequence: 1,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 258),
+  });
+  assert.equal(requestCalls, 258);
+  assert.equal(router.getStatus().operatorReturnActiveEpochHighWater, "258");
+
+  // An epoch switch in one authoritative timeline session is rejected.
+  client.emit("timeline-state", {
+    ...state,
+    sessionId: "timeline-session-a-reconnected",
+    sequence: 2,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_B, 1),
+  });
+  assert.equal(requestCalls, 258, "same-session epoch switch must be rejected");
+
+  // The same new epoch is accepted only after a new authoritative timeline
+  // session; its counter starts a fresh BigInt high-water.
+  client.emit("timeline-state", {
+    ...state,
+    sessionId: "timeline-session-b",
+    sequence: 1,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_B, 1),
+  });
+  assert.equal(requestCalls, 259);
+  assert.equal(router.getStatus().operatorReturnActiveEpoch, OPERATOR_RETURN_EPOCH_B);
+  assert.equal(router.getStatus().operatorReturnActiveEpochHighWater, "1");
+  assert.equal(router.getStatus().operatorReturnRetiredEpochCount, 1);
+
+  // Epoch A is retired permanently, even when it carries a higher counter on
+  // the current timeline session.
+  client.emit("timeline-state", {
+    ...state,
+    sessionId: "timeline-session-b",
+    sequence: 2,
+    operatorReturnRequestId: operatorReturnId(OPERATOR_RETURN_EPOCH_A, 999),
+  });
+  assert.equal(requestCalls, 259, "retired epoch must always be rejected");
+
+  // Fill the bounded retired-epoch set. Resetting only the connection fence
+  // lets this focused test exercise the independent epoch capacity boundary.
+  for (let index = 0; index < 63; index += 1) {
+    const nextEpoch = String(index + 1).padStart(32, "0");
+    client.emit("status", {
+      enabled: true,
+      state: "connected",
+      connectionGeneration: index + 3,
+    });
+    client.emit("timeline-state", {
+      ...state,
+      sessionId: `timeline-cap-${index}`,
+      sequence: 1,
+      operatorReturnRequestId: operatorReturnId(nextEpoch, 1),
+    });
+  }
+  assert.equal(router.getStatus().operatorReturnRetiredEpochCount, 64);
+  const callsAtCapacity = requestCalls;
+  client.emit("status", {
+    enabled: true,
+    state: "connected",
+    connectionGeneration: 100,
+  });
+  client.emit("timeline-state", {
+    ...state,
+    sessionId: "timeline-cap-overflow",
+    sequence: 1,
+    operatorReturnRequestId: operatorReturnId("cccccccccccccccccccccccccccccccc", 1),
+  });
+  assert.equal(requestCalls, callsAtCapacity, "capacity must fail closed without evicting an epoch");
+  assert.equal(router.getStatus().operatorReturnEpochCapacityLatched, true);
+  assert.equal(router.getStatus().operatorReturnRetiredEpochCount, 64);
+});
+
+test("router exposes SYNC REQUIRED when authoritative Timeline ownership conflicts with local state", () => {
+  const { detector, client, router } = createFakeRouter();
+  detector.getProductionCandidateStatus = () => ({
+    stage: "candidate-ready",
+    deck: 1,
+    playSessionId: "local-session",
+  });
+  detector.getCurrentProductionCandidate = () => ({
+    deck: 1,
+    playSessionId: "local-session",
+    fresh: true,
+    isPlaying: true,
+  });
+  client.status.lastAckResult = {
+    type: "DJ_TRACK_ACTIVE",
+    ok: false,
+    code: "track_owner_unreleased",
+    connectionGeneration: 1,
+    playSessionId: "remote-session",
+  };
+
+  client.emit("timeline-state", {
+    state: "running",
+    loopActive: true,
+    transitionHoldActive: false,
+    timelineId: "life-over",
+    positionBars: 8,
+    playSessionId: "remote-session",
+    pedalOwner: "timeline",
+    releaseEventId: "remote-release",
+    sessionId: "timeline-session",
+    sequence: 1,
+    operatorReturnRequestId: null,
+  });
+
+  const status = router.getStatus();
+  assert.equal(status.mode, "dj-control");
+  assert.equal(status.authorityConsistency.state, "mismatch");
+  assert.equal(status.authorityConsistency.label, "SYNC REQUIRED");
+  assert.equal(status.authorityConsistency.actionRequired, true);
+  assert.equal(status.authorityConsistency.authoritativePlaySessionId, "remote-session");
+  assert.equal(status.authorityConsistency.localCandidatePlaySessionId, "local-session");
+  assert.equal(status.ownerDeck, null, "diagnostic mismatch must not mutate local admission");
+
+  // A rejection from an older socket generation must not survive a reconnect,
+  // and an authoritative idle snapshot must clear the mismatch boundary.
+  client.status = {
+    ...client.status,
+    state: "disconnected",
+    connectionGeneration: 1,
+  };
+  client.emit("status", { enabled: true, state: "disconnected", connectionGeneration: 1 });
+  client.status = {
+    ...client.status,
+    state: "connected",
+    connectionGeneration: 2,
+  };
+  client.emit("status", { enabled: true, state: "connected", connectionGeneration: 2 });
+  client.emit("timeline-state", {
+    state: "idle",
+    loopActive: false,
+    transitionHoldActive: false,
+    timelineId: null,
+    positionBars: 0,
+    playSessionId: null,
+    pedalOwner: null,
+    releaseEventId: null,
+    operatorReturnRequestId: null,
+    sessionId: "timeline-session-after-reconnect",
+    sequence: 1,
+  });
+  assert.notEqual(router.getStatus().authorityConsistency.state, "mismatch");
+  assert.equal(router.getStatus().authorityConsistency.currentConnectionGeneration, 2);
 });
 
 test("router retires prior timeline sessions within one connection generation", () => {

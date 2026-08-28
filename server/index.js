@@ -57,10 +57,6 @@ const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
 const {
-  OPERATOR_RETURN_CONFIRMATION_FIELD,
-  OPERATOR_RETURN_CONFIRMATION_TOKEN,
-} = require("./dj-agent/operatorDjControlReturn");
-const {
   getActionRequestOrigin,
   isActionPreflightAllowed,
   isActionRequestAllowed,
@@ -203,10 +199,10 @@ const state = {
       timelineTransitionHoldActive: null,
       timelineId: null,
       timelinePositionBars: null,
+      operatorReturnRequestId: null,
       timelineSnapshotReady: false,
       lastTimelineAction: null,
       lastTimelineWarning: null,
-      lastOperatorOverride: null,
       releaseMacroSequence: "filter-then-fade-then-stop",
       releaseMacroPhase: "idle",
       releaseMacroReason: null,
@@ -219,6 +215,7 @@ const state = {
       ownerWireIdentity: null,
       ownerSource: "none",
       productionCandidateStatus: null,
+      authorityConsistency: null,
       ownerTrack: null,
     },
   },
@@ -1143,10 +1140,10 @@ function updateDjAgentStatus() {
     timelineTransitionHoldActive: routerStatus.timelineTransitionHoldActive,
     timelineId: routerStatus.timelineId,
     timelinePositionBars: routerStatus.timelinePositionBars,
+    operatorReturnRequestId: routerStatus.operatorReturnRequestId,
     timelineSnapshotReady: routerStatus.timelineSnapshotReady,
     lastTimelineAction: routerStatus.lastTimelineAction,
     lastTimelineWarning: routerStatus.lastTimelineWarning,
-    lastOperatorOverride: routerStatus.lastOperatorOverride,
     releaseMacroSequence: routerStatus.releaseMacroSequence,
     releaseMacroPhase: routerStatus.releaseMacroPhase,
     releaseMacroReason: routerStatus.releaseMacroReason,
@@ -1161,6 +1158,7 @@ function updateDjAgentStatus() {
     ownerWireIdentity: routerStatus.ownerWireIdentity,
     ownerSource: routerStatus.ownerSource,
     productionCandidateStatus: routerStatus.productionCandidateStatus,
+    authorityConsistency: routerStatus.authorityConsistency,
     ownerTrack: routerStatus.ownerTrack,
     updatedAt: new Date().toISOString(),
   };
@@ -1914,17 +1912,6 @@ app.get("/api/dj-agent/setup", (req, res) => {
   res.status(200).json(buildDjAgentSetupSnapshot());
 });
 
-function hasExactOperatorReturnConfirmation(req) {
-  const body = req?.body;
-  return Boolean(
-    body &&
-    typeof body === "object" &&
-    !Array.isArray(body) &&
-    Object.keys(body).length === 1 &&
-    body[OPERATOR_RETURN_CONFIRMATION_FIELD] === OPERATOR_RETURN_CONFIRMATION_TOKEN,
-  );
-}
-
 function handleDjAgentAction(action, _req, res) {
   res.removeHeader("Access-Control-Allow-Origin");
   // Permanently loopback-only: the socket peer must be the DJ PC itself.
@@ -1943,18 +1930,7 @@ function handleDjAgentAction(action, _req, res) {
     });
     return;
   }
-  if (action === "return-to-dj-control" && !hasExactOperatorReturnConfirmation(_req)) {
-    res.status(400).json({
-      ok: false,
-      action,
-      error: "operator-confirmation-required",
-      confirmationField: OPERATOR_RETURN_CONFIRMATION_FIELD,
-    });
-    return;
-  }
-  const result = action === "return-to-dj-control"
-    ? djAgentRouter.returnToDjControl()
-    : djAgentRouter.triggerAction(action);
+  const result = djAgentRouter.triggerAction(action);
   const ackState = result?.delivery?.state || result?.delivery?.ackState || null;
   const ok = result?.ok === true;
   const pending = ackState === "pending";
@@ -1976,7 +1952,6 @@ app.post("/api/dj-agent/actions/loop-half", (req, res) => handleDjAgentAction("l
 app.post("/api/dj-agent/actions/filter-close", (req, res) => handleDjAgentAction("filter-close", req, res));
 app.post("/api/dj-agent/actions/release", (req, res) => handleDjAgentAction("release", req, res));
 app.post("/api/dj-agent/actions/track-active", (req, res) => handleDjAgentAction("track-active", req, res));
-app.post("/api/dj-agent/actions/return-to-dj-control", (req, res) => handleDjAgentAction("return-to-dj-control", req, res));
 app.get("/api/dj-agent/status", (_req, res) => {
   // Status is read-only and remains remotely readable. Disabled is a normal
   // HTTP 200 response with enabled:false.

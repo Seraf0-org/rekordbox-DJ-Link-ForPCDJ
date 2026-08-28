@@ -648,16 +648,32 @@ sequenceが新しくてもAはretiredとして受理しません。これはABA�
     "positionBars": 128,
     "playSessionId": "play-session-42",
     "pedalOwner": "dj",
-    "releaseEventId": null
+    "releaseEventId": null,
+    "operatorReturnRequestId": null
   }
 }
 ```
 
-payloadは上記8フィールド固定です。`transitionHoldActive`は必須booleanであり、
-missing/nonboolean/extra fieldはstrict-v3として拒否します。generic `running`だけではペダル所有権を
+payloadの現行形は上記9フィールド固定です。`operatorReturnRequestId`は`null`または
+`syndocal-dj-operator-return-<epoch>-<counter>`のexact canonical IDだけです。
+`<epoch>`は32文字のlowercase ASCII hex、`<counter>`はleading zeroなしの
+`1..18446744073709551615`（u64::MAX）canonical decimalです。このfieldの欠落、
+空文字、端空白、control文字、型違い、arbitrary/noncanonical ID、およびその他の
+extra fieldはstrict-v3としてfail-closedに拒否します。
+`transitionHoldActive`は必須booleanです。generic `running`だけではペダル所有権を
 移しません。`pedalOwner:"timeline"`、現在のplaySessionId、同sessionの相関済み
 DJ_RELEASE eventIdがすべて一致した時だけ`timeline-control`へ移ります。RELEASE後の
 late TRACK_SYNC/LOOPはsession fenceで破棄し、所有権を再取得できません。
+Syndocalが新しいnon-null `operatorReturnRequestId`を送ると、rb-outputは現在の候補を
+一度だけ`requestCurrentTrackCandidates()`で再告知します。これはローカルownerを変更せず、
+通常どおり`DJ_TRACK_ACTIVE`のcurrent ACKだけがadmissionを決めます。同じepochでは
+BigInt counter high-waterを接続世代をまたいで保持し、lower/equal replay（257件超を
+含む）は再告知しません。別epochは別のauthoritative Timeline `sessionId`でのみ受理し、
+同一sessionのepoch切替は拒否します。受理済みの旧epochはretiredとして永久拒否し、
+retired epoch台帳は64件で容量ラッチしてfail-closed（evict/reopenなし）です。rejected
+ACTIVEも未admittedのままvisible/actionableです。
+Web Agentの`authorityConsistency`が不一致を`SYNC REQUIRED`として表示しますが、Web側の
+operator return操作をこの相関だけで自動実行しません。明示的なreturn操作はSyndocal側の責務です。
 Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、切断中、再接続
 直後でも、Stage 1のF13/F14は既存のローカルRekordbox MIDI操作を継続します
 （F15はStage 1では従来どおりinactiveです）。この間のネットワーク側effectは
@@ -733,22 +749,25 @@ ACK成功だけで権威状態を書き換えず、次の`DJ_TIMELINE_STATE` bro
 待ちます。time signatureとbar gridはSyndocal側が決定し、`bars`は音楽的な
 小節数（秒数ではない）です。
 
-### Local operator return boundary
+### Operator return boundary
 
-`handoff-pending`または`timeline-control`でTimelineとDJ PCの表示が食い違う
-場合だけ、DJ PC localhost UIに`Return to DJ control`を表示します。確認画面は
-「Timeline may still be running」と警告します。確認後もSyndocal Timelineへ
-play/stop/seek/jumpを送らず、Timelineをidleと合成せず、最後に受け取った権威
-snapshotを診断値として保持します。新しいcurrently-playing Deck 1 production
-candidateがfreshかつ1400msのselection gateを満たす場合だけ、local pedal target
-として`source:"operator-deck1-fallback"`を記録し、modeを`dj-control`へ戻します。
-candidateが未成熟・停止・欠落ならvisible/actionable failureを返し、状態を変更
-しません。routeは`POST /api/dj-agent/actions/return-to-dj-control`ですが、既存の
-`isActionRequestAllowed`と同じloopback-only fenceを通り、remote requestからは
-呼び出せません。bodyはexactly
-`{"confirmation":"return-to-dj-control"}`だけを許容し、欠落・不一致・余分な
-fieldはrouter呼出し前にrejectします。released Syndocal sessionをremote admission
-として復活させる経路でもありません。
+Web Agentは診断専用であり、`Return to DJ control`ボタンやlocal owner
+overrideを持ちません。TimelineとDJ候補の世代・owner/sessionが食い違う場合は
+`SYNC REQUIRED`を表示するだけです。オペレーターのreturn操作はSyndocal側の
+明示操作で行い、Syndocalが現在の権威snapshotへboundedな
+`operatorReturnRequestId`を付けます。canonicalな
+`syndocal-dj-operator-return-<epoch>-<counter>`（epoch=32 lowercase ASCII hex、
+counter=canonical decimal 1..u64::MAX）は、同一epochならBigInt high-waterを
+接続世代をまたいで保持します。別epochは別のauthoritative Timeline `sessionId`でのみ
+受理し、旧epochはretiredとして永久拒否します。retired epoch台帳は64件で満杯になった
+時点で容量ラッチし、evictして再開することはありません。現在候補は一度だけ
+`DJ_TRACK_ACTIVE`として再告知し、同じIDのreconnect snapshotではgeneric
+reannouncementへフォールバックしません。
+ローカルownerを直接設定する経路はなく、通常の`DJ_TRACK_ACTIVE`のterminal
+`accepted`/`duplicate` ACKだけがadmissionを決めます。rejected/ambiguous/stale
+candidateは未admittedのままvisible/actionableです。旧
+`POST /api/dj-agent/actions/return-to-dj-control` routeとconfirmation bodyは
+削除され、存在しないため404です。
 
 ## CURRENT v1.1.11 / v3 eventId・ACK・順序
 

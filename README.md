@@ -494,16 +494,21 @@ and F15 alone sends
 The retired `-4` jump is rejected. Every Stage 2 command stamps the snapshot's
 exact current `timelineId` and `playSessionId`, and Stage 2 never sends
 Rekordbox MIDI.
-The local UI exposes `Return to DJ control` only while the mode is
-`handoff-pending` or `timeline-control`. After confirmation it may adopt a
-fresh, currently-playing Deck 1 production candidate (including the title-free
-fallback after the 1400-ms gate) as a local pedal target and records an explicit
-operator override warning. It sends no play/stop/seek/jump, does not mutate
-Syndocal Timeline, and does not expose a remote action path; without a ready
-candidate it fails visibly and leaves the current Timeline diagnostic intact.
-The localhost POST must carry exactly
-`{ "confirmation": "return-to-dj-control" }`; the server rejects a missing,
-mismatched, or extra body field before invoking the router.
+The Web Agent is diagnostic-only for authority reconciliation. It can show
+`SYNC REQUIRED` when the current Syndocal Timeline owner/session conflicts with
+the current DJ candidate, but it has no local owner override or return button.
+An operator return to DJ control is initiated explicitly in Syndocal, which
+publishes a correlated canonical
+`syndocal-dj-operator-return-<epoch>-<counter>` ID. `<epoch>` is exactly 32
+lowercase ASCII hex characters and `<counter>` is canonical decimal
+`1..18446744073709551615` (u64::MAX), without leading zeros; arbitrary or
+noncanonical IDs are rejected. rb-output reannounces the current candidate
+exactly once and admits it only after the normal `DJ_TRACK_ACTIVE` ACK. The
+active epoch keeps a BigInt counter high-water across reconnects; a new epoch
+requires a different authoritative Timeline `sessionId`, retires the prior
+epoch permanently, and latches visibly when the bounded 64-epoch retired set
+is full. This keeps ownership on one authoritative path and prevents a
+browser-local fallback from diverging from Syndocal.
 Disconnects, missing snapshots, invalid state broadcasts, and ACK failures keep
 timeline-control fail-closed; Stage 1 local MIDI remains available while only
 the network side effect is marked failed or pending.

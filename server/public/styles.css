@@ -827,6 +827,11 @@ button:focus {
   font-weight: 700;
 }
 
+.dj-agent-status.error {
+  color: #e47f89;
+  font-weight: 700;
+}
+
 .dj-agent-actions {
   display: flex;
   flex-wrap: wrap;

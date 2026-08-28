@@ -1,5 +1,5 @@
 const { EventEmitter } = require("node:events");
-const { createOperatorDjControlReturn } = require("./operatorDjControlReturn");
+const { parseOperatorReturnRequestId } = require("./syndocalClient");
 const { createStage1LoopFallback } = require("./stage1LoopFallback");
 
 const TIMELINE_MODES = new Set(["dj-control", "handoff-pending", "timeline-control"]);
@@ -8,6 +8,10 @@ const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]
 // Never evict at the high-water: accepting an evicted ID would reopen an ABA
 // path that could roll back authoritative timeline ownership.
 const TIMELINE_SESSION_FENCE_MAX_RETIRED = 64;
+// A new operator-return epoch is accepted only after the authoritative
+// timeline session changes. Retired epochs are never evicted: doing so would
+// reopen an ABA path in which an old request can regain authority.
+const OPERATOR_RETURN_MAX_RETIRED_EPOCHS = 64;
 const DEFAULT_TIMER_API = Object.freeze({
   setTimeout(callback, delayMs) {
     return setTimeout(callback, delayMs);
@@ -60,6 +64,12 @@ function createShowEventRouter({
   let timelinePlaySessionId = null;
   let timelinePedalOwner = "dj";
   let timelineReleaseEventId = null;
+  let operatorReturnRequestId = null;
+  let operatorReturnActiveEpoch = null;
+  let operatorReturnActiveEpochHighWater = 0n;
+  let operatorReturnActiveEpochSessionId = null;
+  const operatorReturnRetiredEpochs = new Set();
+  let operatorReturnEpochCapacityLatched = false;
   let timelineStateUpdatedAt = null;
   let timelineSnapshotReady = false;
   let lastSyndocalState = syndocalClient.getStatus?.().state || "unknown";
@@ -72,7 +82,6 @@ function createShowEventRouter({
   let pendingHandoffEventId = null;
   let lastTimelineAction = null;
   let lastTimelineWarning = null;
-  let lastOperatorOverride = null;
   let releaseMacroActive = false;
   const releaseMacroSequence = releaseMacro.sequence === "filter-then-fade-then-stop"
     ? "filter-then-fade-then-stop"
@@ -266,31 +275,6 @@ function createShowEventRouter({
     detector.requestMeasuredLoopForSession?.(admittedTrackTarget());
     return true;
   }
-
-  const returnToDjControl = createOperatorDjControlReturn({
-    now,
-    getMode: () => mode,
-    getReleaseMacroActive: () => releaseMacroActive,
-    getCurrentProductionCandidate: () => detector.getCurrentProductionCandidate?.() || null,
-    getProductionCandidateStatus: () => detector.getProductionCandidateStatus?.() || null,
-    getReleasedPlaySessions: () => releasedPlaySessions,
-    getAdmittedTrack: () => admittedTrack,
-    getOwnerSource: () => admittedTrackSource,
-    setLocalOwner: (target) => {
-      // Local override is deliberately separate from ACK admission: it does
-      // not clear or rewrite the last authoritative timeline snapshot.
-      stage1LoopFallback.resetForSession();
-      admittedTrack = target;
-      admittedTrackSource = "operator-deck1-fallback";
-      activePlaySessionId = target.playSessionId;
-    },
-    setReleased: (value) => { released = value === true; },
-    getTimelineTarget: () => timelineTarget(),
-    setMode,
-    setLastOperatorOverride: (value) => { lastOperatorOverride = value; },
-    emitWarning,
-    emitAction,
-  });
 
   function midiTarget(mapping, targetDeck) {
     const resolved = midi.resolveTarget?.(mapping, targetDeck) || {};
@@ -696,12 +680,72 @@ function createShowEventRouter({
     return true;
   }
 
+  function requestCandidatesForOperatorReturn(requestId, timelineSessionId) {
+    if (requestId === null) {
+      return false;
+    }
+    const parsed = parseOperatorReturnRequestId(requestId);
+    if (!parsed) {
+      emitWarning("Invalid operator return request ID ignored; expected canonical epoch and counter", "syndocal");
+      return false;
+    }
+    if (typeof timelineSessionId !== "string" || timelineSessionId.length === 0) {
+      emitWarning("Operator return request rejected: authoritative timeline session ID is required", "syndocal");
+      return false;
+    }
+    if (operatorReturnRetiredEpochs.has(parsed.epoch)) {
+      emitWarning("Retired operator return epoch rejected", "syndocal");
+      return false;
+    }
+    if (operatorReturnActiveEpoch === parsed.epoch) {
+      if (parsed.counter <= operatorReturnActiveEpochHighWater) {
+        emitWarning("Stale duplicate operator return request ignored", "syndocal");
+        return false;
+      }
+      operatorReturnActiveEpochHighWater = parsed.counter;
+      operatorReturnActiveEpochSessionId = timelineSessionId;
+    } else if (operatorReturnActiveEpoch === null) {
+      operatorReturnActiveEpoch = parsed.epoch;
+      operatorReturnActiveEpochHighWater = parsed.counter;
+      operatorReturnActiveEpochSessionId = timelineSessionId;
+    } else {
+      if (timelineSessionId === operatorReturnActiveEpochSessionId) {
+        emitWarning("Operator return epoch switch rejected: authoritative timeline session did not change", "syndocal");
+        return false;
+      }
+      if (
+        operatorReturnEpochCapacityLatched ||
+        operatorReturnRetiredEpochs.size >= OPERATOR_RETURN_MAX_RETIRED_EPOCHS
+      ) {
+        operatorReturnEpochCapacityLatched = true;
+        emitWarning("Operator return epoch capacity reached; rejecting new epoch", "syndocal");
+        return false;
+      }
+      operatorReturnRetiredEpochs.add(operatorReturnActiveEpoch);
+      operatorReturnActiveEpoch = parsed.epoch;
+      operatorReturnActiveEpochHighWater = parsed.counter;
+      operatorReturnActiveEpochSessionId = timelineSessionId;
+    }
+    try {
+      detector.requestCurrentTrackCandidates?.();
+    } catch {
+      // The ID is consumed even when the local detector fails. Retrying the
+      // same remote request would violate the exactly-once request contract;
+      // the unchanged candidate/ACK state remains visible for diagnosis.
+      emitWarning("Operator return candidate request failed", "syndocal");
+    }
+    return true;
+  }
+
   function onTimelineState(state) {
+    const incomingOperatorReturnRequestId = state?.operatorReturnRequestId ?? null;
     if (
       !state ||
       !TIMELINE_STATES.has(String(state.state || "").toLowerCase()) ||
       typeof state.loopActive !== "boolean" ||
-      typeof state.transitionHoldActive !== "boolean"
+      typeof state.transitionHoldActive !== "boolean" ||
+      (incomingOperatorReturnRequestId !== null &&
+        !parseOperatorReturnRequestId(incomingOperatorReturnRequestId))
     ) {
       onTimelineWarning("Invalid authoritative timeline state ignored");
       return;
@@ -719,15 +763,22 @@ function createShowEventRouter({
     timelinePlaySessionId = state.playSessionId ?? null;
     timelinePedalOwner = state.pedalOwner || "dj";
     timelineReleaseEventId = state.releaseEventId ?? null;
+    operatorReturnRequestId = incomingOperatorReturnRequestId;
     timelineStateUpdatedAt = new Date(now()).toISOString();
     timelineSnapshotReady = true;
+    const requestedCandidatesForState = requestCandidatesForOperatorReturn(
+      incomingOperatorReturnRequestId,
+      state.sessionId,
+    );
     // ACK/retry/reconnect may be followed by a still-true snapshot from the
     // same timeline. Only the state that proves this exact F13 LOOP_SET's
     // desired result is allowed to release its latch; F14 is delivery-only.
     clearPendingLoopSetActionForObservedState(state);
     if (reannounceCandidatesAfterTimelineState && syndocalEnabled() && syndocalState() === "connected") {
       reannounceCandidatesAfterTimelineState = false;
-      detector.requestCurrentTrackCandidates?.();
+      if (incomingOperatorReturnRequestId === null && !requestedCandidatesForState) {
+        detector.requestCurrentTrackCandidates?.();
+      }
     }
     const correlatedTimelineOwnership =
       timelineState === "running" &&
@@ -1479,9 +1530,6 @@ function createShowEventRouter({
 
   function triggerAction(action) {
     const normalized = String(action || "").trim().toLowerCase();
-    if (normalized === "return-to-dj-control" || normalized === "return_to_dj_control") {
-      return returnToDjControl();
-    }
     if (mode === "timeline-control") {
       if (normalized === "release") {
         return triggerStage2Action("timeline-current-loop-toggle");
@@ -1598,14 +1646,87 @@ function createShowEventRouter({
         reason: "play-session-released",
       };
     }
-    if (admittedTrackSource === "operator-deck1-fallback") {
-      return {
-        ...status,
-        stage: "operator-fallback",
-        reason: "operator-local-owner",
-      };
-    }
     return { ...status, stage: "admitted", reason: null };
+  }
+
+  // The browser's local mode is only one half of DJ ownership.  The
+  // authoritative Syndocal timeline snapshot and the last terminal ACK must
+  // be evaluated together, otherwise a stale local DJ-CONTROL label can hide
+  // a remote unreleased owner and make the pedal appear dead.
+  function authorityConsistency() {
+    const candidateStatus = detector.getProductionCandidateStatus?.() || null;
+    const candidate = detector.getCurrentProductionCandidate?.() || null;
+    const syndocalStatus = syndocalClient.getStatus?.() || {};
+    const lastAck = syndocalStatus.lastAckResult || null;
+    const currentConnectionGeneration = syndocalStatus.connectionGeneration;
+    const has = (value) => typeof value === "string" && value.length > 0;
+    const authoritativeSnapshotCurrent = timelineSnapshotReady &&
+      syndocalStatus.state === "connected";
+    const authoritativeTimelineOwner = authoritativeSnapshotCurrent &&
+      timelineState === "running" &&
+      timelinePedalOwner === "timeline" &&
+      has(timelinePlaySessionId) &&
+      has(timelineReleaseEventId);
+    const localCandidateReady = candidateStatus?.stage === "candidate-ready" &&
+      candidate?.fresh === true &&
+      candidate?.isPlaying === true;
+    const lastAckOwnerMismatch = authoritativeTimelineOwner &&
+      Number.isSafeInteger(currentConnectionGeneration) &&
+      lastAck?.connectionGeneration === currentConnectionGeneration &&
+      lastAck?.type === "DJ_TRACK_ACTIVE" &&
+      lastAck?.ok === false &&
+      lastAck?.code === "track_owner_unreleased" &&
+      lastAck?.playSessionId === timelinePlaySessionId &&
+      lastAck?.playSessionId === candidate?.playSessionId;
+    const sessionMismatch = authoritativeTimelineOwner &&
+      localCandidateReady &&
+      timelinePlaySessionId !== candidate.playSessionId;
+    const localTimelineMismatch = authoritativeTimelineOwner && (
+      mode !== "timeline-control" ||
+      released !== true ||
+      !has(activePlaySessionId) ||
+      timelinePlaySessionId !== activePlaySessionId
+    );
+    const mismatch = lastAckOwnerMismatch || sessionMismatch || localTimelineMismatch;
+    let state = "unknown";
+    let reason = "authoritative-state-pending";
+    if (mismatch) {
+      state = "mismatch";
+      reason = lastAckOwnerMismatch || sessionMismatch
+        ? "track-owner-unreleased"
+        : "timeline-owner-local-state-mismatch";
+    } else if (timelineSnapshotReady && timelineState !== "unknown") {
+      state = "consistent";
+      reason = null;
+    }
+    return {
+      state,
+      label: state === "mismatch" ? "SYNC REQUIRED" : state.toUpperCase(),
+      reason,
+      actionRequired: state === "mismatch" && localCandidateReady,
+      currentConnectionGeneration: Number.isSafeInteger(currentConnectionGeneration)
+        ? currentConnectionGeneration
+        : null,
+      localMode: mode,
+      localReleased: released,
+      localCandidateStage: candidateStatus?.stage || null,
+      localCandidateDeck: candidate?.deck || null,
+      localCandidatePlaySessionId: candidate?.playSessionId || null,
+      authoritativeState: timelineState,
+      authoritativeLoopActive: timelineLoopActive,
+      authoritativeTimelineId: timelineId,
+      authoritativePlaySessionId: timelinePlaySessionId,
+      authoritativePedalOwner: timelinePedalOwner,
+      authoritativeReleaseEventId: timelineReleaseEventId,
+      lastAck: lastAck
+        ? {
+            type: lastAck.type || null,
+            state: lastAck.state || null,
+            outcome: lastAck.outcome || null,
+            code: lastAck.code || null,
+          }
+        : null,
+    };
   }
 
   function getStateSync() {
@@ -1622,11 +1743,11 @@ function createShowEventRouter({
       timelineTransitionHoldActive,
       timelineId,
       timelinePositionBars,
+      operatorReturnRequestId,
       timelineSnapshotReady,
       timelineStateUpdatedAt,
       lastTimelineAction,
       lastTimelineWarning,
-      lastOperatorOverride,
       stage1LoopFallback: stage1LoopFallback.getState(),
       releaseMacroSequence,
       releaseMacroPhase,
@@ -1651,6 +1772,7 @@ function createShowEventRouter({
         : null,
       ownerSource: owner ? (admittedTrackSource || "acknowledged-track-candidate") : "none",
       productionCandidateStatus: productionCandidateStatus(owner),
+      authorityConsistency: authorityConsistency(),
       admittedTrack: owner,
       updatedAt: new Date(now()).toISOString(),
     };
@@ -1658,20 +1780,7 @@ function createShowEventRouter({
 
   function getSyndocalStateSync() {
     const state = getStateSync();
-    if (admittedTrackSource !== "operator-deck1-fallback") {
-      return state;
-    }
-    // A local fallback is a pedal target only. Do not put its owner context in
-    // the next v3 State Sync, where the peer could mistake it for admission.
-    return {
-      ...state,
-      ownerDeck: null,
-      ownerDeckId: null,
-      activePlaySessionId: null,
-      ownerWireIdentity: null,
-      ownerSource: "none",
-      admittedTrack: null,
-    };
+    return state;
   }
 
   function getStatus() {
@@ -1685,10 +1794,17 @@ function createShowEventRouter({
       timelinePlaySessionId,
       timelinePedalOwner,
       timelineReleaseEventId,
+      operatorReturnRequestId,
+      operatorReturnActiveEpoch,
+      operatorReturnActiveEpochHighWater: operatorReturnActiveEpoch === null
+        ? null
+        : operatorReturnActiveEpochHighWater.toString(),
+      operatorReturnActiveEpochSessionId,
+      operatorReturnRetiredEpochCount: operatorReturnRetiredEpochs.size,
+      operatorReturnEpochCapacityLatched,
       timelineSnapshotReady,
       lastTimelineAction,
       lastTimelineWarning,
-      lastOperatorOverride,
       releaseMacroSequence,
       releaseMacroPhase,
       releaseMacroReason,
@@ -1710,6 +1826,7 @@ function createShowEventRouter({
       ownerWireIdentity: admittedTrack?.identity || null,
       ownerSource: admittedTrack ? (admittedTrackSource || "acknowledged-track-candidate") : "none",
       productionCandidateStatus: productionCandidateStatus(admittedTrackTarget()),
+      authorityConsistency: authorityConsistency(),
       ownerTrack: (() => {
         const owner = admittedTrackTarget();
         const state = owner ? detector.getState().decks?.[owner.deck] : null;
@@ -1774,7 +1891,6 @@ function createShowEventRouter({
     onSnapshot,
     onTrackLoaded,
     getSyndocalStateSync,
-    returnToDjControl,
     start,
     stop,
     triggerAction,

@@ -320,6 +320,7 @@ test("strict external config composes production MIDI/client/router through F13 
       playSessionId: candidate.payload.playSessionId,
       pedalOwner: "dj",
       releaseEventId: null,
+      operatorReturnRequestId: null,
     },
   }));
   assert.equal(router.getStatus().mode, "dj-control");
@@ -359,6 +360,7 @@ test("strict external config composes production MIDI/client/router through F13 
       playSessionId: candidate.payload.playSessionId,
       pedalOwner: "timeline",
       releaseEventId: releaseFrame.eventId,
+      operatorReturnRequestId: null,
     },
   }));
   assert.equal(router.getStatus().mode, "timeline-control");

@@ -1613,6 +1613,7 @@ test("same-session stale DJ_TIMELINE_STATE duplicates cannot mutate router state
       playSessionId: "play-session-1",
       pedalOwner: "dj",
       releaseEventId: null,
+      operatorReturnRequestId: null,
       ...overrides,
     },
   });
@@ -2717,6 +2718,7 @@ test("real router getStateSync is encoded as a strict v3 State Sync frame", asyn
       playSessionId: "play-session-1",
       pedalOwner: "dj",
       releaseEventId: null,
+      operatorReturnRequestId: null,
     },
   }));
   assert.equal(router.getStatus().mode, "dj-control");
@@ -4021,6 +4023,7 @@ test("router correlates release timeout back to the same action event", async (t
       playSessionId: actionSessionId,
       pedalOwner: "dj",
       releaseEventId: null,
+      operatorReturnRequestId: null,
     },
   }));
 
