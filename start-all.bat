@@ -102,7 +102,14 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [rb-output] rebuilding and verifying rb_hook.dll...
-call npm run build:hook
+if "%_RB_REKORDBOX_LOCAL_TEST_START%"=="1" (
+  rem The standalone local test explicitly admits this machine's operator-approved
+  rem toolchain through build-hook.ps1's existing fail-closed root validation.
+  rem Production keeps the no-argument provenance path below unchanged.
+  call npm run build:hook -- -AdditionalTrustedCompilerRoots C:\TDM-GCC-64
+) else (
+  call npm run build:hook
+)
 if errorlevel 1 (
   echo.
   echo [ERROR] DLL build or provenance verification failed.

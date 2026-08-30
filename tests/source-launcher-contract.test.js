@@ -110,6 +110,29 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   );
 });
 
+test("local Rekordbox test admits only the fixed additional compiler root", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "start-all.bat"), "utf8");
+  const buildBlock = source.match(
+    /if\s+"%_RB_REKORDBOX_LOCAL_TEST_START%"=="1"\s*\([\s\S]*?\)\s*else\s*\([\s\S]*?\)/i,
+  );
+  assert.ok(buildBlock, "hook build must have an explicit local-test/production split");
+  assert.match(
+    buildBlock[0],
+    /call\s+npm\s+run\s+build:hook\s+--\s+-AdditionalTrustedCompilerRoots\s+C:\\TDM-GCC-64/i,
+  );
+  assert.match(buildBlock[0], /else\s*\(\s*call\s+npm\s+run\s+build:hook\s*\)/i);
+  assert.equal(
+    (buildBlock[0].match(/-AdditionalTrustedCompilerRoots/gi) || []).length,
+    1,
+    "the production branch must not receive an additional trusted root",
+  );
+  assert.match(
+    source,
+    /AdditionalTrustedCompilerRoots C:\\TDM-GCC-64/i,
+    "the fixed local-test root must remain explicit and reviewable",
+  );
+});
+
 test("source server restart is limited to the exact checkout-owned listener", () => {
   const source = fs.readFileSync(
     path.join(repoRoot, "scripts", "restart_source_server.py"),

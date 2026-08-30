@@ -98,6 +98,25 @@ testと独立adversarial reviewが揃っていないため、本checkpointでは
 この旧artifact cleanupはblocked remaining workとして保持し、現在のlocal-test sourceや
 実機受入証跡として扱いません。
 
+同PCの最初のfull-runtime local launchは、bare `npm run build:hook`が実際の
+`C:\TDM-GCC-64\bin\g++.exe`をtrusted compiler root外として拒否し、server/injection前に
+fail-closedしました。local-test branchだけが固定literal
+`-AdditionalTrustedCompilerRoots C:\TDM-GCC-64`を渡すようにし、production/no-argument branchは
+bare buildのまま維持しました。caller env/config/追加launcher argumentからrootを選べません。
+既存build-hookはabsolute/non-drive/non-reparse directory、first resolved native compiler、
+compiler/source/MinHook/output evidenceを引き続き再検証します。独立Terra xHigh再監査は
+P0/P1なしのGO、focused launcher/provenance/timingは**14/14**、first-party warningは**0**です。
+
+修正後のcontrolled local launchではcompiler
+`C:\TDM-GCC-64\bin\g++.exe`（SHA-256
+`8CFA5EA1C1D29BE31078CB92CD0CAC635B90183D17460C361CC90645B77D11FB`）を検証し、AMD64
+`native\bin\rb_hook.dll`（SHA-256
+`D066B2D3E233F0485B0F7B71E0C0E7D4514452AE1525B99249661182DA55F055D`）を生成しました。
+local source PID `55684`はport 8787を所有し、HookはRekordbox 7.2.18 PID `72800`へinject成功。
+token-free statusは`enabled:true`、`localTestMode:true`、`testOnly:true`、
+`deliveryPolicy:not-applicable/local-only`、MIDI `CustomMIDI1` port 2 connected、pedal
+`listening`を返しました。これは起動証跡であり、F13/F14の物理ペダル受入はまだ未確認です。
+
 Windows target security is bounded by the NTFS ACL inherited from the exact
 `C:\SyndocalShow` parent; the updater does not claim Unix mode bits as a Windows
 ACL. Its pinned PowerShell writer uses `FileMode.CreateNew` plus `FileShare.None`
