@@ -138,17 +138,23 @@ match, only a fresh playing Deck 1 may become the bounded fallback after
 remain blocked. F14 runs local LoopHalf handling. F13 runs the local macro in
 this exact order: Filter HPF (CC16, 64→127 over 1000 ms) → ChannelFader fade
 (CC17, 127→0 over 1000 ms) → Cue/Stop Note37 exactly once, then resets HPF to 64
-and the fader to 127 after Stop. Each phase revalidates the frozen local owner;
-a replaced, stopped, stale, or foreign session cancels the remaining macro and
-cannot receive fade, Stop, or reset intended for the prior session. Timeline/
-Stage 2 is unavailable in this mode; no `DJ_TIMELINE_*` event is sent.
+and the fader to 127 after Stop. Each phase revalidates the frozen local owner.
+Before this macro sends Stop, a replaced, stopped, stale, or foreign session
+cancels every remaining phase. Only after this macro's own successful Stop may
+the exact frozen detector owner receive its neutral HPF/fader reset; a
+replacement lineage or identity never receives that reset. Timeline/Stage 2 is
+unavailable in this mode; no `DJ_TIMELINE_*` event is sent.
 
-This local path does not change the normal no-argument production command. In
-production, a fresh candidate must first receive a terminal `accepted` or
-`duplicate` `DJ_TRACK_ACTIVE` ACK from Syndocal before it is admitted and can
-drive local MIDI. During a disconnect, production local MIDI continues only for
-an owner already admitted by that terminal ACK; a fresh no-Syndocal candidate is
-never admitted by the offline path.
+The explicit local-test configuration and routing leave production's Syndocal
+admission and MIDI-authority semantics unchanged. Separately, the common source
+launcher now applies a fixed 15-second identity settle fence before injecting a
+Rekordbox process it launched itself; this shared fail-closed injection change
+also applies to the normal no-argument launcher. In production, a fresh
+candidate must first receive a terminal `accepted` or `duplicate`
+`DJ_TRACK_ACTIVE` ACK from Syndocal before it is admitted and can drive local
+MIDI. During a disconnect, production local MIDI continues only for an owner
+already admitted by that terminal ACK; a fresh no-Syndocal candidate is never
+admitted by the offline path.
 
 No physical acceptance is claimed for this mode. Remaining evidence is the
 controlled-DJ-PC check of one unique `CustomMIDI1` output and its actual port,

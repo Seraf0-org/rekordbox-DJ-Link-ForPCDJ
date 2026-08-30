@@ -70,9 +70,11 @@ configuration. It has no token, NIC selection, or Syndocal network leg. Its
 status reports `localTestMode:true`, `testOnly:true`, and the exact delivery
 policy `not-applicable/local-only`; local delivery has no ACK requirement.
 Timeline/Stage 2 is disabled and no `DJ_TIMELINE_*` event is sent.
-F13 revalidates the frozen local owner at every macro phase. If the deck is
-replaced, stopped, stale, or no longer owns the same play session, no remaining
-fade, Stop, or reset message is sent to that session or its replacement.
+F13 revalidates the frozen local owner at every macro phase. Before this macro
+sends Stop, a replaced, stopped, stale, or foreign owner cancels every remaining
+phase. Only after this macro's own successful Stop may the exact frozen detector
+owner receive its neutral HPF/fader reset; a replacement lineage or identity
+never receives that reset.
 
 Local action admission is fail-closed to the current fresh, actually playing
 candidate with the exact admitted deck, `deckId`, `playSessionId`, and frozen
@@ -91,11 +93,14 @@ title-match and Deck 1 `1400 ms` fallback cases, F14 loop response, F13 order an
 reset, stale/foreign-owner blocking, loopback-only status showing
 `not-applicable/local-only`, and the separate production ACK/disconnect path.
 
-The normal no-argument production launcher remains unchanged: a fresh candidate
-must receive a terminal `accepted` or `duplicate` `DJ_TRACK_ACTIVE` ACK from
-Syndocal before admission and local MIDI. During a disconnect, production MIDI
-continues only for an owner already admitted by that terminal ACK; the offline
-path never admits a fresh no-Syndocal candidate.
+The explicit local-test configuration and routing do not relax the normal
+production ACK boundary. Separately, the common no-argument launcher now applies
+a fixed 15-second identity settle fence before injecting a Rekordbox process it
+launched itself. In production, a fresh candidate must receive a terminal
+`accepted` or `duplicate` `DJ_TRACK_ACTIVE` ACK from Syndocal before admission
+and local MIDI. During a disconnect, production MIDI continues only for an owner
+already admitted by that terminal ACK; the offline path never admits a fresh
+no-Syndocal candidate.
 
 `GET /api/now-playing` (also available as `GET /api/state`) returns the complete
 snapshot used by the web UI. The loop-only endpoint is:

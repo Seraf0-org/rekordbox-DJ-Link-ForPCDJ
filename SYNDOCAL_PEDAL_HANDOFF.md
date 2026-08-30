@@ -26,11 +26,12 @@ runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor
 
 ## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
 
-Implementation checkpointはbranch `beta-v1.1.2`、base/upstream
-`a13d7bff59db5e7c00e19655f87c69db7cb52005`から作成したcommit
-`2e1d04c`（`feat: add standalone Rekordbox pedal test mode`）です。次のactionは
-このcheckpointをpushし、同一checkoutでfixed local configをinit/preflightしてから、
-Rekordbox実再生中にF14 LoopHalfとF13 HPF→fade→Cue/Stop/resetを物理ペダルで受け入れることです。
+Implementation checkpointはbranch `beta-v1.1.2`のHEAD/upstream
+`1c415da27f35af2c6570d92a86187243c8d39346`
+（`fix: settle self-launched Rekordbox before injection`）です。upstreamとの差分は
+ahead/behind `0/0`です。standalone Rekordbox pedal test mode自体は`2e1d04c`で導入され、
+現在の残作業は、fixed local configのinit/preflight後にRekordbox実再生中でF14 LoopHalfと
+F13 HPF→fade→Cue/Stop/resetを物理ペダルで受け入れることです。
 Syndocal、Timeline、LAN、ACKはこのstandalone受入の対象外です。
 
 これはSyndocal handoffを行わず、既存のHook/Rekordbox candidate、MIDI、pedal、routerを
@@ -75,20 +76,27 @@ playSessionId、frozen identityが揃った場合だけ成立します。selecto
 後のbounded fallback候補になります。stale、stopped、foreign、replacement、identity不足
 はMIDIを動かしません。F14はlocal LoopHalf、F13はFilter HPF（CC16、64→127、1000ms）→
 ChannelFader fade（CC17、127→0、1000ms）→Cue/Stop Note37 exactly onceの順で、Stop後に
-HPF 64/Fader 127へresetします。F13は各phaseでfrozen local ownerを再検証し、途中で
-replacement、stop、stale、foreign sessionになった場合は残りのfade/Stop/resetをcancelし、
-旧session向け命令を新しい曲へ送信しません。Timeline/Stage 2および`DJ_TIMELINE_*`は
-このmodeでは存在せず、F15を含むtimeline actionは送信しません。
+HPF 64/Fader 127へresetします。F13はFilter、fade、Stopの各phase前にfrozen local
+ownerを再検証し、replacement、stale、foreign、またはStop前に停止したsessionでは
+残りのfade/Stop/resetをcancelします。例外として、このmacro自身がStopを成功送信した後だけは、
+fresh/playing candidateが消えても、detector state上でexactなfrozen deck、playSessionId、
+identityが一致するpaused ownerへneutralなHPF 64/Fader 127 resetを送ります。これは新たな
+track actionのadmissionではなく、同一ownerのpost-Stop resetです。replacement lineageまたは
+identityにはresetを送信しません。Timeline/Stage 2および`DJ_TIMELINE_*`はこのmodeでは
+存在せず、F15を含むtimeline actionは送信しません。
 
 このmodeのlocal actionにはSyndocal ACKがなく、deliveryは`not-applicable/local-only`です。
-通常の引数なし`start-all.bat`は変更されず、productionではfresh candidateをadmitする前に
-terminal `accepted`/`duplicate`の`DJ_TRACK_ACTIVE` ACKが必須です。production切断中に
-local MIDIを継続できるのは、そのACKで既にadmit済みのownerだけで、freshなno-Syndocal
-candidateをoffline pathからadmitすることはありません。
+local-testのconfig/routingはproductionのACK admission semanticsを変更しません。一方で
+共通の`start-all.bat` injection pathは、自己起動したRekordboxに対して固定15秒のidentity
+settleを適用するよう変更されています。productionではfresh candidateをadmitする前にterminal
+`accepted`/`duplicate`の`DJ_TRACK_ACTIVE` ACKが必須です。production切断中にlocal MIDIを
+継続できるのは、そのACKで既にadmit済みのownerだけで、freshなno-Syndocal candidateを
+offline pathからadmitすることはありません。
 
-software checkpointでは`npm test`が**533 tests / 531 pass / 0 fail / 2 intentional
+software checkpointでは`npm test`が**534 tests / 532 pass / 0 fail / 2 intentional
 package-smoke skip**で完走し、local focusedは**40/40**、process fenceは**14/14**です。
-first-party warningは**0**です。独立Terra xHighの最終安全監査はP0/P1なしのGOでした。
+first-party warningは**0**です。実装差分に対する独立Terra xHigh監査はP0/P1なしでした。
+受入境界の独立再監査ではP0なし、修正後fresh/cold auto-launch未受入をP1として維持しています。
 このmodeのphysical acceptanceは未主張です。残る証跡は、controlled DJ PCでの唯一の
 `CustomMIDI1`列挙とport、Rekordbox Learn/実出力（LoopHalf、HPF、ChannelFader、Cue/Stop）、
 Hookの`人生オーバー`一致とDeck 1 `1400 ms` fallback、F14 measured-loop response、F13の
@@ -124,13 +132,15 @@ Hook helloとopened-handle path/create-timeのread-only実検証が通過しま�
 `deliveryPolicy:not-applicable/local-only`、MIDI `CustomMIDI1` port 2 connected、pedal
 `listening`を返しました。これは起動証跡であり、F13/F14の物理ペダル受入はまだ未確認です。
 
-この観測を受け、自動起動だけはexact `Popen` PID/path/name/create-timeを固定15秒連続監視し、
-opened Windows process handleでもimage path/creation FILETIMEをremote write前に再検証するよう
-修正しました。exit、identity変化、照会不能、deadline超過はreplacement scanなしで
-fail-closedです。既存running Rekordboxはsettleなしの従来経路を維持します。Python focused
-**19/19**、injector/launcher/smoke **73/73**、first-party warning **0**、独立Terra xHigh
-adversarial reviewはP0/P1なしのGOです。現在のstable PID `49440`を保護するため、修正後の
-fresh auto-launchはまだ再実行しておらず、次回cold launch acceptanceとして明示的に残します。
+この観測を受け、common injection pathはlocal-test専用ではなく、自己起動したRekordboxの
+exact `Popen` PID/path/name/create-timeを固定15秒連続監視し、opened Windows process
+handleでもimage path/creation FILETIMEをremote write前に再検証するよう修正しました。
+exit、identity変化、照会不能、deadline超過はreplacement scanなしでfail-closedです。
+既存running Rekordboxはこのsettleを待たない従来経路を維持します。focused test evidenceは
+Python **19/19**、injector/launcher/smoke **73/73**、first-party warning **0**、独立Terra
+xHigh adversarial reviewはP0/P1なしです。ただしstable PID `49440`を保護したため、
+**この共通self-launch change後のfresh/cold auto-launchは未受入**です。既存running
+Rekordboxへの注入成功は、そのcold-launch acceptanceの代替証跡ではありません。
 
 Windows target security is bounded by the NTFS ACL inherited from the exact
 `C:\SyndocalShow` parent; the updater does not claim Unix mode bits as a Windows
