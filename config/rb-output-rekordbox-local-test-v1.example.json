@@ -1,0 +1,47 @@
+{
+  "schema": "rb-output-rekordbox-local-test-v1",
+  "enabled": true,
+  "pedal": {
+    "enabled": true,
+    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
+  },
+  "trackActivity": {
+    "ownerSelection": {
+      "mode": "titleContains",
+      "titleNeedle": "人生オーバー",
+      "deck1MetadataWaitMs": 1400
+    }
+  },
+  "midi": {
+    "enabled": true,
+    "device": "CustomMIDI1",
+    "port": 0,
+    "mappings": {
+      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
+      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
+      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
+      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
+    },
+    "deckChannels": { "1": 1, "2": 2 },
+    "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50 },
+    "releaseFade": {
+      "enabled": true,
+      "mapping": "releaseFade",
+      "target": "deck",
+      "startValue": 127,
+      "endValue": 0,
+      "durationMs": 1000,
+      "updateIntervalMs": 50,
+      "resetAfterStop": true,
+      "resetValue": 127,
+      "resetDelayMs": 0
+    },
+    "releaseMacro": {
+      "enabled": true,
+      "sequence": "filter-then-fade-then-stop",
+      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
+      "resetAfterStop": true,
+      "resetDelayMs": 0
+    }
+  }
+}

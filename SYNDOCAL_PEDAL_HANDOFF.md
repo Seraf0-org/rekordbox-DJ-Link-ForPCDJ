@@ -2,13 +2,14 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
-## 2026-08-28 current v1.1.11 any-deck strict show-sync v3
+## 2026-08-30 current product source 1.1.12 / v1.1.11 production any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.11`です。v1.1.11のinstaller、tag、public release、または
-hardware acceptanceはこの文書で主張しません。current/next operator routeはtracked
+product source versionは`1.1.12`です。v1.1.12のinstaller、tag、public release、または
+hardware acceptanceはこの文書で主張しません。production schema、external config、
+CustomMIDI1 CSVは引き続きv1.1.11です。current/next operator routeはtracked
 `config/dj-agent-v1.1.11.example.json`と
 `server/public/setup/CustomMIDI1-Syndocal-v1.1.11.csv`を使います。exact
 `start-all.bat --init-config`は存在しない場合だけ
@@ -22,6 +23,73 @@ v1.1.10 schemaと32〜256-byte whitespace-free tokenだけを受理し、token�
 v1.1.11 token-free templateへ移して、sourceを変更せず、targetを排他的に作成します。
 作成後はcurrent strict preflightだけを実行し、次のPowerShell assignmentを表示して
 runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor pathを削除します。
+
+## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
+
+これはSyndocal handoffを行わず、既存のHook/Rekordbox candidate、MIDI、pedal、routerを
+DJ PC単体で確認するための明示的なtest-only modeです。productionのv1.1.11 schema/config/CSV
+とは別の`rb-output-rekordbox-local-test-v1` discriminatorを使い、固定外部JSON
+`C:\SyndocalShow\rb-output-rekordbox-local-test-v1.json`だけを読みます。
+`DJ_AGENT_CONFIG_PATH`、token、NIC、Syndocal networkは使いません。server/UIは
+`http://127.0.0.1:8787`のloopbackだけにbindし、status/action deliveryは
+`not-applicable/local-only`として表示します。
+
+管理者はcontrolled Windows DJ PCのcheckout rootで、次の順に一度だけ実行します。
+
+```powershell
+.\start-all.bat --init-rekordbox-local-test
+.\start-all.bat --preflight-rekordbox-local-test
+.\start-all.bat --rekordbox-local-test
+```
+
+`--init-rekordbox-local-test`は固定targetが存在しない場合だけ作成します。作成前に
+MIDI outputをauto-enumerateし、名前がexactに`CustomMIDI1`であるentryが`0..4096`の整数portと
+ともに**ちょうど1件**あることを要求し、その現在portをJSONへ保存します。portの推測、
+複数件の選択、既存targetの上書きは行いません。targetにはcurrent userだけの
+restrictive Windows ACLも必要です。`--preflight-rekordbox-local-test`は同じ
+`CustomMIDI1`を再列挙し、保存済みname+portと唯一のcurrent entryの完全一致を確認します。
+このpreflightはbuild、server、Rekordbox、Hook、MIDI send、pedal actionを開始しません。
+
+`--rekordbox-local-test`はpreflight後にHookをrebuild/provenance-checkし、同じmodeのsource
+serverだけをrestartし、supported RekordboxへHookをinjectしてloopback UIを開きます。
+source-process fenceは全portとpre-listen状態を対象に、起動前、許可されたsame-mode停止後、
+spawn直前、およびnew childがlistenerを所有した後からsuccess返却前まで再検査します。
+productionなど反対modeはPID/modeを表示してfail-closedとし、自動停止・置換しません。
+予期しないsame-modeもfail-closedで、失敗時に終了するのは今回spawnしたchildだけです。
+禁止されたenvironment overrideが1つでもある場合もfail-closedです。
+
+local ownerは、currentでfreshかつactually playing、かつexactなadmitted deck、deckId、
+playSessionId、frozen identityが揃った場合だけ成立します。selectorはNFC/case-sensitive
+`titleContains`の`人生オーバー`です。不一致時はfresh/playing Deck 1だけが`1400 ms`
+後のbounded fallback候補になります。stale、stopped、foreign、replacement、identity不足
+はMIDIを動かしません。F14はlocal LoopHalf、F13はFilter HPF（CC16、64→127、1000ms）→
+ChannelFader fade（CC17、127→0、1000ms）→Cue/Stop Note37 exactly onceの順で、Stop後に
+HPF 64/Fader 127へresetします。F13は各phaseでfrozen local ownerを再検証し、途中で
+replacement、stop、stale、foreign sessionになった場合は残りのfade/Stop/resetをcancelし、
+旧session向け命令を新しい曲へ送信しません。Timeline/Stage 2および`DJ_TIMELINE_*`は
+このmodeでは存在せず、F15を含むtimeline actionは送信しません。
+
+このmodeのlocal actionにはSyndocal ACKがなく、deliveryは`not-applicable/local-only`です。
+通常の引数なし`start-all.bat`は変更されず、productionではfresh candidateをadmitする前に
+terminal `accepted`/`duplicate`の`DJ_TRACK_ACTIVE` ACKが必須です。production切断中に
+local MIDIを継続できるのは、そのACKで既にadmit済みのownerだけで、freshなno-Syndocal
+candidateをoffline pathからadmitすることはありません。
+
+software checkpointでは`npm test`が**533 tests / 531 pass / 0 fail / 2 intentional
+package-smoke skip**で完走し、local focusedは**40/40**、process fenceは**14/14**です。
+first-party warningは**0**です。独立Terra xHighの最終安全監査はP0/P1なしのGOでした。
+このmodeのphysical acceptanceは未主張です。残る証跡は、controlled DJ PCでの唯一の
+`CustomMIDI1`列挙とport、Rekordbox Learn/実出力（LoopHalf、HPF、ChannelFader、Cue/Stop）、
+Hookの`人生オーバー`一致とDeck 1 `1400 ms` fallback、F14 measured-loop response、F13の
+timing/order/reset、stale/foreign ownerのblock、loopback statusの
+`not-applicable/local-only`表示、および通常productionのterminal ACK・切断/再接続です。
+
+checkpoint時のworkspace inventoryでは、ignored `C:\Users\kouty\Desktop\rb-output\dist`
+に2026-08-25生成の旧v1.1.3 artifactが**277,382,202 bytes（264.53 MiB）**残っています。
+現行checkoutには、このexact target setを対象にしたtracked cleanup harnessのfocused safety
+testと独立adversarial reviewが揃っていないため、本checkpointでは削除していません。
+この旧artifact cleanupはblocked remaining workとして保持し、現在のlocal-test sourceや
+実機受入証跡として扱いません。
 
 Windows target security is bounded by the NTFS ACL inherited from the exact
 `C:\SyndocalShow` parent; the updater does not claim Unix mode bits as a Windows
@@ -107,9 +175,9 @@ focused helper + smokeは**67/67** pass。これはsource-onlyであり、対象
 再配備して点滅停止・waveform復帰を観測するまでhardware fixを主張しない。Deck 2の
 大きなseek戻りは採取時に実測loopがONで、そのloop範囲のwrap自体は正常だった。
 
-v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。v1.1.11
-controlled-source changeはその旧境界を基礎にした現在のcontrolled-source
-trancheです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
+v1.1.7 any-deck境界はhistorical/supersededなレビュー済み境界です。product source
+1.1.12のcontrolled-source changeはその旧境界を基礎にした現在のtrancheで、production
+schema/config/CSVはv1.1.11のままです。本書はinstaller、tag、public release、対象DJ PCへの配備、または
 physical HW-4 12項目の受入を主張しません。
 
 exact mappingに一致した**任意の実再生Rekordbox deck**がshow-control candidateです。
@@ -225,7 +293,7 @@ authorizes its handoff.
 
 ### 2026-08-28 CURRENT live-state coherence and broadcast checkpoint
 
-The current v1.1.11 source-only live-state fix is based on branch
+The 2026-08-28 v1.1.11 production source-only live-state fix is based on branch
 `beta-v1.1.2`, pre-commit HEAD/upstream
 `4e26da201fef2ff204c28c7041b368e7283faebe`. The previous runtime could make
 Pause/Play flicker, make an active loop alternate between ACTIVE and SET, and
@@ -277,7 +345,7 @@ Sol監督がこの限定例外とTerra独立再監査を記録しています。
 `syndocal-envelope-v1`は当時の設定、Setup、build identity、runtimeから退役させ、
 指定時に拒否していました。全frameは当時
 `{v:2,type,agentId,sessionId,sequence,eventId,payload}`の7フィールド固定でした。
-現行authorityは本書冒頭のv1.1.11 any-deck/v3だけです。
+現行production authorityは本書冒頭のproduct source 1.1.12 / v1.1.11 any-deck/v3だけです。
 
 この過去のclean breakは、再生位置/BPMが欠落したACTIVE、ペダル意図から合成したloop、
 任意の`running`によるペダル所有権移行を廃止していました。ACTIVEはexact master deck、
@@ -317,7 +385,7 @@ runtime event contractを現行環境へ設定してはいけません。
 
 当時の未公開v1.1.4 source-acceptance案にはcheckout外JSON、NIC、one-time token、
 `syndocal-envelope-v2`、`CustomMIDI1`の照合が含まれていました。この旧設定を現在の
-DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のv1.1.11 any-deck/v3 authorityと、
+DJ PCへ適用してはいけません。現行のlauncher/設定は本書冒頭のproduct source 1.1.12 / v1.1.11 any-deck/v3 authorityと、
 READMEの独立したcurrent source acceptance節だけに従います。
 
 release tagはrepository ruleset `21434391`（`Immutable release tags v*`）で
@@ -581,7 +649,7 @@ branch/commitは削除していない。
 この見出しから次のCURRENT見出し直前までのstrict-v2 runbookは過去の設計証拠であり、
 **実行・設定コピー禁止**です。現在形・命令形で残る記述も当時の契約を正確に保存するための
 引用範囲で、現行DJ PC、launcher、JSON、MIDI Learn、F13/F14、またはSyndocalへ適用しては
-いけません。現行authorityは本書冒頭と次節以降のv1.1.11 any-deck strict-v3だけです。
+いけません。現行production authorityは本書冒頭と次節以降のproduct source 1.1.12 / v1.1.11 any-deck strict-v3だけです。
 この履歴範囲にはcurrent operator linkを置きません。
 
 peer側の権威wireは`syndocal-envelope-v2`のみです。`/dj-link`専用WebSocketで、
@@ -601,7 +669,7 @@ durable physical eventId台帳を消費せず、再接続時にはreplayしま�
 新しいTRACK_SYNCを待ち、旧socket/sessionはfenceします。ACTIVE/LOOP/RELEASE等の
 physical eventはACK対象です。
 
-## CURRENT v1.1.11 / strict-v3 接続と状態同期
+## CURRENT product source 1.1.12 / production v1.1.11 strict-v3 接続と状態同期
 
 WebSocket接続後、クライアントは順に`DJ_AGENT_HELLO`、`DJ_STATE_SYNC`、
 `DJ_TIMELINE_STATE_REQUEST`を送信します。再接続・再起動後も同じ順序で、
@@ -674,15 +742,17 @@ retired epoch台帳は64件で容量ラッチしてfail-closed（evict/reopenな
 ACTIVEも未admittedのままvisible/actionableです。
 Web Agentの`authorityConsistency`が不一致を`SYNC REQUIRED`として表示しますが、Web側の
 operator return操作をこの相関だけで自動実行しません。明示的なreturn操作はSyndocal側の責務です。
-Syndocal handoffを有効にした初期接続中、接続後snapshot待ち、切断中、再接続
-直後でも、Stage 1のF13/F14は既存のローカルRekordbox MIDI操作を継続します
-（F15はStage 1では従来どおりinactiveです）。この間のネットワーク側effectは
-pendingまたはfailedとして記録し、snapshot待ちを理由にローカル操作を止めません。
+Syndocal handoffを有効にした構成で初期接続中、接続後snapshot待ち、切断中、再接続
+直後でも、Stage 1のF13/F14が既存のローカルRekordbox MIDI操作を継続できるのは、
+terminal `accepted`/`duplicate`の`DJ_TRACK_ACTIVE` ACKで既にadmit済みのownerだけです。
+fresh candidateはACK前にはadmitされず、切断中のoffline pathから新規admitされません。
+この間のネットワーク側effectはpendingまたはfailedとして記録し、snapshot待ちを理由に
+既にadmit済みのlocal操作だけを止めません。
 Stage 2のtimeline操作だけは接続済みかつ権威snapshot確定時までfail-closedです。
 
-## CURRENT v1.1.11 / Stage 1: Rekordbox操作とhandoff
+## CURRENT product source 1.1.12 / production v1.1.11 Stage 1: Rekordbox操作とhandoff
 
-v1.1.11 controlled sourceは`releaseMacro.enabled:true`かつ
+product source 1.1.12のv1.1.11 production contractは`releaseMacro.enabled:true`かつ
 `sequence:"filter-then-fade-then-stop"`だけを受理します。Stage 1のF13はadmitted
 owner deckのFilter HPF（CC16、64→127、1000ms、50ms間隔）を同期開始し、同じ初期edgeで
 相関済み`DJ_RELEASE`を一度だけrouteします。ReleaseはFilter/fade/Stop/resetなどの
@@ -716,9 +786,10 @@ authority、delivery、play-session、shutdown generation、public action emissi
 だけを所有します。routerはauthority、delivery、session fence、public emission、shutdownを
 保持し、Stage 2 timeline-controlの意味は変更しません。
 
-## CURRENT v1.1.11 / Stage 2: absolute loop toggle、F14 LOOP_HALF、F15 +4
+## CURRENT product source 1.1.12 / production v1.1.11 Stage 2: absolute loop toggle、F14 LOOP_HALF、F15 +4
 
-`running`後のtimeline-controlは現行v1.1.11の別境界です。すべてACK対象で、Stage 2では
+`running`後のtimeline-controlはproduct source 1.1.12の現行v1.1.11 production contractの
+別境界です。すべてACK対象で、Stage 2では
 Rekordbox MIDIを一切呼びません。Stage 2の物理受入はStage 1のRelease実機証跡とは別で、
 現時点では未受入です。
 
@@ -769,7 +840,7 @@ candidateは未admittedのままvisible/actionableです。旧
 `POST /api/dj-agent/actions/return-to-dj-control` routeとconfirmation bodyは
 削除され、存在しないため404です。
 
-## CURRENT v1.1.11 / v3 eventId・ACK・順序
+## CURRENT product source 1.1.12 / production v1.1.11 v3 eventId・ACK・順序
 
 すべての送信eventに一意eventIdと単調増加sequenceを付けます。受信側は
 eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次の7フィールド固定です。
@@ -791,7 +862,8 @@ eventIdで冪等処理し、同じIDを二重適用しません。v3 ACKは次�
 拒否しwarningにします。
 
 送信直後は`pending`であり、`ok:true`ではありません。`retrying`と`disconnected`は
-再接続/replay待ちのnon-terminal状態ですが、current v1.1.11でこの境界を越えられるのは
+再接続/replay待ちのnon-terminal状態ですが、current product source 1.1.12のv1.1.11
+production contractでこの境界を越えられるのは
 相関済み`DJ_RELEASE`だけです。他のphysical eventはsocket teardown時点でterminal
 `send-failed`となり、replayしません。最終deliveryは`acknowledged`、`rejected`、
 `timed-out`、`send-failed`のいずれかです。UI/APIはpending・success・failureを同じ

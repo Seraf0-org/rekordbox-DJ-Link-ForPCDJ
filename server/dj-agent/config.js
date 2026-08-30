@@ -126,31 +126,15 @@ function hasExactValues(value, expected) {
   );
 }
 
-// The controlled source launcher accepts exactly one show schema.  Keep this
-// validator separate from the permissive default-off config loader: its input
-// is the raw external show file and it never returns that file or its token.
-function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
-  if (!hasExactKeys(value, ["version", "enabled", "syndocal", "pedal", "midi", "trackActivity"])) return false;
-  if (value.version !== "1.1.11" || value.enabled !== true) return false;
+const REKORDBOX_LOCAL_TEST_SCHEMA = "rb-output-rekordbox-local-test-v1";
+const REKORDBOX_LOCAL_TEST_MODE = "rekordbox-local-test";
+const REKORDBOX_LOCAL_TEST_SAFETY_LABEL = "REKORDBOX LOCAL TEST / NO SYNDOCAL";
+const REKORDBOX_LOCAL_TEST_CONFIG_PATH = String.raw`C:\SyndocalShow\rb-output-rekordbox-local-test-v1.json`;
 
-  const syndocal = value.syndocal;
-  if (!hasExactKeys(syndocal, ["enabled", "host", "port", "path", "nic", "token", "adapter", "heartbeatMs"])) return false;
-  if (
-    syndocal.enabled !== true ||
-    syndocal.host !== "192.168.50.1" ||
-    syndocal.port !== 9100 ||
-    syndocal.path !== "/dj-link" ||
-    syndocal.nic !== "192.168.50.2" ||
-    syndocal.adapter !== "syndocal-envelope-v3" ||
-    syndocal.heartbeatMs !== 5000 ||
-    typeof syndocal.token !== "string"
-  ) return false;
-  if (syndocal.token === "<SYNDOCAL_ONE_TIME_TOKEN>") {
-    if (!allowTokenPlaceholder) return false;
-  } else if (!validToken(syndocal.token)) {
-    return false;
-  }
-
+// The controlled source launcher accepts exactly one production schema. Keep
+// the physical-control checks shared with the explicit local test schema
+// without making production permissive.
+function validatePhysicalControlConfig(value) {
   const pedal = value.pedal;
   if (!hasExactKeys(pedal, ["enabled", "bindings"]) || pedal.enabled !== true) return false;
   if (!hasExactValues(pedal.bindings, { release: "F13", loopHalf: "F14", filterClose: "F15" })) return false;
@@ -190,6 +174,62 @@ function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder
   if (midi.releaseMacro.enabled !== true || midi.releaseMacro.sequence !== "filter-then-fade-then-stop") return false;
   if (!hasExactValues(midi.releaseMacro.filter, { ...filter, resetValue: 64 })) return false;
   return midi.releaseMacro.resetAfterStop === true && midi.releaseMacro.resetDelayMs === 0;
+}
+
+function validateStrictShowConfig(
+  value,
+  {
+    discriminatorKey,
+    discriminatorValue,
+    host,
+    nic,
+    tokenPlaceholder,
+    allowTokenPlaceholder = false,
+  } = {},
+) {
+  if (!hasExactKeys(value, [discriminatorKey, "enabled", "syndocal", "pedal", "midi", "trackActivity"])) return false;
+  if (value[discriminatorKey] !== discriminatorValue || value.enabled !== true) return false;
+
+  const syndocal = value.syndocal;
+  if (!hasExactKeys(syndocal, ["enabled", "host", "port", "path", "nic", "token", "adapter", "heartbeatMs"])) return false;
+  if (
+    syndocal.enabled !== true ||
+    syndocal.host !== host ||
+    syndocal.port !== 9100 ||
+    syndocal.path !== "/dj-link" ||
+    syndocal.nic !== nic ||
+    syndocal.adapter !== "syndocal-envelope-v3" ||
+    syndocal.heartbeatMs !== 5000 ||
+    typeof syndocal.token !== "string"
+  ) return false;
+  if (syndocal.token === tokenPlaceholder) {
+    if (!allowTokenPlaceholder) return false;
+  } else if (!validToken(syndocal.token)) {
+    return false;
+  }
+
+  return validatePhysicalControlConfig(value);
+}
+
+// The production validator remains an exact v1.1.11 byte-contract gate.
+function validateFilterThenFadeThenStopShowConfig(value, { allowTokenPlaceholder = false } = {}) {
+  return validateStrictShowConfig(value, {
+    discriminatorKey: "version",
+    discriminatorValue: "1.1.11",
+    host: "192.168.50.1",
+    nic: "192.168.50.2",
+    tokenPlaceholder: "<SYNDOCAL_ONE_TIME_TOKEN>",
+    allowTokenPlaceholder,
+  });
+}
+
+// This separate discriminator is never accepted by the production validator.
+// Its input deliberately has no Syndocal/token/NIC section; runtime supplies a
+// disabled client so the local test can exercise only Rekordbox + MIDI + pedal.
+function validateRekordboxLocalTestConfig(value) {
+  if (!hasExactKeys(value, ["schema", "enabled", "pedal", "midi", "trackActivity"])) return false;
+  if (value.schema !== REKORDBOX_LOCAL_TEST_SCHEMA || value.enabled !== true) return false;
+  return validatePhysicalControlConfig(value);
 }
 
 function normalizeDeckChannels(value) {
@@ -242,10 +282,49 @@ const RUNTIME_SHOW_OVERRIDE_KEYS = Object.freeze([
   "MIDI_DECK_CHANNELS",
 ]);
 
+const REKORDBOX_LOCAL_TEST_FORBIDDEN_ENV_KEYS = Object.freeze([
+  ...RUNTIME_SHOW_OVERRIDE_KEYS,
+  "DJ_AGENT_CONFIG_PATH",
+  "PORT",
+  "RB_OUTPUT_HOST",
+  "RB_OUTPUT_SETUP_MAPPING_PATH",
+  "REKORDBOX_EXE_PATH",
+  // The full-runtime test path must use the shipped Hook, Rekordbox polling,
+  // Python lookup, and history/tempo behavior. Reject every runtime selector
+  // that could weaken or redirect that path instead of silently ignoring it.
+  "HOOK_UDP_ENABLED",
+  "HOOK_UDP_PORT",
+  "REKORDBOX_POLL_MS",
+  "PYTHON_BIN",
+  "REKORDBOX_BRIDGE_SCRIPT",
+  "REKORDBOX_CONTENT_LOOKUP_SCRIPT",
+  "REKORDBOX_DB_PATH",
+  "REKORDBOX_DB_DIR",
+  "REKORDBOX_DB_KEY",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONIOENCODING",
+  "PYTHONUTF8",
+  "ABLETON_LINK_ENABLED",
+  "ABLETON_LINK_MODULE",
+  "ABLETON_LINK_INITIAL_TEMPO",
+  "HISTORY_OFFSET_SECONDS",
+  "NODE_OPTIONS",
+  "RB_OUTPUT_REKORDBOX_LOCAL_TEST_LIVE",
+]);
+
+const REKORDBOX_LOCAL_TEST_FORBIDDEN_ENV_KEY_SET = new Set(
+  REKORDBOX_LOCAL_TEST_FORBIDDEN_ENV_KEYS.map((key) => key.toUpperCase()),
+);
+
 function hasRuntimeShowOverride(env) {
   return RUNTIME_SHOW_OVERRIDE_KEYS.some((key) => (
     Object.hasOwn(env, key) && env[key] != null && String(env[key]).trim() !== ""
   ));
+}
+
+function hasRekordboxLocalTestForbiddenEnv(env = process.env) {
+  return Object.keys(env || {}).some((key) => REKORDBOX_LOCAL_TEST_FORBIDDEN_ENV_KEY_SET.has(key.toUpperCase()));
 }
 
 function disabledDjAgentConfig() {
@@ -362,11 +441,46 @@ function strictShowConfig(source) {
   };
 }
 
+function rekordboxLocalTestConfig(source) {
+  const config = strictShowConfig({
+    ...source,
+    syndocal: {
+      enabled: false,
+      host: "",
+      port: 9100,
+      path: "/dj-link",
+      nic: "",
+      token: "",
+      adapter: "syndocal-envelope-v3",
+      heartbeatMs: 5000,
+    },
+  });
+  return {
+    ...config,
+    syndocal: {
+      ...config.syndocal,
+      enabled: false,
+      host: "",
+      nic: "",
+      token: "",
+    },
+    mode: REKORDBOX_LOCAL_TEST_MODE,
+    testOnly: true,
+    safetyLabel: REKORDBOX_LOCAL_TEST_SAFETY_LABEL,
+  };
+}
+
 function realpath(fsApi, target) {
   const native = fsApi.realpathSync && fsApi.realpathSync.native;
   if (typeof native === "function") return native(target);
   if (typeof fsApi.realpathSync === "function") return fsApi.realpathSync(target);
   return path.resolve(target);
+}
+
+function windowsPathEqualsCaseInsensitive(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (!path.win32.isAbsolute(left) || !path.win32.isAbsolute(right)) return false;
+  return path.win32.normalize(left).toLowerCase() === path.win32.normalize(right).toLowerCase();
 }
 
 function isWithin(parent, candidate) {
@@ -413,16 +527,103 @@ function loadDjAgentConfig({ env = process.env, fsApi = fs, repositoryRoot = REP
   return strictShowConfig(fileResult.config);
 }
 
+function disabledRekordboxLocalTestConfig(warning = REKORDBOX_LOCAL_TEST_SAFETY_LABEL) {
+  return {
+    ...disabledDjAgentConfig(),
+    warning,
+    mode: REKORDBOX_LOCAL_TEST_MODE,
+    testOnly: true,
+    safetyLabel: REKORDBOX_LOCAL_TEST_SAFETY_LABEL,
+  };
+}
+
+function loadRekordboxLocalTestConfig({
+  fsApi = fs,
+  repositoryRoot = REPOSITORY_ROOT,
+  configPath = REKORDBOX_LOCAL_TEST_CONFIG_PATH,
+  env = process.env,
+  platform = process.platform,
+  securityApi = null,
+} = {}) {
+  // The test mode has no environment-selected source or field overrides. Its
+  // fixed external path is selected only by the explicit server/launcher mode.
+  if (hasRekordboxLocalTestForbiddenEnv(env)) {
+    return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: forbidden environment override");
+  }
+
+  const originalRequestedPath = typeof configPath === "string" ? configPath : "";
+  const requestedPath = originalRequestedPath.trim();
+  const isWindowsFixedPathRequest = platform === "win32" &&
+    windowsPathEqualsCaseInsensitive(requestedPath, REKORDBOX_LOCAL_TEST_CONFIG_PATH);
+  let externalPath;
+
+  if (isWindowsFixedPathRequest) {
+    // The server's live Windows mode may use only the literal operator path.
+    // Keep this spelling check ahead of every realpath operation so an alias
+    // cannot enter the fixed-path security path as an injected parser seam.
+    if (originalRequestedPath !== REKORDBOX_LOCAL_TEST_CONFIG_PATH) {
+      return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: exact fixed config path spelling required");
+    }
+
+    let verifier;
+    try {
+      verifier = securityApi || require("./rekordboxLocalTestAcl");
+      if (typeof verifier.fixedPathHasNoReparsePoints !== "function" ||
+        !verifier.fixedPathHasNoReparsePoints(originalRequestedPath, { fsApi })) {
+        return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: fixed config path topology could not be verified");
+      }
+      if (typeof verifier.verifyRekordboxLocalTestAcl !== "function" ||
+        !verifier.verifyRekordboxLocalTestAcl(originalRequestedPath)) {
+        return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: restrictive config ACL required");
+      }
+    } catch {
+      return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: fixed config path security could not be verified");
+    }
+
+    let resolvedPath;
+    try {
+      resolvedPath = realpath(fsApi, originalRequestedPath);
+    } catch {
+      return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: fixed config path topology could not be verified");
+    }
+    if (!windowsPathEqualsCaseInsensitive(resolvedPath, originalRequestedPath)) {
+      return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: fixed config path topology changed");
+    }
+    externalPath = resolvedPath;
+  } else {
+    // Non-fixed paths are an injected parser/test seam only. The live server
+    // never supplies this argument, so keep that seam independent of the
+    // Windows fixed-path ACL and reparse-point gate above.
+    externalPath = resolveStrictExternalShowPath(requestedPath, fsApi, repositoryRoot);
+  }
+  if (!externalPath) {
+    return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: external config path required");
+  }
+
+  const fileResult = readConfigFile(externalPath, fsApi);
+  if (fileResult.warning || !validateRekordboxLocalTestConfig(fileResult.config)) {
+    return disabledRekordboxLocalTestConfig("DJ Agent Rekordbox local test config rejected: exact test schema required");
+  }
+  return rekordboxLocalTestConfig(fileResult.config);
+}
+
 module.exports = {
   PRODUCTION_OWNER_SELECTION_POLICY,
   STRICT_SHOW_CONFIG_DISABLED_REASON,
   RUNTIME_SHOW_OVERRIDE_KEYS,
+  REKORDBOX_LOCAL_TEST_FORBIDDEN_ENV_KEYS,
+  REKORDBOX_LOCAL_TEST_CONFIG_PATH,
+  REKORDBOX_LOCAL_TEST_MODE,
+  REKORDBOX_LOCAL_TEST_SAFETY_LABEL,
+  REKORDBOX_LOCAL_TEST_SCHEMA,
   REPOSITORY_ROOT,
   asBoolean,
   asNumber,
   disabledDjAgentConfig,
   hasRuntimeShowOverride,
+  hasRekordboxLocalTestForbiddenEnv,
   loadDjAgentConfig,
+  loadRekordboxLocalTestConfig,
   normalizeReleaseMacroSequence,
   resolveStrictExternalShowPath,
   normalizeDeckChannels,
@@ -431,5 +632,8 @@ module.exports = {
   parseJson,
   readConfigFile,
   strictShowConfig,
+  rekordboxLocalTestConfig,
+  disabledRekordboxLocalTestConfig,
   validateFilterThenFadeThenStopShowConfig,
+  validateRekordboxLocalTestConfig,
 };

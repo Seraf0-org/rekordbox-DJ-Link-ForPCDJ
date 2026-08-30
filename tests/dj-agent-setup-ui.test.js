@@ -125,6 +125,90 @@ test("Web Agent is diagnostic-only; operator return is owned by Syndocal", () =>
   assert.match(server, /stateSyncProvider: \(\) => \(djAgentRouter \? djAgentRouter\.getSyndocalStateSync\(\) : \{\}\)/);
 });
 
+test("local Agent status renders authority as not-applicable without connected/error state", () => {
+  const elementNames = [
+    "djAgentPanelEl", "djAgentSafetyBannerEl", "djAgentSyndocalStatusEl", "djAgentMidiStatusEl",
+    "djAgentModeEl", "djAgentOwnerRowEl", "djAgentOwnerEl", "djAgentCandidateStageEl",
+    "djAgentAuthorityConsistencyEl", "djAgentTimelineStateEl", "djAgentTimelineLoopEl",
+    "djAgentReleaseMacroEl", "djAgentLastEventEl", "djAgentLastTimelineActionEl",
+    "djAgentLastAckEl", "djAgentActionResultEl",
+  ];
+  const makeElement = () => {
+    const classes = new Map();
+    return {
+      textContent: "",
+      hidden: false,
+      classList: {
+        values: classes,
+        toggle(name, value) { classes.set(name, value === true); },
+      },
+    };
+  };
+  const context = Object.fromEntries(elementNames.map((name) => [name, makeElement()]));
+  const sourceStart = app.indexOf("function renderDjAgentStatus");
+  const sourceEnd = app.indexOf("function isLocalDjAgentHost");
+  const api = vm.runInNewContext(
+    `${app.slice(sourceStart, sourceEnd)}; ({ renderDjAgentStatus })`,
+    context,
+  );
+  api.renderDjAgentStatus({
+    djAgent: {
+      enabled: true,
+      testOnly: true,
+      localTestMode: true,
+      safetyLabel: "REKORDBOX LOCAL TEST / NO SYNDOCAL",
+      syndocal: { state: "connected", lastAckAt: "must-not-render" },
+      midi: { ok: false, message: "midi-selection-invalid" },
+      mode: "dj-control",
+      timelineState: "running",
+      timelineLoopActive: true,
+      authorityConsistency: {
+        state: "not-applicable",
+        label: "NOT APPLICABLE / LOCAL-ONLY",
+      },
+    },
+  });
+  assert.equal(context.djAgentSyndocalStatusEl.textContent, "NOT APPLICABLE / LOCAL-ONLY");
+  assert.equal(context.djAgentSyndocalStatusEl.classList.values.get("connected"), false);
+  assert.equal(context.djAgentAuthorityConsistencyEl.textContent, "NOT APPLICABLE / LOCAL-ONLY");
+  assert.equal(context.djAgentAuthorityConsistencyEl.classList.values.get("connected"), false);
+  assert.equal(context.djAgentAuthorityConsistencyEl.classList.values.get("error"), false);
+  assert.equal(context.djAgentTimelineStateEl.textContent, "NOT APPLICABLE / LOCAL-ONLY");
+});
+
+test("local setup message prioritizes a failed MIDI gate and keeps the safety banner neutral", () => {
+  const sourceStart = app.indexOf("function getDjAgentSetupMessage");
+  const sourceEnd = app.indexOf("function renderDjAgentSetup(");
+  const api = vm.runInNewContext(
+    `${app.slice(sourceStart, sourceEnd)}; ({ getDjAgentSetupMessage })`,
+    {},
+  );
+  const failed = api.getDjAgentSetupMessage({
+    localOnly: true,
+    ok: true,
+    enabled: true,
+    testOnly: true,
+    readiness: {
+      ready: false,
+      gates: { midi: { state: "blocked", allowed: false, reason: "midi-selection-invalid" } },
+    },
+  });
+  assert.equal(failed.state, "error");
+  assert.match(failed.text, /REKORDBOX LOCAL TEST \/ NO SYNDOCAL/);
+  assert.match(failed.text, /MIDI readiness blocked/);
+  assert.match(failed.text, /midi-selection-invalid/);
+
+  const ready = api.getDjAgentSetupMessage({
+    localOnly: true,
+    ok: true,
+    enabled: true,
+    testOnly: true,
+    readiness: { ready: true, gates: { midi: { state: "ready", allowed: true } } },
+  });
+  assert.equal(ready.state, "");
+  assert.match(ready.text, /remote delivery is not applicable/);
+});
+
 test("setup reflects only an exact enumerated MIDI name+port pair and fails closed after refresh", () => {
   const controlsBlock = app.slice(app.indexOf("function renderDjAgentSetupControls"), app.indexOf("function updateDjAgentConfigPreviewFromDraft"));
   assert.match(controlsBlock, /placeholder\.value\s*=\s*""/);

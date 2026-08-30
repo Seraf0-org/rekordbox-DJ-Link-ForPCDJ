@@ -42,12 +42,14 @@ function createShowEventRouter({
   loopFallback = {},
   timerApi,
   now = () => Date.now(),
+  localTestMode = false,
 } = {}) {
   if (!detector || !syndocalClient || !midi || !pedal) {
     throw new TypeError("showEventRouter requires detector, syndocalClient, midi, and pedal");
   }
   const emitter = new EventEmitter();
   const releaseTimerApi = resolveTimerApi(timerApi);
+  const isLocalTestMode = localTestMode === true;
   const resetTimers = new Set();
   let currentSnapshot = {};
   let loopDivision = 0;
@@ -114,6 +116,12 @@ function createShowEventRouter({
   let activePlaySessionId = null;
   let admittedTrack = null;
   let admittedTrackSource = null;
+  // Local F13 owns a frozen track candidate for the whole two-second tail.
+  // A deck number alone is not enough: a replacement can reuse the same deck
+  // while changing its session or its frozen wire identity.  The fence is
+  // intentionally local-test-only; production keeps its existing
+  // Syndocal-delivery lifecycle.
+  let activeLocalReleaseFence = null;
   const releasedPlaySessions = new Set();
   // The first WS connection can arrive after Rekordbox has already emitted a
   // candidate. Reannounce only after the peer's fresh timeline snapshot, for
@@ -218,6 +226,78 @@ function createShowEventRouter({
     return lineage && identity ? { ...lineage, identity } : null;
   }
 
+  function currentFreshProductionCandidate() {
+    if (!isLocalTestMode || typeof detector.getCurrentProductionCandidate !== "function") {
+      return null;
+    }
+    let current;
+    try {
+      current = detector.getCurrentProductionCandidate();
+    } catch {
+      return null;
+    }
+    if (!current || current.fresh !== true || current.isPlaying !== true) {
+      return null;
+    }
+    return trackCandidate({
+      deck: current.deck,
+      deckId: current.deckId,
+      playSessionId: current.playSessionId,
+      ...(current.wireIdentity || {}),
+    });
+  }
+
+  function currentDetectedDeckCandidate(owner) {
+    if (
+      !isLocalTestMode ||
+      !owner ||
+      typeof detector.getState !== "function"
+    ) {
+      return null;
+    }
+    let detectorState;
+    try {
+      detectorState = detector.getState();
+    } catch {
+      return null;
+    }
+    const decks = detectorState?.decks;
+    const deckState = decks?.[owner.deck] || decks?.[String(owner.deck)];
+    if (!deckState || typeof deckState !== "object" || Array.isArray(deckState)) {
+      return null;
+    }
+    if (Object.hasOwn(deckState, "deckId") && deckState.deckId !== owner.deckId) {
+      return null;
+    }
+    let wireIdentity = deckState.wireIdentity;
+    if (!wireIdentity || typeof wireIdentity !== "object" || Array.isArray(wireIdentity)) {
+      const track = deckState.track;
+      if (owner.identity.startsWith("content:")) {
+        wireIdentity = typeof track?.contentId === "string" && track.contentId.length > 0
+          ? { contentId: track.contentId }
+          : null;
+      } else if (owner.identity.startsWith("text:")) {
+        wireIdentity = typeof track?.title === "string" && track.title.length > 0 &&
+          typeof track?.artist === "string" && track.artist.length > 0
+          ? { title: track.title, artist: track.artist }
+          : null;
+      }
+    }
+    return trackCandidate({
+      deck: owner.deck,
+      deckId: owner.deckId,
+      playSessionId: deckState.playSessionId,
+      ...(wireIdentity || {}),
+    });
+  }
+
+  function localAdmittedCandidateIsCurrent() {
+    if (!isLocalTestMode) {
+      return true;
+    }
+    return sameTrackCandidate(admittedTrack, currentFreshProductionCandidate());
+  }
+
   function sameTrackLineage(left, right) {
     return Boolean(
       left &&
@@ -232,6 +312,25 @@ function createShowEventRouter({
     return sameTrackLineage(left, right) && left.identity === right.identity;
   }
 
+  function cancelActiveLocalReleaseIfStale() {
+    if (!isLocalTestMode || !activeLocalReleaseFence) {
+      return false;
+    }
+    const fence = activeLocalReleaseFence;
+    if (fence.generation !== releaseMacroGeneration) {
+      return false;
+    }
+    if (typeof fence.isCurrent === "function" && fence.isCurrent()) {
+      return false;
+    }
+    const current = currentFreshProductionCandidate();
+    if (sameTrackCandidate(fence.owner, current)) {
+      return false;
+    }
+    fence.cancel("local-track-candidate-replaced", current);
+    return true;
+  }
+
   function admittedTrackTarget() {
     return admittedTrack
       ? {
@@ -242,15 +341,17 @@ function createShowEventRouter({
       : null;
   }
 
-  function admitTrack(event, delivery) {
+  function admitTrack(event, delivery, { local = false } = {}) {
     const candidate = trackCandidate(event?.payload);
-    const accepted = delivery?.state === "acknowledged" &&
-      ["accepted", "duplicate"].includes(delivery?.ack?.outcome);
+    const accepted = local
+      ? delivery?.localOnly === true && delivery?.state === "not-applicable" && delivery?.ok === true
+      : delivery?.state === "acknowledged" &&
+        ["accepted", "duplicate"].includes(delivery?.ack?.outcome);
     if (!candidate || !accepted || releasedPlaySessions.has(candidate.playSessionId)) {
       return false;
     }
     if (sameTrackCandidate(admittedTrack, candidate)) {
-      admittedTrackSource = "acknowledged-track-candidate";
+      admittedTrackSource = local ? "local-fresh-playing-candidate" : "acknowledged-track-candidate";
       return true;
     }
     if (admittedTrack && !releasedPlaySessions.has(admittedTrack.playSessionId)) {
@@ -260,7 +361,7 @@ function createShowEventRouter({
     }
     stage1LoopFallback.resetForSession();
     admittedTrack = candidate;
-    admittedTrackSource = "acknowledged-track-candidate";
+    admittedTrackSource = local ? "local-fresh-playing-candidate" : "acknowledged-track-candidate";
     activePlaySessionId = candidate.playSessionId;
     released = false;
     timelineSnapshotReady = false;
@@ -269,9 +370,9 @@ function createShowEventRouter({
     pendingHandoffEventId = null;
     timelinePedalOwner = "dj";
     // A measured loop can be present in the same snapshot as the candidate
-    // ACTIVE frame. It was intentionally held back until this terminal ACK
-    // established ownership, so flush that exact measured state now rather
-    // than waiting for Rekordbox to change its loop revision again.
+    // ACTIVE frame. Ownership is established here, so flush that exact
+    // measured state now rather than waiting for Rekordbox to change its
+    // loop revision again.
     detector.requestMeasuredLoopForSession?.(admittedTrackTarget());
     return true;
   }
@@ -366,14 +467,30 @@ function createShowEventRouter({
     });
   }
 
-  function routeEvent(event) {
-    const delivery = syndocalClient.sendEvent(event) || {
+  function localOnlyDelivery(type, eventId = null) {
+    return {
+      type,
+      eventId,
       sent: false,
-      ok: false,
-      state: "send-failed",
-      ackState: "send-failed",
-      reason: "client-send-returned-no-result",
+      ok: true,
+      ackRequired: false,
+      state: "not-applicable",
+      ackState: "not-applicable",
+      localOnly: true,
+      reason: "local-only",
     };
+  }
+
+  function routeEvent(event) {
+    const delivery = isLocalTestMode
+      ? localOnlyDelivery(event?.type || "", event?.eventId || null)
+      : syndocalClient.sendEvent(event) || {
+          sent: false,
+          ok: false,
+          state: "send-failed",
+          ackState: "send-failed",
+          reason: "client-send-returned-no-result",
+        };
     // Detector events already carry an eventId. Manual actions do not; the
     // client is the canonical allocator for those IDs, so normalize both
     // sides before storing/emitting the routed event.
@@ -584,12 +701,24 @@ function createShowEventRouter({
   }
 
   function onDetectorEvent(event) {
+    // A current-candidate update may arrive before the corresponding ACTIVE
+    // event is admitted. Cancel the old local F13 generation first so that an
+    // event handler, watchdog, or already-queued ramp callback cannot advance
+    // the old macro onto the replacement deck session.
+    cancelActiveLocalReleaseIfStale();
     if (!event || typeof event.type !== "string") return null;
     if (event.type === "DJ_TRACK_ACTIVE") {
       const candidate = trackCandidate(event.payload);
       if (!candidate || releasedPlaySessions.has(candidate.playSessionId)) return null;
       if (sameTrackLineage(admittedTrack, candidate) && !sameTrackCandidate(admittedTrack, candidate)) {
         return null;
+      }
+      if (isLocalTestMode) {
+        const current = currentFreshProductionCandidate();
+        if (!current || !sameTrackCandidate(current, candidate)) return null;
+        const routedEvent = routeEvent(event);
+        admitTrack(routedEvent, routedEvent.delivery, { local: true });
+        return routedEvent;
       }
       return routeEvent(event);
     }
@@ -602,6 +731,13 @@ function createShowEventRouter({
       const lineage = trackLineage(event.payload);
       if (!lineage || !sameTrackLineage(admittedTrack, lineage) || releasedPlaySessions.has(lineage.playSessionId)) return null;
       const outcome = stage1LoopFallback.observeMeasured(event);
+      if (isLocalTestMode) {
+        const measuredLength = event.payload?.active === true ? event.payload.lengthBeats : null;
+        const measuredProfile = [8, 4, 2, 1, 1 / 2, 1 / 4, 1 / 8, 1 / 16, 1 / 32, 1 / 64];
+        loopDivision = measuredLength != null && measuredProfile.includes(measuredLength)
+          ? measuredLength
+          : 0;
+      }
       if (outcome.accepted && outcome.state === "contradictory") {
         emitWarning("Stage 1 loop measurement contradicted the pending prediction; fallback suppressed", "rekordbox-hook");
       }
@@ -738,6 +874,10 @@ function createShowEventRouter({
   }
 
   function onTimelineState(state) {
+    if (isLocalTestMode) {
+      emitWarning("Timeline control is not applicable in Rekordbox local test", "local-test");
+      return;
+    }
     const incomingOperatorReturnRequestId = state?.operatorReturnRequestId ?? null;
     if (
       !state ||
@@ -816,6 +956,11 @@ function createShowEventRouter({
   }
 
   function onSyndocalStatus(status = {}) {
+    if (isLocalTestMode) {
+      lastSyndocalState = "disabled";
+      emitState();
+      return;
+    }
     const nextState = status.state || "unknown";
     const changed = nextState !== lastSyndocalState;
     lastSyndocalState = nextState;
@@ -951,18 +1096,21 @@ function createShowEventRouter({
   function onSnapshot(snapshot) {
     currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
     const result = detector.onSnapshot(currentSnapshot);
+    cancelActiveLocalReleaseIfStale();
     emitState();
     return result;
   }
 
   function onTrackLoaded(event) {
     const result = detector.onTrackLoaded(event);
+    cancelActiveLocalReleaseIfStale();
     emitState();
     return result;
   }
 
   function onMasterChange(event) {
     const result = detector.onMasterChange(event);
+    cancelActiveLocalReleaseIfStale();
     emitState();
     return result;
   }
@@ -1001,6 +1149,9 @@ function createShowEventRouter({
   }
 
   function triggerStage2Action(action) {
+    if (isLocalTestMode) {
+      return blockedAction(action, "timeline-disabled-in-rekordbox-local-test");
+    }
     if (mode === "handoff-pending") {
       return blockedAction(action, "handoff-pending");
     }
@@ -1069,6 +1220,9 @@ function createShowEventRouter({
     if (generation !== releaseMacroGeneration) {
       return null;
     }
+    if (activeLocalReleaseFence?.generation === generation) {
+      activeLocalReleaseFence = null;
+    }
     // The delivery object captured at the F13 edge is only a snapshot. The
     // Syndocal client can publish an ACK, rejection, or reconnect `retrying`
     // transition during the local two-second tail; always re-read the
@@ -1110,15 +1264,21 @@ function createShowEventRouter({
       ok: stopSent === true && !localFailure && delivery.ok === true,
       reason: localFailure || (stopSent !== true
         ? "local-midi-stop-failed"
-        : releaseMacroPhase === "failed"
-          ? releaseMacroReason
-          : delivery.state || null),
+          : releaseMacroPhase === "failed"
+            ? releaseMacroReason
+          : isLocalTestMode
+            ? null
+            : delivery.state || null),
     };
     return emitAction(result);
   }
 
   function startReleaseMacro(targetDeck) {
+    if (isLocalTestMode && !localAdmittedCandidateIsCurrent()) {
+      return blockedAction("release", "local-track-candidate-not-current");
+    }
     const generation = ++releaseMacroGeneration;
+    const releaseOwner = admittedTrack ? { ...admittedTrack } : null;
     releaseMacroActive = true;
     const target = releaseTarget(targetDeck);
     const macroFilter = releaseMacro?.filter || {};
@@ -1147,6 +1307,8 @@ function createShowEventRouter({
     let releaseDelivery = null;
     let releaseEventId = null;
     let finalResult = null;
+    let stopSent = false;
+    const macroTimers = new Set();
 
     const updatePending = (patch = {}) => {
       updateActiveReleaseAction({
@@ -1159,23 +1321,196 @@ function createShowEventRouter({
 
     const clearTimer = (timer) => {
       if (timer == null) return;
-      releaseTimerApi.clearTimeout(timer);
-      resetTimers.delete(timer);
+      try {
+        releaseTimerApi.clearTimeout(timer);
+      } finally {
+        macroTimers.delete(timer);
+        resetTimers.delete(timer);
+      }
     };
 
     const scheduleTimer = (callback, delayMs) => {
       let timer = null;
       timer = releaseTimerApi.setTimeout(() => {
+        macroTimers.delete(timer);
         resetTimers.delete(timer);
         if (generation !== releaseMacroGeneration) return;
         callback();
       }, delayMs);
+      macroTimers.add(timer);
       resetTimers.add(timer);
       return timer;
     };
 
+    const releaseOwnerIsCurrent = ({ allowPaused = false } = {}) => {
+      if (!isLocalTestMode) {
+        return true;
+      }
+      const fresh = currentFreshProductionCandidate();
+      if (fresh) {
+        return sameTrackCandidate(releaseOwner, fresh);
+      }
+      if (!allowPaused) {
+        return false;
+      }
+      return sameTrackCandidate(releaseOwner, currentDetectedDeckCandidate(releaseOwner));
+    };
+
+    const attemptReplacementCancellation = ({ method, reason, failureReason, activeKey }) => {
+      let status = {};
+      try {
+        status = midi.getStatus?.() || {};
+      } catch {
+        status = {};
+      }
+      const activeBeforeCancel = typeof status[activeKey] === "boolean"
+        ? status[activeKey]
+        : null;
+      const cancellation = {
+        state: "not-supported",
+        attempted: false,
+        activeBeforeCancel,
+        ok: null,
+      };
+      if (typeof midi[method] !== "function") {
+        if (activeBeforeCancel === true) {
+          cancellation.state = "failed";
+          cancellation.ok = false;
+          cancellation.reason = failureReason;
+          return { cancellation, failure: failureReason };
+        }
+        cancellation.state = activeBeforeCancel === false ? "not-active" : "not-supported";
+        return { cancellation, failure: null };
+      }
+      cancellation.attempted = true;
+      try {
+        const result = midi[method](reason);
+        cancellation.ok = result === true;
+        cancellation.state = result === true
+          ? "cancelled"
+          : activeBeforeCancel === true
+            ? "failed"
+            : "not-active";
+      } catch {
+        cancellation.ok = false;
+        cancellation.state = "failed";
+        cancellation.reason = failureReason;
+      }
+      const failure = cancellation.state === "failed" ? failureReason : null;
+      if (failure && !cancellation.reason) {
+        cancellation.reason = failure;
+      }
+      return { cancellation, failure };
+    };
+
+    let replacementCancelled = false;
+    const cancelForLocalOwnerChange = (reason = "local-track-candidate-replaced") => {
+      if (!isLocalTestMode || replacementCancelled || generation !== releaseMacroGeneration) {
+        return finalResult;
+      }
+      replacementCancelled = true;
+      // Invalidate the callback generation before touching either adapter so
+      // an already-queued callback cannot start the next phase or finalize.
+      releaseMacroGeneration += 1;
+      for (const timer of [...macroTimers]) {
+        try {
+          clearTimer(timer);
+        } catch {
+          // The generation fence still invalidates a timer whose host clear
+          // operation failed; continue so both MIDI ramps are cancelled.
+        }
+      }
+      filterBoundaryTimer = null;
+      fadeBoundaryTimer = null;
+
+      // Keep these cancellation attempts independent. A broken filter
+      // adapter must not leave the fade ramp running (or vice versa).
+      const filterCancellation = attemptReplacementCancellation({
+        method: "cancelFilterRamp",
+        reason,
+        failureReason: "release-filter-ramp-cancel-failed",
+        activeKey: "rampActive",
+      });
+      const fadeCancellation = attemptReplacementCancellation({
+        method: "cancelReleaseFade",
+        reason,
+        failureReason: "release-fade-cancel-failed",
+        activeKey: "releaseFadeActive",
+      });
+      filterRamp = { ...(filterRamp || {}), cancellation: filterCancellation.cancellation };
+      fadeRamp = { ...(fadeRamp || {}), cancellation: fadeCancellation.cancellation };
+
+      // The replacement supersedes the old local owner even when it arrived
+      // before routeReleaseAtStart. This lets the subsequent exact ACTIVE
+      // candidate be admitted without allowing the old tail to continue.
+      if (releaseOwner && sameTrackCandidate(admittedTrack, releaseOwner)) {
+        released = true;
+        fenceReleasedSession(releaseOwner.playSessionId);
+      }
+      lastReleaseReset = {
+        state: "cancelled",
+        ok: false,
+        mapping: "filter-and-releaseFade",
+        targetDeck: target.targetDeck,
+        filterValue: macroFilter.resetValue,
+        fadeValue: fadeRamp?.resetValue ?? releaseFade.resetValue,
+        delayMs: 0,
+        reason,
+      };
+      releaseMacroActive = false;
+      releaseMacroPhase = "failed";
+      releaseMacroReason = reason;
+      activeReleaseAction = null;
+      if (activeLocalReleaseFence?.generation === generation) {
+        activeLocalReleaseFence = null;
+      }
+      finalResult = emitAction({
+        ...(lastAction?.action === "release" ? lastAction : {}),
+        action: "release",
+        mode,
+        sequence: releaseMacroSequence,
+        phase: releaseMacroPhase,
+        target,
+        targetDeck: target.targetDeck,
+        targetChannel: target.targetChannel,
+        filterRamp,
+        fadeRamp,
+        reset: null,
+        releaseEventId,
+        delivery: releaseDelivery,
+        midiSent: stopSent === true,
+        ok: false,
+        pending: false,
+        localFailure: reason,
+        reason,
+        cancelled: true,
+        cancellationFailure: filterCancellation.failure || fadeCancellation.failure || null,
+      });
+      return finalResult;
+    };
+
+    const cancelIfLocalOwnerChanged = ({ allowPaused = false } = {}) => {
+      if (releaseOwnerIsCurrent({ allowPaused })) {
+        return false;
+      }
+      cancelForLocalOwnerChange();
+      return true;
+    };
+
+    if (isLocalTestMode) {
+      activeLocalReleaseFence = {
+        generation,
+        owner: releaseOwner,
+        cancel: cancelForLocalOwnerChange,
+        isCurrent: () => releaseOwnerIsCurrent({ allowPaused: stopSent === true }),
+      };
+    }
+
     const routeReleaseAtStart = () => {
       if (releaseRouted || generation !== releaseMacroGeneration) {
+        return releaseDelivery;
+      }
+      if (cancelIfLocalOwnerChanged()) {
         return releaseDelivery;
       }
       releaseRouted = true;
@@ -1235,6 +1570,9 @@ function createShowEventRouter({
     };
 
     const scheduleResetAfterStop = (stopSent, stopFailure = null) => {
+      if (cancelIfLocalOwnerChanged({ allowPaused: stopSent === true })) {
+        return finalResult;
+      }
       if (releaseMacro.resetAfterStop !== true) {
         return finalizeRelease({
           target,
@@ -1262,7 +1600,13 @@ function createShowEventRouter({
         delayMs,
       };
       scheduleTimer(() => {
+        if (cancelIfLocalOwnerChanged({ allowPaused: stopSent === true })) {
+          return;
+        }
         let filterSent = false;
+        if (cancelIfLocalOwnerChanged({ allowPaused: stopSent === true })) {
+          return;
+        }
         try {
           filterSent = midi.sendMapping("filter", {
             targetDeck: target.targetDeck,
@@ -1270,6 +1614,9 @@ function createShowEventRouter({
           }) === true;
         } catch {
           filterSent = false;
+        }
+        if (cancelIfLocalOwnerChanged({ allowPaused: stopSent === true })) {
+          return;
         }
         let fadeReset;
         try {
@@ -1279,6 +1626,9 @@ function createShowEventRouter({
           }) || { ok: false, reason: "release-fade-reset-unavailable" };
         } catch (error) {
           fadeReset = { ok: false, reason: error?.message || "release-fade-reset-failed" };
+        }
+        if (cancelIfLocalOwnerChanged({ allowPaused: stopSent === true })) {
+          return;
         }
         const reset = { filter: filterSent, fade: fadeReset };
         const resetFailure = filterSent && fadeReset.ok === true
@@ -1311,6 +1661,7 @@ function createShowEventRouter({
 
     const finishStop = () => {
       if (stopFinished || generation !== releaseMacroGeneration) return finalResult;
+      if (cancelIfLocalOwnerChanged()) return finalResult;
       stopFinished = true;
       if (fadeBoundaryTimer != null) {
         clearTimer(fadeBoundaryTimer);
@@ -1383,9 +1734,10 @@ function createShowEventRouter({
       filterRamp = { ...(filterRamp || {}), cancellation: filterCancellation.cancellation };
       fadeRamp = { ...(fadeRamp || {}), cancellation: fadeCancellation.cancellation };
       updatePending({ filterRamp, fadeRamp });
+      if (cancelIfLocalOwnerChanged()) return finalResult;
       const cancellationFailure = filterCancellation.failure || fadeCancellation.failure || null;
       setReleaseMacroPhase("stopping");
-      let stopSent = false;
+      if (cancelIfLocalOwnerChanged()) return finalResult;
       try {
         stopSent = midi.sendMapping("stop", { targetDeck: target.targetDeck }) === true;
       } catch {
@@ -1412,12 +1764,14 @@ function createShowEventRouter({
       ) {
         return finalResult;
       }
+      if (cancelIfLocalOwnerChanged()) return finalResult;
       fadeBoundaryReached = true;
       if (filterBoundaryTimer != null) {
         clearTimer(filterBoundaryTimer);
         filterBoundaryTimer = null;
       }
       setReleaseMacroPhase("fade-ramp");
+      if (cancelIfLocalOwnerChanged()) return finalResult;
       try {
         fadeRamp = midi.startReleaseFade?.({
           targetDeck: target.targetDeck,
@@ -1445,6 +1799,9 @@ function createShowEventRouter({
         target.fadeChannel = fadeRamp.targetChannel ?? target.fadeChannel;
       }
       updatePending({ fadeRamp });
+      if (generation !== releaseMacroGeneration || !activeReleaseAction) {
+        return finalResult;
+      }
       if (!stopFinished) {
         fadeBoundaryTimer = scheduleTimer(onFadeBoundary, fadeWatchdogDelayMs);
       }
@@ -1484,6 +1841,9 @@ function createShowEventRouter({
     // the same F13 edge. Callback implementations are fenced until the
     // release event is routed, so a synchronous test/adapter callback cannot
     // reorder Fade/Stop ahead of DJ_RELEASE.
+    if (cancelIfLocalOwnerChanged()) {
+      return finalResult;
+    }
     try {
       filterRamp = midi.startFilterRamp?.({
         targetDeck: target.targetDeck,
@@ -1512,6 +1872,9 @@ function createShowEventRouter({
     }
     updatePending({ filterRamp, plannedFilterDurationMs: filterDurationMs });
     routeReleaseAtStart();
+    if (generation !== releaseMacroGeneration || !activeReleaseAction) {
+      return finalResult;
+    }
     if (filterDone) {
       startFade();
     } else {
@@ -1530,6 +1893,17 @@ function createShowEventRouter({
 
   function triggerAction(action) {
     const normalized = String(action || "").trim().toLowerCase();
+    cancelActiveLocalReleaseIfStale();
+    if (isLocalTestMode && [
+      "beat-jump-plus-4",
+      "timeline-current-loop-toggle",
+      "timeline-loop-half",
+      "filter-close",
+      "filter_close",
+      "filter",
+    ].includes(normalized)) {
+      return triggerStage2Action(normalized);
+    }
     if (mode === "timeline-control") {
       if (normalized === "release") {
         return triggerStage2Action("timeline-current-loop-toggle");
@@ -1552,6 +1926,9 @@ function createShowEventRouter({
       return blockedAction(normalized, "handoff-pending");
     }
     if (normalized === "loop-half" || normalized === "loop_half" || normalized === "loophalf") {
+      if (isLocalTestMode && !localAdmittedCandidateIsCurrent()) {
+        return blockedAction("loop-half", "local-track-candidate-not-current");
+      }
       const owner = admittedTrackTarget();
       if (!owner) {
         return blockedAction("loop-half", "no-admitted-track-candidate");
@@ -1610,6 +1987,9 @@ function createShowEventRouter({
     if (normalized === "release") {
       // Release is a distinct physical intent. It cancels only the pending
       // Stage 1 prediction and never reuses its timer or payload shape.
+      if (isLocalTestMode && !localAdmittedCandidateIsCurrent()) {
+        return blockedAction("release", "local-track-candidate-not-current");
+      }
       stage1LoopFallback.clear("release");
       const owner = admittedTrackTarget();
       if (!owner) {
@@ -1654,6 +2034,14 @@ function createShowEventRouter({
   // be evaluated together, otherwise a stale local DJ-CONTROL label can hide
   // a remote unreleased owner and make the pedal appear dead.
   function authorityConsistency() {
+    if (isLocalTestMode) {
+      return {
+        state: "not-applicable",
+        label: "NOT APPLICABLE / LOCAL-ONLY",
+        reason: "Syndocal timeline authority is disabled in Rekordbox local test",
+        actionRequired: false,
+      };
+    }
     const candidateStatus = detector.getProductionCandidateStatus?.() || null;
     const candidate = detector.getCurrentProductionCandidate?.() || null;
     const syndocalStatus = syndocalClient.getStatus?.() || {};
@@ -1730,6 +2118,7 @@ function createShowEventRouter({
   }
 
   function getStateSync() {
+    cancelActiveLocalReleaseIfStale();
     const detectorState = detector.getState();
     const owner = admittedTrackTarget();
     const ownerState = owner ? detectorState.decks?.[owner.deck] : null;
@@ -1738,6 +2127,8 @@ function createShowEventRouter({
       loopDivision,
       released,
       mode,
+      localTestMode: isLocalTestMode,
+      deliveryPolicy: isLocalTestMode ? "not-applicable/local-only" : "syndocal-ack-required",
       timelineState,
       timelineLoopActive,
       timelineTransitionHoldActive,
@@ -1784,8 +2175,11 @@ function createShowEventRouter({
   }
 
   function getStatus() {
+    cancelActiveLocalReleaseIfStale();
     return {
       mode,
+      localTestMode: isLocalTestMode,
+      deliveryPolicy: isLocalTestMode ? "not-applicable/local-only" : "syndocal-ack-required",
       timelineState,
       timelineLoopActive,
       timelineTransitionHoldActive,
@@ -1849,6 +2243,7 @@ function createShowEventRouter({
   function stop() {
     const hadActiveRelease = releaseMacroActive || activeReleaseAction !== null;
     releaseMacroGeneration += 1;
+    activeLocalReleaseFence = null;
     releaseMacroActive = false;
     // Drop the public in-flight action before invoking adapter cancellation.
     // A synchronous or already-queued callback from the old generation must

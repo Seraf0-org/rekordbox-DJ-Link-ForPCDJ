@@ -1091,7 +1091,13 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
     });
     socket.on("message", handlePacket);
     socket.bind(port, "127.0.0.1", () => {
-      emitStatus(true, `Hook UDP listener started on 127.0.0.1:${port}`);
+      const address = socket.address();
+      const actualPort = typeof address === "object" && address !== null
+        ? address.port
+        : port;
+      emitStatus(true, `Hook UDP listener started on 127.0.0.1:${actualPort}`, {
+        port: actualPort,
+      });
     });
   }
 

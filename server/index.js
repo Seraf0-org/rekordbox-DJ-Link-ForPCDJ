@@ -35,6 +35,15 @@ if (process.argv.includes("--verify-install")) {
   process.exit(0);
 }
 
+const SERVER_ARGUMENTS = process.argv.slice(2);
+const REKORDBOX_LOCAL_TEST_ARGUMENT = "--rekordbox-local-test";
+const REKORDBOX_LOCAL_TEST_ACTIVE = SERVER_ARGUMENTS.length === 1 &&
+  SERVER_ARGUMENTS[0] === REKORDBOX_LOCAL_TEST_ARGUMENT;
+if (SERVER_ARGUMENTS.length > 0 && !REKORDBOX_LOCAL_TEST_ACTIVE) {
+  console.error("[ERROR] server accepts no arguments except the explicit --rekordbox-local-test mode.");
+  process.exit(64);
+}
+
 const express = require("express");
 const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
@@ -46,7 +55,13 @@ const {
   metadataConsistentWithDeckPlayback,
   trackNeedsMetadataHydration,
 } = require("./trackMetadataHydration");
-const { loadDjAgentConfig } = require("./dj-agent/config");
+const {
+  loadDjAgentConfig,
+  loadRekordboxLocalTestConfig,
+  REKORDBOX_LOCAL_TEST_MODE,
+  REKORDBOX_LOCAL_TEST_SCHEMA,
+  REKORDBOX_LOCAL_TEST_SAFETY_LABEL,
+} = require("./dj-agent/config");
 const { createSyndocalClient } = require("./dj-agent/syndocalClient");
 const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetector");
 const {
@@ -111,8 +126,8 @@ function resolveHttpBindHost(rawHost = process.env.RB_OUTPUT_HOST) {
   return normalized;
 }
 
-const HTTP_BIND_HOST = resolveHttpBindHost();
-const PORT = Number(process.env.PORT || 8787);
+const HTTP_BIND_HOST = REKORDBOX_LOCAL_TEST_ACTIVE ? "127.0.0.1" : resolveHttpBindHost();
+const PORT = REKORDBOX_LOCAL_TEST_ACTIVE ? 8787 : Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
 // DB補完を無効化し、Hook由来のみでメタデータを扱う
 const PYTHON_BRIDGE_ENABLED = false;
@@ -134,7 +149,17 @@ const ABLETON_LINK_INITIAL_TEMPO = Number(process.env.ABLETON_LINK_INITIAL_TEMPO
 const HOOK_UDP_ENABLED = process.env.HOOK_UDP_ENABLED !== "false";
 const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
-const DJ_AGENT_CONFIG = loadDjAgentConfig();
+const DJ_AGENT_CONFIG = REKORDBOX_LOCAL_TEST_ACTIVE
+  ? loadRekordboxLocalTestConfig()
+  : loadDjAgentConfig();
+if (REKORDBOX_LOCAL_TEST_ACTIVE && !DJ_AGENT_CONFIG.enabled) {
+  console.error(`[ERROR] ${REKORDBOX_LOCAL_TEST_SAFETY_LABEL} config preflight failed; runtime did not start.`);
+  process.exit(1);
+}
+if (REKORDBOX_LOCAL_TEST_ACTIVE) {
+  console.log(`[rb-output] ${REKORDBOX_LOCAL_TEST_SAFETY_LABEL}`);
+  console.log("[rb-output] existing Hook/Rekordbox candidate, MIDI, pedal, and router runtime is active; Syndocal is not applicable and no production LAN route is selected.");
+}
 
 // Packaged mode fails closed here: a missing or malformed build-identity.json
 // next to the executable throws before the HTTP server starts. Runtime env
@@ -194,6 +219,12 @@ const state = {
       midi: null,
       pedal: null,
       mode: "dj-control",
+      testOnly: DJ_AGENT_CONFIG.testOnly === true,
+      localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
+      safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+      deliveryPolicy: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE
+        ? "not-applicable/local-only"
+        : "syndocal-ack-required",
       timelineState: "unknown",
       timelineLoopActive: null,
       timelineTransitionHoldActive: null,
@@ -1117,19 +1148,27 @@ djAgentRouter = createShowEventRouter({
   pedal: djAgentPedal,
   releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
   releaseMacro: DJ_AGENT_CONFIG.midi.releaseMacro,
+  localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
 });
 
 function updateDjAgentStatus() {
   const routerStatus = djAgentRouter.getStatus();
   const syndocal = routerStatus.syndocal || {};
   const enabled = DJ_AGENT_CONFIG.enabled;
+  const localTestMode = DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE;
   state.status.djAgent = {
     ...state.status.djAgent,
     enabled,
-    ok: enabled && (syndocal.state === "connected" || syndocal.state === "disabled"),
-    state: enabled ? syndocal.state || "not-started" : "disabled",
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    localTestMode,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    deliveryPolicy: localTestMode ? "not-applicable/local-only" : "syndocal-ack-required",
+    ok: enabled && (localTestMode || syndocal.state === "connected" || syndocal.state === "disabled"),
+    state: enabled ? (localTestMode ? "local-test" : syndocal.state || "not-started") : "disabled",
     message: enabled
-      ? syndocal.message || "DJ Agent running"
+      ? (localTestMode
+        ? `${REKORDBOX_LOCAL_TEST_SAFETY_LABEL} active; Syndocal not applicable`
+        : syndocal.message || "DJ Agent running")
       : DJ_AGENT_CONFIG.warning || "DJ Agent extension disabled by config",
     syndocal,
     midi: routerStatus.midi,
@@ -1747,6 +1786,7 @@ function sanitizeMidiEnumeration(result) {
 }
 
 function buildDjAgentSetupSnapshot() {
+  const localTestMode = DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE;
   const mappingArtifact = inspectSetupMappingArtifact();
   const networkInterfaces = listSetupNetworkInterfaces();
   const midiPorts = sanitizeMidiEnumeration(enumerateMidiOutputs({
@@ -1816,17 +1856,7 @@ function buildDjAgentSetupSnapshot() {
     configuredDevice
   );
 
-  return {
-    ok: true,
-    localOnly: true,
-    enabled: DJ_AGENT_CONFIG.enabled,
-    tokenConfigured: typeof DJ_AGENT_CONFIG.syndocal.token === "string"
-      && DJ_AGENT_CONFIG.syndocal.token.length > 0,
-    readiness,
-    networkInterfaces,
-    midiPorts,
-    mappingArtifact,
-    configTemplate: {
+  const configTemplate = {
       version: "1.1.11",
       enabled: true,
       syndocal: {
@@ -1858,12 +1888,12 @@ function buildDjAgentSetupSnapshot() {
         device: matchingPort?.name || "",
         port: matchingPort?.port ?? null,
         deckChannels: { "1": 1, "2": 2 },
-          mappings: {
-            loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
-            stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
-            filter: { channel: 1, messageType: "controlChange", cc: 16 },
-            releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
-          },
+        mappings: {
+          loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
+          stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+          filter: { channel: 1, messageType: "controlChange", cc: 16 },
+          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+        },
         filter: { startValue: 64, endValue: 127, durationMs: 1_000, updateIntervalMs: 50 },
         releaseFade: {
           enabled: true,
@@ -1891,7 +1921,26 @@ function buildDjAgentSetupSnapshot() {
           resetDelayMs: 0,
         },
       },
-    },
+    };
+  if (localTestMode) {
+    delete configTemplate.version;
+    delete configTemplate.syndocal;
+    configTemplate.schema = REKORDBOX_LOCAL_TEST_SCHEMA;
+  }
+
+  return {
+    ok: true,
+    localOnly: true,
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    enabled: DJ_AGENT_CONFIG.enabled,
+    tokenConfigured: typeof DJ_AGENT_CONFIG.syndocal.token === "string"
+      && DJ_AGENT_CONFIG.syndocal.token.length > 0,
+    readiness,
+    networkInterfaces,
+    midiPorts,
+    mappingArtifact,
+    configTemplate,
   };
 }
 
@@ -1957,6 +2006,12 @@ app.get("/api/dj-agent/status", (_req, res) => {
   // HTTP 200 response with enabled:false.
   res.status(200).json({
     enabled: DJ_AGENT_CONFIG.enabled,
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    deliveryPolicy: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE
+      ? "not-applicable/local-only"
+      : "syndocal-ack-required",
     allowRemoteActions: DJ_AGENT_CONFIG.allowRemoteActions,
     status: state.status.djAgent,
     state: djAgentRouter.getStateSync(),

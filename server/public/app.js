@@ -51,6 +51,7 @@ const themeSelectEl = document.getElementById("themeSelect");
 const accentColorEl = document.getElementById("accentColor");
 const resetThemeEl = document.getElementById("resetTheme");
 const djAgentPanelEl = document.getElementById("djAgentPanel");
+const djAgentSafetyBannerEl = document.getElementById("djAgentSafetyBanner");
 const djAgentSyndocalStatusEl = document.getElementById("djAgentSyndocalStatus");
 const djAgentMidiStatusEl = document.getElementById("djAgentMidiStatus");
 const djAgentModeEl = document.getElementById("djAgentMode");
@@ -350,8 +351,16 @@ function renderLoopState(loopState, loopStateEl, cardEl) {
 function renderDjAgentStatus(status) {
   const agent = status?.djAgent || {};
   const authority = agent.authorityConsistency || {};
+  const localTestMode = agent.localTestMode === true || agent.safetyLabel === "REKORDBOX LOCAL TEST / NO SYNDOCAL";
   if (djAgentPanelEl) {
     djAgentPanelEl.hidden = agent.enabled !== true;
+  }
+  if (djAgentSafetyBannerEl) {
+    const testOnly = agent.testOnly === true;
+    djAgentSafetyBannerEl.hidden = !testOnly;
+    djAgentSafetyBannerEl.textContent = testOnly
+      ? String(agent.safetyLabel || "REKORDBOX LOCAL TEST / NO SYNDOCAL")
+      : "";
   }
   if (agent.enabled !== true) {
     return;
@@ -359,8 +368,10 @@ function renderDjAgentStatus(status) {
   const syndocal = agent.syndocal || {};
   const midi = agent.midi || {};
   if (djAgentSyndocalStatusEl) {
-    djAgentSyndocalStatusEl.textContent = String(syndocal.state || agent.state || "DISCONNECTED").toUpperCase();
-    djAgentSyndocalStatusEl.classList.toggle("connected", syndocal.state === "connected");
+    djAgentSyndocalStatusEl.textContent = localTestMode
+      ? "NOT APPLICABLE / LOCAL-ONLY"
+      : String(syndocal.state || agent.state || "DISCONNECTED").toUpperCase();
+    djAgentSyndocalStatusEl.classList.toggle("connected", !localTestMode && syndocal.state === "connected");
   }
   if (djAgentMidiStatusEl) {
     djAgentMidiStatusEl.textContent = midi.ok ? "CONNECTED" : String(midi.message || "UNAVAILABLE");
@@ -382,23 +393,31 @@ function renderDjAgentStatus(status) {
   if (djAgentAuthorityConsistencyEl) {
     const authorityState = String(authority.state || "unknown").toLowerCase();
     const authorityReason = authority.reason ? ` · ${authority.reason}` : "";
-    djAgentAuthorityConsistencyEl.textContent = authorityState === "mismatch"
-      ? `SYNC REQUIRED${authorityReason}`
-      : authorityState === "consistent"
-        ? "IN SYNC"
-        : "WAITING FOR AUTHORITATIVE STATE";
-    djAgentAuthorityConsistencyEl.classList.toggle("connected", authorityState === "consistent");
-    djAgentAuthorityConsistencyEl.classList.toggle("error", authorityState === "mismatch");
+    const authorityLocalOnly = localTestMode || authorityState === "not-applicable";
+    const authorityLocalLabel = authority.label === "NOT APPLICABLE / LOCAL-ONLY"
+      ? authority.label
+      : "NOT APPLICABLE / LOCAL-ONLY";
+    djAgentAuthorityConsistencyEl.textContent = authorityLocalOnly
+      ? authorityLocalLabel
+      : authorityState === "mismatch"
+        ? `SYNC REQUIRED${authorityReason}`
+        : authorityState === "consistent"
+          ? "IN SYNC"
+          : "WAITING FOR AUTHORITATIVE STATE";
+    djAgentAuthorityConsistencyEl.classList.toggle("connected", !authorityLocalOnly && authorityState === "consistent");
+    djAgentAuthorityConsistencyEl.classList.toggle("error", !authorityLocalOnly && authorityState === "mismatch");
   }
   if (djAgentTimelineStateEl) {
     const state = agent.timelineState || "unknown";
-    djAgentTimelineStateEl.textContent = String(state).toUpperCase();
-    djAgentTimelineStateEl.classList.toggle("connected", state === "running");
+    djAgentTimelineStateEl.textContent = localTestMode ? "NOT APPLICABLE / LOCAL-ONLY" : String(state).toUpperCase();
+    djAgentTimelineStateEl.classList.toggle("connected", !localTestMode && state === "running");
   }
   if (djAgentTimelineLoopEl) {
-    djAgentTimelineLoopEl.textContent = agent.timelineLoopActive == null
-      ? "UNKNOWN"
-      : agent.timelineLoopActive ? "ON" : "OFF";
+    djAgentTimelineLoopEl.textContent = localTestMode
+      ? "NOT APPLICABLE / LOCAL-ONLY"
+      : agent.timelineLoopActive == null
+        ? "UNKNOWN"
+        : agent.timelineLoopActive ? "ON" : "OFF";
   }
   if (djAgentReleaseMacroEl) {
     const sequence = agent.releaseMacroSequence === "filter-then-fade-then-stop"
@@ -414,13 +433,17 @@ function renderDjAgentStatus(status) {
   if (djAgentLastTimelineActionEl) {
     const action = agent.lastTimelineAction;
     const delivery = action?.delivery || {};
-    djAgentLastTimelineActionEl.textContent = action?.action
+    djAgentLastTimelineActionEl.textContent = localTestMode
+      ? "NOT APPLICABLE / LOCAL-ONLY"
+      : action?.action
       ? `${action.action} · ${String(delivery.state || (action.ok ? "acknowledged" : "pending")).toUpperCase()}`
       : "-";
   }
   if (djAgentLastAckEl) {
     const ack = syndocal.lastAckResult;
-    djAgentLastAckEl.textContent = ack
+    djAgentLastAckEl.textContent = localTestMode
+      ? "NOT APPLICABLE / LOCAL-ONLY"
+      : ack
       ? `${String(ack.state || "ACK").toUpperCase()} · ${ack.type || "event"}${ack.message ? ` · ${ack.message}` : ""}`
       : syndocal.lastAckAt || "-";
   }
@@ -534,6 +557,36 @@ function setDjAgentSetupMessage(text, state = "") {
   djAgentSetupMessageEl.textContent = text;
   djAgentSetupMessageEl.classList.toggle("is-error", state === "error");
   djAgentSetupMessageEl.classList.toggle("is-ready", state === "ready");
+}
+
+function getDjAgentSetupMessage(payload) {
+  const data = payload && typeof payload === "object" ? payload : {};
+  if (data.localOnly !== true) {
+    return { text: "DJ PC上のlocalhostで開く（setup endpoint is local-only）", state: "error" };
+  }
+  if (data.ok !== true) {
+    return { text: "Setup API is not available yet; follow the DJ PC guided steps.", state: "" };
+  }
+  if (data.testOnly === true) {
+    const midiGate = data.readiness?.gates?.midi;
+    const midiBlocked = Boolean(midiGate && (midiGate.allowed !== true || midiGate.state === "blocked"));
+    return midiBlocked
+      ? {
+          text: `REKORDBOX LOCAL TEST / NO SYNDOCAL: MIDI readiness blocked${midiGate.reason ? ` · ${safeSetupCode(midiGate.reason, "review-required")}` : ""}; resolve the listed gates.`,
+          state: "error",
+        }
+      : {
+          text: "REKORDBOX LOCAL TEST / NO SYNDOCAL: local Rekordbox + MIDI + pedal checks only; remote delivery is not applicable.",
+          state: "",
+        };
+  }
+  if (data.enabled !== true) {
+    return { text: "DJ Agent is disabled. Read-only setup checks remain available.", state: "" };
+  }
+  if (data.readiness?.ready === true) {
+    return { text: "DJ Agent setup is ready.", state: "ready" };
+  }
+  return { text: "DJ Agent setup is not ready; resolve the listed gates.", state: "" };
 }
 
 function safeSetupCode(value, fallback = "unknown") {
@@ -770,17 +823,21 @@ function seedDjAgentSetupDraft(template) {
 }
 
 function renderDjAgentSetupControls(template, midiPorts, networkInterfaces) {
+  const localTestMode = template?.schema === "rb-output-rekordbox-local-test-v1";
   seedDjAgentSetupDraft(template);
   if (djAgentSyndocalHostEl) {
     djAgentSyndocalHostEl.value = djAgentSetupDraft.host;
+    djAgentSyndocalHostEl.disabled = localTestMode;
   }
   if (djAgentAdapterEl) {
+    djAgentAdapterEl.disabled = localTestMode;
     djAgentAdapterEl.value = SETUP_ADAPTERS.includes(djAgentSetupDraft.adapter)
       ? djAgentSetupDraft.adapter
       : "";
   }
 
   if (djAgentSyndocalNicEl) {
+    djAgentSyndocalNicEl.disabled = localTestMode;
     djAgentSyndocalNicEl.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
@@ -856,7 +913,13 @@ function renderDjAgentSetupControls(template, midiPorts, networkInterfaces) {
 
 function updateDjAgentConfigPreviewFromDraft() {
   const { safe, syndocal, midi } = setupTemplateObject(djAgentSetupTemplate);
-  safe.syndocal = { ...syndocal, host: djAgentSetupDraft.host, nic: djAgentSetupDraft.nic, adapter: djAgentSetupDraft.adapter };
+  const localTestMode = safe.schema === "rb-output-rekordbox-local-test-v1";
+  if (!localTestMode) {
+    safe.syndocal = { ...syndocal, host: djAgentSetupDraft.host, nic: djAgentSetupDraft.nic, adapter: djAgentSetupDraft.adapter };
+  } else {
+    delete safe.version;
+    delete safe.syndocal;
+  }
   const midiPort = parseSetupMidiPortText(djAgentSetupDraft.midiPort);
   const midiDevice = midiPort === null ? "" : safeSetupField(djAgentSetupDraft.midiDevice, 160);
   safe.midi = {
@@ -894,18 +957,8 @@ function renderDjAgentSetup(payload) {
   renderDjAgentMidiPorts(data.midiPorts);
   renderDjAgentMappingArtifact(data.mappingArtifact || DEFAULT_MAPPING_ARTIFACT);
   renderDjAgentSetupControls(djAgentSetupTemplate, data.midiPorts, data.networkInterfaces);
-
-  if (data.localOnly !== true) {
-    setDjAgentSetupMessage("DJ PC上のlocalhostで開く（setup endpoint is local-only）", "error");
-  } else if (data.ok !== true) {
-    setDjAgentSetupMessage("Setup API is not available yet; follow the DJ PC guided steps.");
-  } else if (data.enabled !== true) {
-    setDjAgentSetupMessage("DJ Agent is disabled. Read-only setup checks remain available.");
-  } else if (data.readiness?.ready === true) {
-    setDjAgentSetupMessage("DJ Agent setup is ready.", "ready");
-  } else {
-    setDjAgentSetupMessage("DJ Agent setup is not ready; resolve the listed gates.");
-  }
+  const setupMessage = getDjAgentSetupMessage(data);
+  setDjAgentSetupMessage(setupMessage.text, setupMessage.state);
 }
 
 async function fetchDjAgentSetup() {

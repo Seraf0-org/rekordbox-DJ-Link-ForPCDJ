@@ -13,6 +13,9 @@ set "__APPDIR__="
 set "_RB_PREFLIGHT_ONLY=0"
 set "_RB_INIT_CONFIG=0"
 set "_RB_UPGRADE_CONFIG=0"
+set "_RB_REKORDBOX_LOCAL_TEST_PREFLIGHT=0"
+set "_RB_REKORDBOX_LOCAL_TEST_INIT=0"
+set "_RB_REKORDBOX_LOCAL_TEST_START=0"
 if "%1"=="" goto launcher_arguments_validated
 if "%~1"=="--preflight-only" (
   set "_RB_PREFLIGHT_ONLY=1"
@@ -26,13 +29,25 @@ if "%~1"=="--upgrade-config" (
   set "_RB_UPGRADE_CONFIG=1"
   goto launcher_argument_accepted
 )
-echo [ERROR] Unknown launcher argument. Use no arguments, exactly --preflight-only, exactly --init-config, or exactly --upgrade-config.
+if "%~1"=="--preflight-rekordbox-local-test" (
+  set "_RB_REKORDBOX_LOCAL_TEST_PREFLIGHT=1"
+  goto launcher_argument_accepted
+)
+if "%~1"=="--init-rekordbox-local-test" (
+  set "_RB_REKORDBOX_LOCAL_TEST_INIT=1"
+  goto launcher_argument_accepted
+)
+if "%~1"=="--rekordbox-local-test" (
+  set "_RB_REKORDBOX_LOCAL_TEST_START=1"
+  goto launcher_argument_accepted
+)
+echo [ERROR] Unknown launcher argument. Use no arguments, --preflight-only, --init-config, --upgrade-config, --preflight-rekordbox-local-test, --init-rekordbox-local-test, or --rekordbox-local-test.
 exit /b 64
 
 :launcher_argument_accepted
 shift
 if not "%1"=="" (
-  echo [ERROR] Unexpected launcher arguments. Use no arguments, exactly --preflight-only, exactly --init-config, or exactly --upgrade-config.
+  echo [ERROR] Unexpected launcher arguments. Use one supported argument only; Rekordbox local test flags cannot be combined with production flags.
   exit /b 64
 )
 
@@ -40,6 +55,9 @@ if not "%1"=="" (
 
 if "%_RB_UPGRADE_CONFIG%"=="1" goto upgrade_show_config
 if "%_RB_INIT_CONFIG%"=="1" goto initialize_show_config
+if "%_RB_REKORDBOX_LOCAL_TEST_INIT%"=="1" goto initialize_rekordbox_local_test
+if "%_RB_REKORDBOX_LOCAL_TEST_PREFLIGHT%"=="1" goto preflight_rekordbox_local_test
+if "%_RB_REKORDBOX_LOCAL_TEST_START%"=="1" goto start_rekordbox_local_test
 
 call :reject_retired_rekordbox_override
 if errorlevel 1 (
@@ -54,6 +72,12 @@ if errorlevel 1 (
 if "%_RB_PREFLIGHT_ONLY%"=="1" (
   echo [rb-output] strict source preflight passed; no show-side process or build action was taken.
   exit /b 0
+)
+
+:source_runtime_build
+if "%_RB_REKORDBOX_LOCAL_TEST_START%"=="1" (
+  echo [rb-output] REKORDBOX LOCAL TEST / NO SYNDOCAL
+  echo [rb-output] full existing Hook/Rekordbox candidate, MIDI, pedal, and router flow is selected; Syndocal is not applicable.
 )
 
 if not exist ".venv\Scripts\python.exe" (
@@ -88,12 +112,16 @@ if errorlevel 1 (
 )
 
 echo [rb-output] restarting the source server with the current environment...
-.venv\Scripts\python scripts\restart_source_server.py
+if "%_RB_REKORDBOX_LOCAL_TEST_START%"=="1" (
+  .venv\Scripts\python scripts\restart_source_server.py --rekordbox-local-test
+) else (
+  .venv\Scripts\python scripts\restart_source_server.py
+)
 if errorlevel 1 (
   echo.
   echo [ERROR] Source server restart failed.
-  echo         Port 8787 is only stopped automatically when it belongs to
-  echo         this checkout's node server\index.js process.
+  echo         An active opposite-mode source server is never stopped automatically.
+  echo         Stop it explicitly, then retry the same mode.
   echo.
   pause
   exit /b 1
@@ -112,7 +140,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-start "" "http://localhost:8787"
+if "%_RB_REKORDBOX_LOCAL_TEST_START%"=="1" (
+  start "" "http://127.0.0.1:8787"
+) else (
+  start "" "http://localhost:8787"
+)
 
 echo.
 echo [rb-output] done.
@@ -122,6 +154,33 @@ exit /b 0
 :initialize_show_config
 node scripts\init-show-config.js
 exit /b %errorlevel%
+
+:initialize_rekordbox_local_test
+node scripts\init-rekordbox-local-test-config.js
+exit /b %errorlevel%
+
+:preflight_rekordbox_local_test
+call :reject_retired_rekordbox_override
+if errorlevel 1 (
+  exit /b 1
+)
+node scripts\validate-rekordbox-local-test-config.js
+if errorlevel 1 (
+  exit /b 1
+)
+echo [rb-output] REKORDBOX LOCAL TEST / NO SYNDOCAL preflight passed; no show-side process, build, server, Rekordbox, hook, MIDI, or pedal action was taken.
+exit /b 0
+
+:start_rekordbox_local_test
+call :reject_retired_rekordbox_override
+if errorlevel 1 (
+  exit /b 1
+)
+node scripts\validate-rekordbox-local-test-config.js
+if errorlevel 1 (
+  exit /b 1
+)
+goto source_runtime_build
 
 :upgrade_show_config
 rem The one-way migration creates the current external config and then checks

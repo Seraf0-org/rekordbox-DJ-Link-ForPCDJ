@@ -106,8 +106,7 @@ test("now-playing patch drops old track fields only for a definite ID replacemen
 });
 
 test("hook snapshots never pair a replacement content ID with the prior track text", async (t) => {
-  const port = 51_000 + Math.floor(Math.random() * 1_000);
-  const provider = createHookUdpProvider({ enabled: true, port });
+  const provider = createHookUdpProvider({ enabled: true, port: 0 });
   const snapshots = [];
   provider.on("snapshot", (snapshot) => snapshots.push(snapshot));
   t.after(() => provider.stop());
@@ -115,20 +114,25 @@ test("hook snapshots never pair a replacement content ID with the prior track te
   const started = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Hook provider did not bind")), 1_000);
     provider.on("status", (status) => {
-      if (status.message?.includes("listener started")) {
+      if (status.ok === false) {
         clearTimeout(timer);
-        resolve();
+        reject(new Error(status.message || "Hook provider failed to bind"));
+        return;
+      }
+      if (status.message?.includes("listener started") && Number.isInteger(status.port) && status.port > 0) {
+        clearTimeout(timer);
+        resolve(status.port);
       }
     });
   });
   provider.start();
-  await started;
+  const actualPort = await started;
 
   const sender = dgram.createSocket("udp4");
   t.after(() => sender.close());
   const send = (packet) => new Promise((resolve, reject) => {
     const body = Buffer.from(JSON.stringify(packet));
-    sender.send(body, port, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
+    sender.send(body, actualPort, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
   });
 
   await send({ type: "track_load", deck: 1, contentId: 100 });

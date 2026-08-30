@@ -132,8 +132,11 @@
 
       <section id="djAgentPanel" class="card dj-agent-panel" hidden>
         <div class="label">DJ AGENT EXTENSION</div>
+        <div id="djAgentSafetyBanner" class="dj-agent-safety-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+          REKORDBOX LOCAL TEST / NO SYNDOCAL
+        </div>
         <div class="row">
-          <span class="label">Syndocal</span>
+          <span class="label">Syndocal / remote delivery</span>
           <span id="djAgentSyndocalStatus" class="dj-agent-status">DISCONNECTED</span>
         </div>
         <div class="row">
@@ -177,7 +180,7 @@
           <span id="djAgentLastTimelineAction" class="dj-agent-value">-</span>
         </div>
         <div class="row">
-          <span class="label">Last ACK</span>
+          <span class="label">Last remote delivery</span>
           <span id="djAgentLastAck" class="dj-agent-value">-</span>
         </div>
         <div id="djAgentActionResult" class="dj-agent-action-result" role="status" aria-live="polite" aria-atomic="true">

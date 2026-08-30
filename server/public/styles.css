@@ -577,6 +577,18 @@ button:focus {
   display: none;
 }
 
+.dj-agent-safety-banner {
+  padding: 9px 10px;
+  border: 2px solid #e47f89;
+  background: color-mix(in srgb, #e47f89 12%, transparent);
+  color: #e47f89;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
 .dj-agent-setup-card {
   display: grid;
   gap: 14px;
