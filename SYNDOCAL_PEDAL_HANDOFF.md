@@ -26,6 +26,13 @@ runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor
 
 ## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
 
+Implementation checkpointはbranch `beta-v1.1.2`、base/upstream
+`a13d7bff59db5e7c00e19655f87c69db7cb52005`から作成したcommit
+`2e1d04c`（`feat: add standalone Rekordbox pedal test mode`）です。次のactionは
+このcheckpointをpushし、同一checkoutでfixed local configをinit/preflightしてから、
+Rekordbox実再生中にF14 LoopHalfとF13 HPF→fade→Cue/Stop/resetを物理ペダルで受け入れることです。
+Syndocal、Timeline、LAN、ACKはこのstandalone受入の対象外です。
+
 これはSyndocal handoffを行わず、既存のHook/Rekordbox candidate、MIDI、pedal、routerを
 DJ PC単体で確認するための明示的なtest-only modeです。productionのv1.1.11 schema/config/CSV
 とは別の`rb-output-rekordbox-local-test-v1` discriminatorを使い、固定外部JSON
