@@ -135,7 +135,7 @@ if errorlevel 1 (
 )
 
 echo [rb-output] injecting hook...
-.venv\Scripts\python scripts\inject_hook.py --launch-installed --wait-seconds 60
+.venv\Scripts\python scripts\inject_hook.py --launch-installed --wait-seconds 60 --launch-settle-seconds 15
 if errorlevel 1 (
   echo.
   echo [ERROR] Hook injection failed.

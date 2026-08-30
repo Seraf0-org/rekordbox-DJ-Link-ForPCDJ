@@ -776,7 +776,10 @@ Process/User/Machineをfail-closeで確認します。`--launch-path`は任意�
 overrideではなく、列挙された対応版（7.2.13／7.2.14／7.2.18）のcanonical installと
 完全一致する`rekordbox.exe`だけを受理します。`--launch-installed`は実行中の対応版を
 優先し、なければ対応するインストール済み最新版だけを選びます。未対応版または別install
-だけが実行中なら注入せずfail-closeします。Webサーバー単体からは自動実行されません。
+だけが実行中なら注入せずfail-closeします。自動起動した場合は固定の
+`--launch-settle-seconds 15`で今回の`Popen` PIDだけを15秒間監視し、canonical path/name/
+create-timeの変化・終了・照会不能を検出したら注入せずfail-closeします。既存の対応版は
+このsettleを待たずに注入します。Webサーバー単体からは自動実行されません。
 ランチャーから別プロセスへ引き継がれる環境では、必要な場合だけ`--handoff-seconds 90`を
 追加してください。
 

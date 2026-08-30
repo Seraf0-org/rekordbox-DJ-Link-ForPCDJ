@@ -61,6 +61,10 @@ restrictive Windows ACLも必要です。`--preflight-rekordbox-local-test`は�
 serverだけをrestartし、supported RekordboxへHookをinjectしてloopback UIを開きます。
 source-process fenceは全portとpre-listen状態を対象に、起動前、許可されたsame-mode停止後、
 spawn直前、およびnew childがlistenerを所有した後からsuccess返却前まで再検査します。
+Hook injectionは固定`--launch-settle-seconds 15`を使い、自動起動した今回の`Popen` PIDだけを
+canonical executable path/name/create-timeで連続監視します。PIDの終了、path/name/create-time
+変化、照会不能、wait deadline超過はreplacement scanを行わずfail-closedです。既存の対応版は
+settleを待たずに注入します。
 productionなど反対modeはPID/modeを表示してfail-closedとし、自動停止・置換しません。
 予期しないsame-modeもfail-closedで、失敗時に終了するのは今回spawnしたchildだけです。
 禁止されたenvironment overrideが1つでもある場合もfail-closedです。
@@ -107,15 +111,26 @@ bare buildのまま維持しました。caller env/config/追加launcher argumen
 compiler/source/MinHook/output evidenceを引き続き再検証します。独立Terra xHigh再監査は
 P0/P1なしのGO、focused launcher/provenance/timingは**14/14**、first-party warningは**0**です。
 
-修正後のcontrolled local launchではcompiler
+compiler-root修正後のcontrolled local launchではcompiler
 `C:\TDM-GCC-64\bin\g++.exe`（SHA-256
 `8CFA5EA1C1D29BE31078CB92CD0CAC635B90183D17460C361CC90645B77D11FB`）を検証し、AMD64
 `native\bin\rb_hook.dll`（SHA-256
 `D066B2D3E233F0485B0F7B71E0C0E7D4514452AE1525B99249661182DA55F055D`）を生成しました。
-local source PID `55684`はport 8787を所有し、HookはRekordbox 7.2.18 PID `72800`へinject成功。
-token-free statusは`enabled:true`、`localTestMode:true`、`testOnly:true`、
+local source PID `55684`はport 8787を所有しました。旧immediate auto-injectはRekordbox
+7.2.18 PID `72800`からHook helloを受けた後に同PIDが終了したため、stable runtime証跡には
+採用しません。Rekordboxを通常起動して15秒後に同じHookをinjectしたPID `49440`は継続し、
+Hook helloとopened-handle path/create-timeのread-only実検証が通過しました。token-free statusは
+`enabled:true`、`localTestMode:true`、`testOnly:true`、
 `deliveryPolicy:not-applicable/local-only`、MIDI `CustomMIDI1` port 2 connected、pedal
 `listening`を返しました。これは起動証跡であり、F13/F14の物理ペダル受入はまだ未確認です。
+
+この観測を受け、自動起動だけはexact `Popen` PID/path/name/create-timeを固定15秒連続監視し、
+opened Windows process handleでもimage path/creation FILETIMEをremote write前に再検証するよう
+修正しました。exit、identity変化、照会不能、deadline超過はreplacement scanなしで
+fail-closedです。既存running Rekordboxはsettleなしの従来経路を維持します。Python focused
+**19/19**、injector/launcher/smoke **73/73**、first-party warning **0**、独立Terra xHigh
+adversarial reviewはP0/P1なしのGOです。現在のstable PID `49440`を保護するため、修正後の
+fresh auto-launchはまだ再実行しておらず、次回cold launch acceptanceとして明示的に残します。
 
 Windows target security is bounded by the NTFS ACL inherited from the exact
 `C:\SyndocalShow` parent; the updater does not claim Unix mode bits as a Windows

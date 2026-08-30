@@ -73,7 +73,7 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.ok(serverIndex > buildIndex, "server must start only after the hook build succeeds");
   assert.ok(injectIndex > serverIndex, "injection must follow the verified build and server start");
   assert.ok(browserIndex > injectIndex, "the browser must not open before successful hook injection");
-  assert.match(source, /--launch-installed\s+--wait-seconds\s+60/i);
+  assert.match(source, /--launch-installed\s+--wait-seconds\s+60\s+--launch-settle-seconds\s+15/i);
   assert.match(source, /Microsoft\.Win32\.Registry]::CurrentUser/);
   assert.match(source, /Microsoft\.Win32\.Registry]::LocalMachine/);
   assert.match(source, /GetValueNames\(\)/);
@@ -154,6 +154,12 @@ test("source injection auto-launch remains restricted to supported Rekordbox bui
   assert.match(source, /re\.fullmatch\(r"rekordbox\\s\+\(\\d\+\)\\\.\(\\d\+\)\\\.\(\\d\+\)"/);
   assert.match(source, /version not in SUPPORTED_REKORDBOX_VERSIONS/);
   assert.match(source, /--launch-path and --launch-installed are mutually exclusive/);
+  assert.match(source, /LAUNCH_SETTLE_SECONDS\s*=\s*15/);
+  assert.match(source, /--launch-settle-seconds/);
+  assert.match(source, /args\.launch_settle_seconds\s+!=\s+LAUNCH_SETTLE_SECONDS/);
+  assert.match(source, /launched_process\.pid/);
+  assert.match(source, /launched_process\.poll\(\)/);
+  assert.match(source, /verify_open_process_identity/);
   assert.match(source, /if not exe_path or _norm_path\(exe_path\) != preferred_exe_norm:/);
   assert.match(source, /pid, launch_path = find_running_supported_rekordbox\(args\.process_name\)/);
   assert.match(source, /unsupported or differently installed Rekordbox process is running/);
@@ -162,6 +168,14 @@ test("source injection auto-launch remains restricted to supported Rekordbox bui
   assert.match(source, /REKORDBOX_EXE_PATH is retired; remove it and use a validated --launch-path/);
   assert.match(source, /for _, installed in installed_supported_rekordbox\(\):/);
   assert.match(source, /_norm_path\(str\(installed\)\) == candidate_norm/);
+  const selfLaunchStart = source.indexOf("if pid is None and launch_path:");
+  const selfLaunchEnd = source.indexOf("if pid is None:", selfLaunchStart + 1);
+  assert.ok(selfLaunchStart >= 0 && selfLaunchEnd > selfLaunchStart);
+  assert.doesNotMatch(
+    source.slice(selfLaunchStart, selfLaunchEnd),
+    /find_pid\(/,
+    "self-launch must retain the exact Popen PID instead of scanning for a replacement",
+  );
 });
 
 test(

@@ -18,6 +18,6 @@ test("injector target selection passes the executable-path behavior matrix", () 
     0,
     `selection matrix failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
-  assert.match(result.stderr, /Ran 8 tests/);
+  assert.match(result.stderr, /Ran 19 tests/);
   assert.match(result.stderr, /OK/);
 });
