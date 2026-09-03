@@ -59,9 +59,10 @@ checkout same-mode process that is listening on the currently requested port.
 A same-mode process on another port or in pre-listen state requires an explicit
 stop before retrying.
 
-This exact-checkout fence is shared by the no-argument production launcher and
-the explicit local-test launcher; mode ownership is never inferred from a port
-alone.
+This exact-checkout fence is shared by the no-argument launcher and the explicit
+local-test launcher; mode ownership is never inferred from a port alone. A
+valid `DJ_AGENT_CONFIG_PATH` selects the production/Syndocal mode; when it is
+unset, the no-argument launcher starts the core standalone without Syndocal.
 Direct/manual `node` launches outside `start-all.bat` are not automatically
 managed by this restart path and must be stopped explicitly before launch.
 
@@ -174,8 +175,10 @@ once for each known deck.
 
 In normal production mode, the DJ Agent extension is disabled unless an exact
 external v1.1.11 `filter-then-fade-then-stop` JSON file is supplied through
-`DJ_AGENT_CONFIG_PATH`. The explicit local-test mode above is the separate
-exception and uses only its fixed test schema.
+`DJ_AGENT_CONFIG_PATH`. The no-argument source launcher still starts the core
+without that file, so Syndocal is optional for Now Playing/Hook operation. The
+explicit local-test mode above is the separate exception and uses only its
+fixed test schema.
 `DJ_AGENT_ENABLED`, inline JSON, and every Syndocal/MIDI/pedal environment
 override fail closed with one fixed secret-free reason. When disabled,
 `GET /api/dj-agent/status` still returns HTTP 200 with

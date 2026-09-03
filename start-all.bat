@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 echo [rb-output] CONTROLLED SOURCE-ACCEPTANCE launcher
 echo [rb-output] This is the 2026-08-30 DJ-PC source-acceptance exception only.
+echo [rb-output] Without DJ_AGENT_CONFIG_PATH, the core runs standalone without Syndocal.
 echo [rb-output] Do not substitute an installer or shortcut for this source path.
 echo [rb-output] starting...
 
@@ -13,6 +14,7 @@ set "__APPDIR__="
 set "_RB_PREFLIGHT_ONLY=0"
 set "_RB_INIT_CONFIG=0"
 set "_RB_UPGRADE_CONFIG=0"
+set "_RB_STANDALONE_SOURCE=0"
 set "_RB_REKORDBOX_LOCAL_TEST_PREFLIGHT=0"
 set "_RB_REKORDBOX_LOCAL_TEST_INIT=0"
 set "_RB_REKORDBOX_LOCAL_TEST_START=0"
@@ -70,7 +72,11 @@ if errorlevel 1 (
 )
 
 if "%_RB_PREFLIGHT_ONLY%"=="1" (
-  echo [rb-output] strict source preflight passed; no show-side process or build action was taken.
+  if "%_RB_STANDALONE_SOURCE%"=="1" (
+    echo [rb-output] standalone source preflight passed; no Syndocal or show-side process/build action was taken.
+  ) else (
+    echo [rb-output] strict source preflight passed; no show-side process or build action was taken.
+  )
   exit /b 0
 )
 
@@ -248,15 +254,16 @@ if not "%_RB_REGISTRY_RESULT%"=="0" (
 exit /b 0
 
 :validate_show_config
-rem The show exception requires one explicit checkout-external JSON.  Validate
-rem the non-secret readiness contract before creating a venv, building, starting
-rem the server, launching Rekordbox, or injecting the hook.
+rem The show exception accepts an optional checkout-external JSON.  When it is
+rem absent, the core source runtime is allowed to start without Syndocal or DJ
+rem Agent controls.  When it is present, validate its non-secret readiness
+rem contract before creating a venv, building, starting the server, launching
+rem Rekordbox, or injecting the hook; a malformed explicit config still fails
+rem closed instead of silently falling back to standalone mode.
 if not defined DJ_AGENT_CONFIG_PATH (
-  echo.
-  echo [ERROR] DJ_AGENT_CONFIG_PATH is required for the controlled source path.
-  echo         Set it to the checkout-external show JSON in this same PowerShell.
-  echo.
-  exit /b 1
+  set "_RB_STANDALONE_SOURCE=1"
+  echo [rb-output] standalone source preflight: no DJ_AGENT_CONFIG_PATH; Syndocal is optional.
+  exit /b 0
 )
 
 node -e "const fs=require('node:fs'),path=require('node:path');try{const forbidden=new Set(['DJ_AGENT_CONFIG','DJ_AGENT_ENABLED','DJ_AGENT_ALLOW_REMOTE_ACTIONS','SYNDOCAL_ENABLED','SYNDOCAL_HOST','SYNDOCAL_PORT','SYNDOCAL_PATH','SYNDOCAL_NIC','SYNDOCAL_TOKEN','SYNDOCAL_WS_ADAPTER','SYNDOCAL_HEARTBEAT_MS','PEDAL_ENABLED','PEDAL_MODULE','MIDI_ENABLED','MIDI_MODULE','MIDI_DEVICE','MIDI_PORT','MIDI_RELEASE_FADE','MIDI_RELEASE_MACRO','MIDI_DECK_CHANNELS','PORT','RB_OUTPUT_HOST','RB_OUTPUT_SETUP_MAPPING_PATH']);if(Object.keys(process.env).some(k=>forbidden.has(k.toUpperCase())))process.exit(2);const raw=process.env.DJ_AGENT_CONFIG_PATH||'';if(!path.isAbsolute(raw))process.exit(3);const requested=path.resolve(raw),stat=fs.lstatSync(requested);if(!stat.isFile()||stat.isSymbolicLink())process.exit(4);const file=fs.realpathSync.native(requested),root=fs.realpathSync.native(process.cwd())+path.sep;if(file.toLowerCase().startsWith(root.toLowerCase()))process.exit(5);const source=JSON.parse(fs.readFileSync(file,'utf8'));const {loadDjAgentConfig,validateFilterThenFadeThenStopShowConfig}=require('./server/dj-agent/config');const c=loadDjAgentConfig();if(c.warning||!validateFilterThenFadeThenStopShowConfig(source))process.exit(6);process.exit(0)}catch{process.exit(7)}"

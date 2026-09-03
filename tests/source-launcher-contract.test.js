@@ -55,7 +55,7 @@ function runLauncher(command, env) {
   });
 }
 
-test("controlled show source launcher fails closed before rebuilding and injecting", () => {
+test("controlled source launcher keeps invalid explicit configs fail-closed while allowing standalone startup", () => {
   const source = fs.readFileSync(path.join(repoRoot, "start-all.bat"), "utf8");
   const retiredOverrideIndex = source.search(/call\s+:reject_retired_rekordbox_override/i);
   const configPreflightIndex = source.search(/call\s+:validate_show_config/i);
@@ -94,7 +94,7 @@ test("controlled show source launcher fails closed before rebuilding and injecti
   assert.ok(initJumpIndex < retiredOverrideIndex, "initializer must bypass production preflight and show-side actions");
   assert.ok(initCommandIndex > browserIndex, "initializer implementation must remain outside the production launch path");
   assert.match(source, /strict source preflight passed; no show-side process or build action was taken/i);
-  assert.match(source, /DJ_AGENT_CONFIG_PATH is required for the controlled source path/i);
+  assert.match(source, /standalone source preflight: no DJ_AGENT_CONFIG_PATH; Syndocal is optional/i);
   assert.match(source, /path\.isAbsolute\(raw\)/);
   assert.match(source, /fs\.lstatSync\(requested\)/);
   assert.match(source, /fs\.realpathSync\.native\(requested\)/);
@@ -288,8 +288,8 @@ test(
       assert.match(processOverride.stdout, /remains in Process scope/i);
 
       const missingConfig = runLauncher("--preflight-only", cleanShowEnv());
-      assert.equal(missingConfig.status, 1, missingConfig.stdout + missingConfig.stderr);
-      assert.match(missingConfig.stdout, /DJ_AGENT_CONFIG_PATH is required/i);
+      assert.equal(missingConfig.status, 0, missingConfig.stdout + missingConfig.stderr);
+      assert.match(missingConfig.stdout, /standalone source preflight.*Syndocal is optional/i);
 
       const pseudoAppDirTamper = runLauncher(
         "--preflight-only",

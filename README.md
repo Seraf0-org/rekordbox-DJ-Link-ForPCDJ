@@ -12,8 +12,10 @@ and v2 adapters/frames are retired and fail closed. Product source metadata is
 `1.1.12`; no v1.1.12 installer/tag/public release or hardware acceptance is
 claimed here. The production schema, external config, and CustomMIDI1 CSV remain
 the v1.1.11 contract. Use an approved source checkout, an external
-`DJ_AGENT_CONFIG_PATH`, and no-argument `start-all.bat`. The only tracked
-token-free template is `config/dj-agent-v1.1.11.example.json`; exact
+`DJ_AGENT_CONFIG_PATH` when show synchronization is needed. With no
+`DJ_AGENT_CONFIG_PATH`, no-argument `start-all.bat` starts the core in standalone
+mode without Syndocal. The only tracked token-free template is
+`config/dj-agent-v1.1.11.example.json`; exact
 `start-all.bat --init-config` creates only
 `C:\SyndocalShow\dj-agent-v1.1.11.json` when absent. It never overwrites,
 copies, deletes, or reads the deployed historical
@@ -123,9 +125,11 @@ currently requested port in `LISTEN`; a same-mode process on another port or in
 pre-listen state is never terminated automatically. Stop any such process
 explicitly and rerun the same mode.
 
-The same source-process fence applies to the normal no-argument production
-launcher and to this explicit local-test launcher; the mode-specific command
-is not a port-only ownership boundary.
+The same source-process fence applies to the no-argument launcher and to this
+explicit local-test launcher; the mode-specific command is not a port-only
+ownership boundary. A no-argument launch with a valid external show config is
+the production/Syndocal mode; without that variable it is the standalone core
+mode.
 Direct/manual `node` launches outside `start-all.bat` remain operator-owned:
 stop them explicitly before using the controlled launcher.
 
@@ -407,11 +411,14 @@ source commit `5eaf1994e1bf4456857fefd36cc0ce827145b603`, annotated tag `v1.1.3`
 Syndocal Show Control、pedal、Rekordbox MIDI は通常の Now Playing 本体から分離されています。
 ProductionのDJ Agentを有効にできるのは、`start-all.bat --init-config` が作る checkout 外の
 exact v1.1.11 `filter-then-fade-then-stop` 設定を `DJ_AGENT_CONFIG_PATH` で指定した時だけです。
+この変数を設定しない通常の`start-all.bat`はSyndocalを必要とせず、Hook、Now Playing、
+Web UI、Socket.IO、HTTP APIを単体で起動します。
 前述の明示的な`REKORDBOX LOCAL TEST / NO SYNDOCAL`は、このproduction gateとは別の
 固定test schemaです。
 `DJ_AGENT_ENABLED`、inline JSON、`SYNDOCAL_*`、`MIDI_*`、`PEDAL_*` の環境変数は
 runtime でも fail-closed になり、Agent は固定の secret-free reason とともに disabled のままです。
-設定が無い状態でも first-run Setup と read-only HTTP/UI は起動を継続します。
+設定が無い状態でも first-run Setup と read-only HTTP/UI は起動を継続します。明示的な
+checkout外設定が壊れている場合は、意図しない単体フォールバックを避けるため起動を停止します。
 
 唯一の production adapter は `syndocal-envelope-v3`、接続先 path は `/dj-link`、
 heartbeat は 5000ms です。token は 32〜256 UTF-8 bytes、空白・Unicode control・

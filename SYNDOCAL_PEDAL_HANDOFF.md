@@ -24,6 +24,16 @@ v1.1.11 token-free templateへ移して、sourceを変更せず、targetを排�
 作成後はcurrent strict preflightだけを実行し、次のPowerShell assignmentを表示して
 runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor pathを削除します。
 
+## 2026-09-03 product source 1.1.12: standalone core startup without Syndocal
+
+The no-argument `start-all.bat` path now treats `DJ_AGENT_CONFIG_PATH` as
+optional. With a valid external v1.1.11 file it preserves the production
+Syndocal route; when the variable is absent it starts the core Hook/Rekordbox
+Now Playing, Web UI, Socket.IO, and HTTP API without a Syndocal process. An
+explicit but invalid external path still fails closed and never silently falls
+back to standalone mode. The separate `--rekordbox-local-test` path below
+remains the route for local MIDI/pedal operation without Syndocal.
+
 ## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
 
 Implementation checkpointはbranch `beta-v1.1.2`のHEAD/upstream
