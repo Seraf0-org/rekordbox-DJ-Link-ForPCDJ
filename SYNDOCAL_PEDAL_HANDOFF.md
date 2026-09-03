@@ -34,6 +34,22 @@ explicit but invalid external path still fails closed and never silently falls
 back to standalone mode. The separate `--rekordbox-local-test` path below
 remains the route for local MIDI/pedal operation without Syndocal.
 
+Implementation checkpoint: branch `beta-v1.1.2`, HEAD
+`ab190b5` (`fix: allow standalone source startup without Syndocal`), and
+`origin/beta-v1.1.2` are equal (ahead/behind `0/0`). The exact focused gate
+`node --test tests/source-launcher-contract.test.js tests/dj-agent-runtime-gate.test.js tests/dj-agent-config-security.test.js`
+passed `16/16`; `cmd /d /s /c "call start-all.bat --preflight-only"` with no
+`DJ_AGENT_CONFIG_PATH` passed the standalone preflight; and a direct server
+launch with `PORT=0`, loopback bind, Hook UDP disabled, and no external config
+returned both `/api/dj-agent/status` and the standalone-disabled state without
+a Syndocal process. Focused runtime warnings: `0`. The full `npm test` gate
+remains incomplete because this checkout's `node_modules` lacks
+`@ktamas77/abletonlink` and pinned `node-gyp`; no dependency repair was made
+in this checkpoint. Remaining blockers are full-suite dependency restoration,
+the separate physical local MIDI/pedal acceptance, and the pre-existing stale
+ignored artifact cleanup. Next action is to restore the pinned dependencies and
+rerun the full suite before any release artifact is built.
+
 ## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
 
 Implementation checkpointはbranch `beta-v1.1.2`のHEAD/upstream
