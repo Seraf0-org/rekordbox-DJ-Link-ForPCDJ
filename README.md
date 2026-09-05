@@ -1,5 +1,12 @@
 # Rekordbox DJ Link for PCDJ
 
+This README is the operator guide for setup, configuration, and launch. For
+endpoint and wire-format details, use [API.md](API.md); for cross-repository
+pedal ownership and dated acceptance evidence, use
+[SYNDOCAL_PEDAL_HANDOFF.md](SYNDOCAL_PEDAL_HANDOFF.md). Read the section relevant
+to your operating mode. Historical checkpoints are evidence, not instructions
+to repeat a build, deployment, review, or cleanup.
+
 Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**低遅延Now PlayingおよびBPMリアルタイム配信システム**です。
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。

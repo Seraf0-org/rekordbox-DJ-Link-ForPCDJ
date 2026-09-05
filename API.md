@@ -1,5 +1,9 @@
 # rb-output API
 
+This document defines HTTP endpoints and wire formats. Operator setup and
+launch commands live in [README.md](README.md); cross-repository pedal ownership
+and dated acceptance evidence live in [SYNDOCAL_PEDAL_HANDOFF.md](SYNDOCAL_PEDAL_HANDOFF.md).
+
 The server listens on `http://<host>:8787` by default. The core state API is
 read-only and does not require authentication, so it can be consumed by
 another computer or music application on the LAN. The separately gated DJ
@@ -10,15 +14,10 @@ only when the extension is explicitly enabled.
 
 ### Current Syndocal authority — product source 1.1.12 / production v1.1.11 any-deck strict v3
 
-The current and next operator route uses
-`config/dj-agent-v1.1.11.example.json` and
-`server/public/setup/CustomMIDI1-Syndocal-v1.1.11.csv`. The initializer creates
-only `C:\SyndocalShow\dj-agent-v1.1.11.json` when absent; it does not overwrite,
-copy, delete, or read the deployed historical v1.1.5 file. A mapped track may
-be admitted from any actually playing Rekordbox deck. MASTER/master-change is
-diagnostic only and never assigns show-control ownership. The v1.1.5
-controlled-source handoff remains deployed historical evidence, not current or
-next operator guidance.
+For the current config template, CSV, and initialization procedure, use the
+[operator guide](README.md). A mapped track may be admitted from any actually
+playing Rekordbox deck. MASTER/master-change is diagnostic only and never
+assigns show-control ownership.
 
 The current product source is `1.1.12`. The production schema, external config,
 and CustomMIDI1 CSV remain the v1.1.11 contract. The controlled product-source
@@ -185,14 +184,11 @@ override fail closed with one fixed secret-free reason. When disabled,
 `enabled:false`; the POST action routes return 404 and the existing APIs
 remain unchanged.
 
-An exact v1.1.10 external show source can be upgraded once with
-`start-all.bat --upgrade-config` after `DJ_AGENT_CONFIG_PATH` points to that
-source. The bounded tool validates the known predecessor, preserves only its
-valid token, creates the exclusive external v1.1.11 target from the token-free
-template, leaves the source unchanged, and runs the current strict preflight
-against the target before printing the next PowerShell assignment. It never
-starts the runtime or prints token/config content. Remove this predecessor
-path after all controlled DJ PCs have adopted v1.1.11.
+The [one-way show-config upgrade](README.md#one-way-show-config-upgrade)
+documents the operator migration procedure. Migration creates the v1.1.11
+target exclusively, leaves the predecessor unchanged, and never starts the
+runtime or prints token/config content. Its retirement depends on confirmed
+adoption by all controlled DJ PCs, not completion of an unrelated code task.
 
 GET /api/dj-agent/status reports the optional Syndocal, MIDI, and pedal
 adapter states. The diagnostic action routes use the same router as the

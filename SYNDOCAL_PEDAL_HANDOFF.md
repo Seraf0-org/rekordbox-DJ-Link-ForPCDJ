@@ -2,6 +2,16 @@
 
 この文書は、Syndocal側と`rb-output`側を別担当で接続するための実装契約です。
 
+## 読み方
+
+現行のprotocol/operator契約は、冒頭のproduct source 1.1.12 / production
+v1.1.11節と、後半の`CURRENT product source 1.1.12`各節です。日付付きの
+checkpoint節は、その時点のsource/test/実機証跡を保存する履歴であり、記載された
+HEAD、作業状態、next actionを現在の状態や実行指示として扱いません。installer、tag、
+配布、依存復旧、cleanupなどのblockerは、依頼された作業に影響する場合だけ扱います。
+release固有のgateを無関係な編集へ適用しません。実機・LAN・Syndocal ACKの未確認事項は、受入境界として
+引き続き有効です。
+
 ## 2026-08-30 current product source 1.1.12 / v1.1.11 production any-deck strict show-sync v3
 
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
@@ -45,10 +55,10 @@ returned both `/api/dj-agent/status` and the standalone-disabled state without
 a Syndocal process. Focused runtime warnings: `0`. The full `npm test` gate
 remains incomplete because this checkout's `node_modules` lacks
 `@ktamas77/abletonlink` and pinned `node-gyp`; no dependency repair was made
-in this checkpoint. Remaining blockers are full-suite dependency restoration,
+in this checkpoint. At that checkpoint, the remaining blockers were full-suite dependency restoration,
 the separate physical local MIDI/pedal acceptance, and the pre-existing stale
-ignored artifact cleanup. Next action is to restore the pinned dependencies and
-rerun the full suite before any release artifact is built.
+ignored artifact cleanup. The recorded next action was to restore the pinned
+dependencies and rerun the full suite before building a release artifact.
 
 ## 2026-08-30 product source 1.1.12: `REKORDBOX LOCAL TEST / NO SYNDOCAL`
 
@@ -205,8 +215,9 @@ the repository's LF-to-CRLF notices. First-party warnings are **0**. The new
 target still did not exist at this checkpoint, so DJ-PC rerun, generated target
 validation, strict preflight, runtime restart, Rekordbox state coherence,
 pedal, Syndocal ACK, LAN, and physical hardware acceptance remain unverified.
-The first next action is pull this checkpoint on the DJ PC and rerun the same
-`start-all.bat --upgrade-config` against the unchanged v1.1.10 source.
+The first next action recorded at that checkpoint was to pull it on the DJ PC
+and rerun the same `start-all.bat --upgrade-config` against the unchanged
+v1.1.10 source.
 
 branch `beta-v1.1.2`の再接続ABA fenceはcommit
 `eb9d131f7b57c29231bdf605f498c877180ad553`としてpush済みです。この次の
@@ -286,7 +297,7 @@ fallbackは単調増加する`pedalIntentId`と、発行時点の
 focused software gateは通過していますが、DJ controller、Rekordbox MIDI、物理pedal、
 wired LAN、real token/ACK、reconnect/restartは未受入で、matrixは**0/12**のままです。
 
-### 2026-08-27 CURRENT production title-owner selection checkpoint
+### HISTORICAL CHECKPOINT — 2026-08-27 production title-owner selection
 
 公演用owner選定はexternal show JSONのexact
 `trackActivity.ownerSelection = {"mode":"titleContains","titleNeedle":"人生オーバー","deck1MetadataWaitMs":1400}`
@@ -316,7 +327,7 @@ launcher/READMEを再監査してP0/P1/P2なしの**GO**でした。これはsou
 F13をcurrent `loopActive`の反対を送るabsolute LOOP_SETへ、F14をactive-loop-only
 LOOP_HALFへ固定します。
 
-### 2026-08-28 CURRENT content-identity transition checkpoint
+### HISTORICAL CHECKPOINT — 2026-08-28 content-identity transition
 
 ライブ確認でDemo Track 2をロードした際、新しい`contentId=235403562`が届いたのに、
 直前の`More One Night × 動く、動く (Agate Trance&Makina bootleg)`のtitleが残った。
@@ -332,11 +343,11 @@ enrichmentは保持し、owner selectionが古いtitleから再admitすること
 していない。mapped track、Rekordbox MIDI、physical pedal、wired LAN、real ACK、
 installer/tag/public releaseは未確認・未主張です。
 
-### 2026-08-28 CURRENT watchdog and Stage 2 pedal contract checkpoint
+### HISTORICAL CHECKPOINT — 2026-08-28 watchdog and Stage 2 pedal contract
 
-The source-only v1.1.11 tranche is a dirty worktree based on HEAD `4e26da2`;
-it remains intentionally uncommitted and unpushed; base HEAD equals its upstream
-tracking ref. Release ramp
+At that checkpoint, the source-only v1.1.11 tranche was a dirty worktree based
+on HEAD `4e26da2`; it was intentionally uncommitted and unpushed, and the base
+HEAD equaled its upstream tracking ref. Release ramp
 configuration remains exactly 1000 ms with a 50 ms update interval; the
 watchdog is now scheduled only after the nominal duration plus one update
 interval, so an adapter endpoint callback at the nominal boundary remains
@@ -363,12 +374,12 @@ claimed. All changed JS files pass `node --check`; `git diff --check` exits 0.
 First-party warning count is **0**
 (Git's LF-to-CRLF working-copy notices are not source warnings).
 No restart, deployment, installer/tag/public-release, peer ACK, or physical
-hardware acceptance is claimed. The next safe action is independent review
-and integration verification against the peer's v3 capability-10 contract;
-keep the working tree uncommitted until the supervising release checkpoint
-authorizes its handoff.
+hardware acceptance was claimed at that checkpoint. Its recorded next action
+was independent review and integration verification against the peer's v3
+capability-10 contract; the working tree was to remain uncommitted until the
+supervising release checkpoint authorized its handoff.
 
-### 2026-08-28 CURRENT live-state coherence and broadcast checkpoint
+### HISTORICAL CHECKPOINT — 2026-08-28 live-state coherence and broadcast
 
 The 2026-08-28 v1.1.11 production source-only live-state fix is based on branch
 `beta-v1.1.2`, pre-commit HEAD/upstream
@@ -669,7 +680,7 @@ peerを偽装できません。物理ペダルとglobal hotkeyはDJ PCローカ�
 セキュリティ警告を1件出力します。この方針でLAN向けread-only GET APIや
 rb-output自身のSocket.IOイベントが認証付きになることはありません。
 
-## Heartbeat interval checkpoint (2026-08-25)
+## HISTORICAL CHECKPOINT — Heartbeat interval (2026-08-25)
 
 DJ Agent の Syndocal heartbeat は、注入可能な interval API が返す handle を
 opaque value として保持する。`0`、`false`、空文字列、`undefined` を含む falsy
@@ -684,8 +695,8 @@ checkpoint は branch `beta-v1.1.2`、commit
 `git diff --check` を再実行し、P0/P1/P2なし、first-party warning 0 と判定した。
 commit では共有 `tests/smoke.test.js` の MIDI hunks を除外し、interval hunks
 だけを部分 stage した。DJ PC、LAN、Rekordbox、pedal、Syndocal ACK の physical
-acceptance は引き続き未検証であり、次はHTTP action hardeningとadapter authorityの
-Oxレビューを閉じて次checkpointを作る。
+acceptance は当時未検証でした。当時の次の作業として、HTTP action hardeningとadapter
+authorityのOxレビュー後にcheckpointを作成することが記録されていました。
 
 ## SUPERSEDED / HISTORICAL — 2026-08-25 live DJ PC checkpoint（hardware acceptanceではない）
 
@@ -700,7 +711,7 @@ Oxレビューを閉じて次checkpointを作る。
 Learn、virtual MIDI driver、Stream Deck/Elgatoの受入れ完了を意味しません。MinHook pinと
 `build-dist`経路の最終レビューもpendingであり、完了扱いにしません。
 
-### 旧dist削除 checkpoint
+### HISTORICAL CHECKPOINT — 旧dist削除
 
 同日の配布監査で、既存 `dist` は39 files / `220,529,137` logical bytesであり、
 `build-identity.json`、`install-manifest.json`、`release-manifest.json`、
@@ -711,15 +722,14 @@ reparse point 0、実行中process reference 0であることを確認し、そ�
 `220,618,752` bytesだった。ソース、`node_modules`、`.venv`、native source、Git
 branch/commitは削除していない。
 
-したがって現在は配布可能なartifactが存在しない。Windows x64 Ableton Link addon、
+したがって当時は配布可能なartifactが存在しませんでした。当時の配布条件は、Windows x64 Ableton Link addon、
 全test/warning gate、identity-bound clean build、ZIP/installer manifest、Ox reviewが
-揃うまでDJ PCへ転送してはならず、旧artifactの存在をrelease evidenceとして引用しては
-ならない。
+揃うまでDJ PCへ転送せず、旧artifactの存在をrelease evidenceとして引用しないことでした。
 
 このdocs-only checkpoint開始時点のrepository位置は、branch
 `beta-v1.1.2`、HEAD `6b9368ede62b8f2c3a5610924a71da9f176c015b`、upstream
 `origin/beta-v1.1.2`と同一です。既存の他ファイルのdirty/untracked状態は保持し、
-このsupport laneではcommit/pushを行いません。
+当時のsupport laneではcommit/pushを行いませんでした。
 
 ## SUPERSEDED / HISTORICAL — strict-v2 wire契約(2026-08-25; 次のCURRENT見出し直前まで)
 
