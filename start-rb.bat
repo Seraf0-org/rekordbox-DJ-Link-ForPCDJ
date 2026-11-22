@@ -20,7 +20,7 @@ echo [DJLinkForPCDJ] injecting hook (Rekordbox must be running)...
 
 echo.
 if errorlevel 1 (
-  echo [ERROR] Hook injection failed. Is Rekordbox 7.2.13, 7.2.14, or 7.2.18 running?
+  echo [ERROR] Hook injection failed. Is Rekordbox 7.2.13, 7.2.14, 7.2.18, or 7.2.20 running?
   echo         Antivirus software may also be blocking the injection.
 ) else (
   echo [OK] Done.

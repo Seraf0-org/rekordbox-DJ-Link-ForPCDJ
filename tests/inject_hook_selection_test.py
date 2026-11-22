@@ -128,6 +128,11 @@ class InjectionSelectionTests(unittest.TestCase):
                 [2],
             )
 
+    def test_supported_versions_include_7_2_20_but_not_unverified_builds(self):
+        self.assertIn((7, 2, 20), inject_hook.SUPPORTED_REKORDBOX_VERSIONS)
+        self.assertIn((7, 2, 18), inject_hook.SUPPORTED_REKORDBOX_VERSIONS)
+        self.assertNotIn((7, 2, 19), inject_hook.SUPPORTED_REKORDBOX_VERSIONS)
+
     def test_explicit_path_must_equal_a_discovered_supported_install(self):
         catalog = [((7, 2, 18), self.supported.resolve())]
         with mock.patch.object(inject_hook, "installed_supported_rekordbox", return_value=catalog):

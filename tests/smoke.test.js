@@ -347,6 +347,48 @@ test("hook udp provider normalizes native mixer fader state", async (t) => {
   assert.match(event.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("hook udp provider labels 7.2.20 mixer layout and ignores unknown labels", async (t) => {
+  const port = 44_500 + Math.floor(Math.random() * 500);
+  const provider = createHookUdpProvider({ enabled: true, port });
+  t.after(() => provider.stop());
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Hook provider did not bind")), 1_000);
+    provider.on("status", (status) => {
+      if (status.message?.includes("listener started")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  const events = [];
+  const twoEvents = new Promise((resolve) => {
+    provider.on("mixer-state", (event) => {
+      events.push(event);
+      if (events.length === 2) resolve();
+    });
+  });
+  provider.start();
+  await started;
+
+  const sender = dgram.createSocket("udp4");
+  t.after(() => sender.close());
+  const send = (layout) => new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify({
+      type: "mixer_state",
+      layout,
+      crossfader: 0.5,
+      channelFaders: [0.25, 0.75],
+    }));
+    sender.send(body, port, "127.0.0.1", (error) => error ? reject(error) : resolve());
+  });
+  await send("7.2.20");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await send("../evil");
+  await twoEvents;
+  assert.equal(events[0].source, "rekordbox-hook-7.2.20");
+  assert.equal(events[1].source, "rekordbox-hook-7.2.18");
+});
+
 test("rekordbox install directory versions are parsed strictly", () => {
   assert.deepEqual(parseVersionFromDirectory("rekordbox 7.2.18"), [7, 2, 18]);
   assert.deepEqual(parseVersionFromDirectory("Rekordbox 7.2.13"), [7, 2, 13]);

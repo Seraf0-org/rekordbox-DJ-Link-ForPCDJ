@@ -150,7 +150,7 @@ test("source server restart is limited to the exact checkout-owned listener", ()
 
 test("source injection auto-launch remains restricted to supported Rekordbox builds", () => {
   const source = fs.readFileSync(path.join(repoRoot, "scripts", "inject_hook.py"), "utf8");
-  assert.match(source, /SUPPORTED_REKORDBOX_VERSIONS\s*=\s*\{\(7, 2, 13\), \(7, 2, 14\), \(7, 2, 18\)\}/);
+  assert.match(source, /SUPPORTED_REKORDBOX_VERSIONS\s*=\s*\{\(7, 2, 13\), \(7, 2, 14\), \(7, 2, 18\), \(7, 2, 20\)\}/);
   assert.match(source, /re\.fullmatch\(r"rekordbox\\s\+\(\\d\+\)\\\.\(\\d\+\)\\\.\(\\d\+\)"/);
   assert.match(source, /version not in SUPPORTED_REKORDBOX_VERSIONS/);
   assert.match(source, /--launch-path and --launch-installed are mutually exclusive/);

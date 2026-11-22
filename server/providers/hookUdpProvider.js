@@ -715,10 +715,12 @@ function createHookUdpProvider({ enabled = true, port = 22346 } = {}) {
       if (crossfader == null || channelFaders.length !== 2 || channelFaders.includes(null)) {
         return;
       }
+      // Hook builds before 7.2.20 support omit `layout`; they only ran on 7.2.18.
+      const layout = packet.layout === "7.2.20" ? "7.2.20" : "7.2.18";
       emitter.emit("mixer-state", {
         crossfader,
         channelFaders,
-        source: "rekordbox-hook-7.2.18",
+        source: `rekordbox-hook-${layout}`,
         updatedAt: new Date().toISOString(),
       });
       return;

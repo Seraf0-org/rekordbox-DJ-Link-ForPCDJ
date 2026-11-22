@@ -145,7 +145,7 @@ echo [rb-output] injecting hook...
 if errorlevel 1 (
   echo.
   echo [ERROR] Hook injection failed.
-  echo   - Is a supported Rekordbox version ^(7.2.13, 7.2.14, or 7.2.18^) installed or running?
+  echo   - Is a supported Rekordbox version ^(7.2.13, 7.2.14, 7.2.18, or 7.2.20^) installed or running?
   echo   - Try running this script as Administrator
   echo   - Antivirus may be blocking DLL injection
   echo.

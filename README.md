@@ -7,7 +7,7 @@ pedal ownership and dated acceptance evidence, use
 to your operating mode. Historical checkpoints are evidence, not instructions
 to repeat a build, deployment, review, or cleanup.
 
-Rekordbox 7.2.13、7.2.14、7.2.18 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**低遅延Now PlayingおよびBPMリアルタイム配信システム**です。
+Rekordbox 7.2.13、7.2.14、7.2.18、7.2.20 と Pioneer DJコントローラー（FLXシリーズ等）環境における、**低遅延Now PlayingおよびBPMリアルタイム配信システム**です。
 
 Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部関数を直接フックすることで、ポーリングファイル監視では実現できない0秒遅延の楽曲状態の取得とWebサーバーでの統合表示を行います。
 
@@ -637,7 +637,7 @@ Windows native prebuildをpkgのassetsに含めます。機器やnative module�
 ## Prerequisites (前提環境)
 
 * **OS**: Windows 11 (x64)
-* **Software**: Rekordbox 7.2.13、7.2.14、7.2.18（それ以外はシグネチャの再調査が必要な場合があります）
+* **Software**: Rekordbox 7.2.13、7.2.14、7.2.18、7.2.20（それ以外はシグネチャの再調査が必要な場合があります）
 * **Source Build Tools**: machine-installed Git for Windows、Node.js、Python 3、および `g++` (TDM-GCC/MSYS2) または Visual Studio C++ Build Tools
 
 ※ *注意*: プロセス注入型のフックエンジンのため、アンチウイルスソフト（Windows Defender等）にて検知・ブロックされる場合や、管理者権限が必要になる場合があります。環境に応じた例外設定および自己責任でのご利用をお願いいたします。
@@ -754,7 +754,7 @@ production起動はまず
 `REKORDBOX_EXE_PATH`のProcess/User/Machine preflightをfail-closeで行い、「DLLの再ビルドと
 provenance検証」→「このcheckoutが所有するWebサーバーを現在の環境変数で再起動」→
 「Rekordboxへのインジェクト」→「ブラウザ起動」までを処理します。対応版のRekordboxが
-起動していなければ、インストール済みの7.2.18、7.2.14、7.2.13の順で自動起動します。
+起動していなければ、インストール済みの7.2.20、7.2.18、7.2.14、7.2.13の順で自動起動します。
 既存DLLの存在だけでは成功扱いにしません。以前にsource Hookを注入したRekordboxが
 起動中の場合はDLLを保持しているため、いったんRekordboxを終了してから実行してください。
 
@@ -793,7 +793,7 @@ fail-closedで拒否します。全インターフェイス公開が不要な場
 `127.0.0.1`（IPv6 local-onlyなら`::1`）を明示してください。
 ※`REKORDBOX_EXE_PATH`は退役済みです。source acceptanceでは唯一の`start-all.bat`が
 Process/User/Machineをfail-closeで確認します。`--launch-path`は任意パス
-overrideではなく、列挙された対応版（7.2.13／7.2.14／7.2.18）のcanonical installと
+overrideではなく、列挙された対応版（7.2.13／7.2.14／7.2.18／7.2.20）のcanonical installと
 完全一致する`rekordbox.exe`だけを受理します。`--launch-installed`は実行中の対応版を
 優先し、なければ対応するインストール済み最新版だけを選びます。未対応版または別install
 だけが実行中なら注入せずfail-closeします。自動起動した場合は固定の
