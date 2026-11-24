@@ -314,7 +314,7 @@ test("release workflow installs the exact official 6.7.3 installer without weake
 });
 
 test("release writer records validated tool evidence", () => {
-  const writer = fs.readFileSync(RELEASE_WRITER, "utf8");
+  const writer = fs.readFileSync(RELEASE_WRITER, "utf8").replace(/\r\n/g, "\n");
   assert.match(writer, /argValues\("--tool"\)/);
   assert.match(writer, /duplicate --tool name/);
   assert.match(writer, /\n    tools,\n/);

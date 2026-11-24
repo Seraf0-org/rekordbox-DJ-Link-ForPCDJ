@@ -34,6 +34,39 @@ v1.1.11 token-free templateへ移して、sourceを変更せず、targetを排�
 作成後はcurrent strict preflightだけを実行し、次のPowerShell assignmentを表示して
 runtimeを起動しません。全DJ PCの移行完了後に、このpredecessor pathを削除します。
 
+## 2026-11-24 product source 1.1.12: Rekordbox 7.2.20 hook support and release preparation
+
+`rb_hook.dll` now supports Rekordbox 7.2.20 in addition to 7.2.13, 7.2.14, and
+7.2.18 (`kVersion` `rb-hook-7.2.13-7.2.20-v1.1.2-mixer-faders`). The 7.2.20
+path adds a MainComponent signature (UiManager `+0x4C0`), a SongInfo-based
+track id (`UiPlayer+0x4D0` → `+0x8`, RTTI `SongInfo@djplay`), SongInfo metadata
+fallback for tracks outside the visible browser list, and an RTTI-verified
+mixer profile table (`7.2.18` / `7.2.20`). The `mixer_state` packet carries
+`layout`, and the hook UDP provider reports `rekordbox-hook-7.2.20` for that
+layout. `scripts/inject_hook.py` admits `(7, 2, 20)`.
+
+Observed on this development PC with Rekordbox 7.2.20 (software evidence, not
+DJ-PC acceptance): crossfader, four channel faders, track ids, metadata for
+device-library tracks (SongInfo) and collection tracks (row data), and track
+swaps all reached the server. 7.2.18 was not re-run live because it is no
+longer installed on this PC; its profile values are unchanged.
+
+Dependency checkpoint: `package-lock.json` resolves body-parser 2.4.0,
+proxy-addr 2.0.8, engine.io 6.6.12, and qs 6.17.1; `npm audit` reports 0
+vulnerabilities and all Dependabot alerts are `fixed`.
+
+Release gate checks on a clean ASCII-path worktree: the full `node --test` suite
+passes except for tests that require a toolchain or environment absent here
+(Ableton Link source build: Visual Studio gyp with Python 3.8-3.13; PS5.1 probe
+under a non-ASCII path; session variables `SYNDOCAL_TOKEN` and
+`NoDefaultCurrentDirectoryInExePath`). Two source-structure tests were made
+line-ending neutral so a CRLF (`core.autocrlf=true`) checkout, as on the
+Windows release runner, matches an LF checkout. The hook source has zero
+warnings under Clang with the release flags (`-std=gnu++17 -Wall -Wextra`).
+The v1.1.12 installer, ZIP, and release manifest are produced by the tag-driven
+release workflow; DJ PC install and hardware acceptance (physical LAN,
+Rekordbox, MIDI, pedal, Syndocal ACK) remain 0/12 and are not claimed.
+
 ## 2026-09-03 product source 1.1.12: standalone core startup without Syndocal
 
 The no-argument `start-all.bat` path now treats `DJ_AGENT_CONFIG_PATH` as

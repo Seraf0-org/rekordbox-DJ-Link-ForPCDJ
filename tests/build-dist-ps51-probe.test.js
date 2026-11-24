@@ -176,9 +176,12 @@ test("build-dist and PS5.1 tests execute the same bounded packaging probe helper
     return;
   }
 
-  const buildSource = fs.readFileSync(BUILD_SCRIPT, "utf8");
-  const bootstrapSource = fs.readFileSync(WINDOWS_DESKTOP_BOOTSTRAP, "utf8");
-  const helperSource = fs.readFileSync(PROBE_HELPER, "utf8");
+  // Windows checkouts may use CRLF (core.autocrlf); the assertions are about
+  // source structure, not line endings.
+  const readSource = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  const buildSource = readSource(BUILD_SCRIPT);
+  const bootstrapSource = readSource(WINDOWS_DESKTOP_BOOTSTRAP);
+  const helperSource = readSource(PROBE_HELPER);
   assert.match(buildSource, /\[System\.IO\.Path\]::Combine\(\$PSScriptRoot, "initialize-windows-desktop-powershell\.ps1"\)/);
   assert.match(buildSource, /\[System\.IO\.FileInfo\]::new\(\$windowsDesktopBootstrapPath\)/);
   assert.match(buildSource, /windowsDesktopBootstrapItem\.Attributes\s+-band\s+\[System\.IO\.FileAttributes\]::ReparsePoint/);
