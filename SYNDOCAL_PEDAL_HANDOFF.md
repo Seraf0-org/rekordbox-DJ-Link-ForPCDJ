@@ -55,17 +55,50 @@ Dependency checkpoint: `package-lock.json` resolves body-parser 2.4.0,
 proxy-addr 2.0.8, engine.io 6.6.12, and qs 6.17.1; `npm audit` reports 0
 vulnerabilities and all Dependabot alerts are `fixed`.
 
-Release gate checks on a clean ASCII-path worktree: the full `node --test` suite
-passes except for tests that require a toolchain or environment absent here
-(Ableton Link source build: Visual Studio gyp with Python 3.8-3.13; PS5.1 probe
-under a non-ASCII path; session variables `SYNDOCAL_TOKEN` and
-`NoDefaultCurrentDirectoryInExePath`). Two source-structure tests were made
-line-ending neutral so a CRLF (`core.autocrlf=true`) checkout, as on the
-Windows release runner, matches an LF checkout. The hook source has zero
-warnings under Clang with the release flags (`-std=gnu++17 -Wall -Wextra`).
-The v1.1.12 installer, ZIP, and release manifest are produced by the tag-driven
-release workflow; DJ PC install and hardware acceptance (physical LAN,
-Rekordbox, MIDI, pedal, Syndocal ACK) remain 0/12 and are not claimed.
+Release workflow repair. The tag-driven release workflow had never completed
+since v1.1.3 (whose CI run failed at the hook build; its assets were built
+locally). A branch-triggered copy of the workflow (no upload, local-only tag)
+was iterated on GitHub-hosted runners until it passed end to end. Fixes:
+
+- The MinGW gate and `build-ableton-link.ps1` took `Get-Command` results as a
+  single path; the runner has two `g++.exe` and two `node.exe` on PATH, so
+  both now use the first resolution, which is what an invocation executes.
+- `@ktamas77/abletonlink` ships a macOS binary and its stock `binding.gyp`
+  fails on Windows, so `npm ci` silently dropped the optional package. The
+  workflow now runs `npm ci --ignore-scripts`, rebuilds the other install-script
+  packages explicitly, fetches the pinned v22.22.1 headers with node-gyp, and
+  builds the addon with the reviewed `build-ableton-link.ps1` (Node pinned to
+  exactly v22.22.1). The builder accepts the standard VS 2022 edition roots
+  (Community, Professional, Enterprise, BuildTools); MSVC 14.44.35207 and
+  MSBuild 17 remain pinned.
+- `windows-2025` now ships only Visual Studio 18 (2026), so the release job
+  runs on `windows-2022` (VS 2022 Enterprise with MSVC 14.44.35207).
+- The runner TEMP is an 8.3 short path (`C:\Users\RUNNER~1`), which the
+  provenance and config writers correctly reject as a non-canonical alias; the
+  workflow exports the long LocalAppData Temp path.
+- Product bug: `isWithin` in `server/dj-agent/config.js` and
+  `scripts/upgrade-show-config.js` treated a path on another drive as inside the
+  checkout (`path.relative` returns an absolute path across drives). A checkout
+  on `D:` therefore rejected a valid external config such as
+  `C:\SyndocalShow\...`. Fixed and reproduced/verified with a `D:` checkout and
+  `C:` TEMP (14 failures before, 0 after).
+- `actions/checkout` leaves an inert `.git\config.worktree`
+  (`sparseCheckout`/`sparse = false`) that the preflight rejects; the workflow
+  removes only that exact residue. The preflight reads Git without system
+  config, so the job disables `core.autocrlf` before checkout and
+  `.gitattributes` keeps `*.bat`/`*.cmd` CRLF.
+- Hook-build fixtures accept the runner compiler root through
+  `RB_OUTPUT_TEST_TRUSTED_COMPILER_ROOT`, matching the workflow's
+  `-AdditionalTrustedCompilerRoots C:\mingw64`.
+
+Final dry run on `windows-2022`: full `npm test` 535 total / 529 pass / 0 fail /
+6 skipped, required real pkg provenance smoke PASS, Ableton Link addon built and
+promoted, `build-dist.ps1` Steps 0-7 PASS, and `verify-release-artifacts.js`
+PASS for `DJLinkForPCDJ-setup.exe`, `rb-output-1.1.12.zip`, and
+`release-manifest.json`. The hook source also has zero warnings under Clang with
+the release flags (`-std=gnu++17 -Wall -Wextra`). DJ PC install and hardware
+acceptance (physical LAN, Rekordbox, MIDI, pedal, Syndocal ACK) remain 0/12 and
+are not claimed.
 
 ## 2026-09-03 product source 1.1.12: standalone core startup without Syndocal
 

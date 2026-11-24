@@ -13,11 +13,21 @@ jobs:
   build:
     # Pin the runner image major. A moving windows-latest image can silently
     # replace build tools while this workflow is still otherwise pinned.
-    runs-on: windows-2025
+    # windows-2022 is required: the Ableton Link source build pins the VS 2022
+    # MSVC 14.44 toolset and MSBuild 17, while the windows-2025 image now ships
+    # only Visual Studio 18 (2026).
+    runs-on: windows-2022
     permissions:
       contents: write
 
     steps:
+      # The release preflight reads Git without system/global config, so the
+      # working tree must be the exact repository bytes. Git for Windows ships
+      # core.autocrlf=true system-wide; disable it before checkout (.bat/.cmd
+      # files still get CRLF from .gitattributes).
+      - name: Disable checkout line-ending conversion
+        run: git config --system core.autocrlf false
+
       - name: Checkout
         # actions/checkout v7.0.1 (Node 24), immutable commit pin.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -26,11 +36,36 @@ jobs:
           # exactly the pushed ANNOTATED tag object (git cat-file -t == "tag").
           fetch-depth: 0
 
+      # actions/checkout runs `git sparse-checkout disable`, which leaves an
+      # inert .git\config.worktree (core.sparseCheckout=false) after unsetting
+      # extensions.worktreeConfig. The release preflight rightly rejects any
+      # linked-worktree config, so remove only that exact inert residue.
+      - name: Remove inert checkout sparse residue
+        run: |
+          $ErrorActionPreference = "Stop"
+          $residue = Join-Path (Get-Location) ".git\config.worktree"
+          if (Test-Path -LiteralPath $residue) {
+            $active = git config --local --get extensions.worktreeConfig
+            if ($LASTEXITCODE -eq 0 -and $active) { throw "extensions.worktreeConfig is active; refusing to remove config.worktree" }
+            $global:LASTEXITCODE = 0
+            Get-Content -LiteralPath $residue | ForEach-Object { Write-Host "config.worktree: $_" }
+            foreach ($line in Get-Content -LiteralPath $residue) {
+              $trimmed = $line.Trim()
+              if ($trimmed -eq "" -or $trimmed -eq "[core]" -or $trimmed -eq "[index]") { continue }
+              if ($trimmed -match '^(sparseCheckout|sparseCheckoutCone|sparse)\s*=\s*false$') { continue }
+              throw "unexpected config.worktree content: $trimmed"
+            }
+            Remove-Item -LiteralPath $residue -Force
+            Write-Host "Removed inert sparse-checkout config.worktree"
+          }
+
       - name: Setup Node.js
         # actions/setup-node v7.0.0 (Node 24), immutable commit pin.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '22'
+          # Exact pin: the Ableton Link source build requires Node v22.22.1
+          # and its reviewed node headers manifest.
+          node-version: '22.22.1'
           cache: 'npm'
 
       - name: Setup Python
@@ -44,17 +79,57 @@ jobs:
       - name: Add MinGW to PATH
         run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...). The
+      # provenance and config writers correctly treat a short-name alias as a
+      # path that does not resolve to itself, so use the canonical long path.
+      - name: Use canonical long TEMP path
+        run: |
+          $ErrorActionPreference = "Stop"
+          $long = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData), "Temp")
+          New-Item -ItemType Directory -Force -Path $long | Out-Null
+          $item = Get-Item -LiteralPath $long -Force
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.FullName -match "~") {
+            throw "canonical TEMP is not a normal long path: $($item.FullName)"
+          }
+          "TEMP=$($item.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$($item.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TEMP=$($item.FullName)"
+
       # Reproducible installs only: npm ci fails on any package.json/lockfile
       # drift and supplies the exact tracked @yao-pkg/pkg devDependency.
+      # Install scripts are skipped so the optional @ktamas77/abletonlink
+      # package (whose npm tarball ships a macOS binary and whose stock
+      # binding.gyp does not build on Windows) stays installed for the reviewed
+      # source build below; the other install scripts are then run explicitly.
       - name: npm ci
-        run: npm ci
+        run: |
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+          npm rebuild esbuild @julusian/midi uiohook-napi
+          if ($LASTEXITCODE -ne 0) { throw "npm rebuild failed" }
+
+      # The Ableton Link builder never downloads; node-gyp fetches the official
+      # v22.22.1 headers and node.lib into its cache (checksum-verified against
+      # SHASUMS256.txt) and the builder then proves every byte against the
+      # tracked node-headers-manifest.json.
+      - name: Fetch pinned Node headers for node-gyp
+        run: |
+          node node_modules/node-gyp/bin/node-gyp.js install 22.22.1
+          if ($LASTEXITCODE -ne 0) { throw "node-gyp headers install failed" }
+
+      - name: Build Ableton Link native addon from reviewed source
+        run: |
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-ableton-link.ps1 -LinkLicenseMode GPL-2.0-or-later
+          if ($LASTEXITCODE -ne 0) { throw "Ableton Link source build failed" }
 
       - name: Require the exact non-reparse MinGW compiler
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $expected = "C:\mingw64\bin\g++.exe"
-          $command = Get-Command g++.exe -CommandType Application -ErrorAction Stop
+          # The runner image ships more than one g++.exe on PATH (for example
+          # Strawberry Perl); only the first resolution is the one a build uses.
+          $command = Get-Command g++.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
           if ($command.Source -cne $expected) {
             throw "first resolved g++.exe must be exactly $expected; got $($command.Source)"
           }
@@ -115,6 +190,10 @@ jobs:
           Write-Host "Inno Setup 6.7.3 installed: $isccPath"
 
       - name: Run tests
+        env:
+          # Hook-build fixtures use the same explicit compiler root as the
+          # hook build step above.
+          RB_OUTPUT_TEST_TRUSTED_COMPILER_ROOT: C:\mingw64
         run: npm test
 
       - name: Required real pkg provenance smoke

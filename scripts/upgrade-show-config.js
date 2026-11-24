@@ -382,6 +382,9 @@ function realpath(fsApi, target) {
 
 function isWithin(parent, candidate) {
   const relative = path.relative(parent, candidate);
+  // A path on another Windows drive has no relative form; path.relative
+  // returns it absolute, and it is never inside the parent.
+  if (path.isAbsolute(relative)) return false;
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
 }
 

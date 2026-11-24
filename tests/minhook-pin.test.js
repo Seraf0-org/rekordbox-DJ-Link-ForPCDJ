@@ -99,6 +99,18 @@ function makeProjectFixture(t) {
   return { root, cache };
 }
 
+// A release runner whose compiler lives outside the OS-derived roots (for
+// example C:\mingw64) names that root explicitly, exactly as the workflow's
+// own hook build does. Tests that pass their own roots stay authoritative.
+function withRunnerCompilerRoot(args) {
+  const runnerCompilerRoot = process.env.RB_OUTPUT_TEST_TRUSTED_COMPILER_ROOT || "";
+  const result = [...args];
+  if (runnerCompilerRoot && !result.includes("-AdditionalTrustedCompilerRoots")) {
+    result.push("-AdditionalTrustedCompilerRoots", runnerCompilerRoot);
+  }
+  return result;
+}
+
 function runBuild(root, extraEnv = {}, pathPrefix = "", extraArgs = []) {
   const output = path.join(root, "native", "bin", "rb_hook.dll");
   const callerProvidedPath = Object.prototype.hasOwnProperty.call(extraEnv, PATH_ENV_NAME);
@@ -122,13 +134,14 @@ function runBuild(root, extraEnv = {}, pathPrefix = "", extraArgs = []) {
       "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\Modules",
     ].join(";"),
   };
+  const buildArgs = withRunnerCompilerRoot(extraArgs);
   const result = spawnSync("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", SCRIPT_PATH,
     "-ProjectRoot", root,
     "-OutputPath", output,
-    ...extraArgs,
+    ...buildArgs,
   ], {
     cwd: REPO_ROOT,
     env,
@@ -313,7 +326,7 @@ test("release workflow pins Actions, serializes each tag, and revalidates before
 });
 
 test("release workflow seals the exact v1.1.12 tag, artifacts, and compiler before upload", () => {
-  assert.match(RELEASE_WORKFLOW, /runs-on:\s+windows-2025/);
+  assert.match(RELEASE_WORKFLOW, /runs-on:\s+windows-2022/);
   assert.doesNotMatch(RELEASE_WORKFLOW, /runs-on:\s+windows-latest/);
 
   const compilerGate = RELEASE_WORKFLOW.indexOf("Require the exact non-reparse MinGW compiler");
@@ -1006,6 +1019,7 @@ test("inherited Git routing and config injection cannot reroute a clean cache", 
   const result = spawnSync("powershell.exe", [
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_PATH,
     "-ProjectRoot", fixture.root, "-OutputPath", output,
+    ...withRunnerCompilerRoot([]),
   ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 120_000 });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(fs.existsSync(marker), false, "inherited Git config injection executed");

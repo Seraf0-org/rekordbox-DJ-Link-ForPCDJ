@@ -72,6 +72,7 @@ $script:HeadersAltArchiveOfficialShaPin = "3f435f2ac1ab363f8220f4beb60c7493a3f68
 $script:HeadersManifestRel = "node-headers-manifest.json"
 $script:MsvcToolsVersionPin = $MsvcToolsVersion
 $script:VsRootSuffix = "Microsoft Visual Studio\2022\Community"
+$script:VsAllowedEditions = @("Community", "Professional", "Enterprise", "BuildTools")
 $script:LicenseAllowed = "GPL-2.0-or-later"
 $script:DefaultSourceRel = "node_modules\@ktamas77\abletonlink"
 $script:DefaultDestRel = "node_modules\@ktamas77\abletonlink\build\Release\abletonlink.node"
@@ -527,7 +528,9 @@ function Resolve-Toolchain {
   # --- Node ---
   $nodeExe = $NodeExeOverride
   if ([string]::IsNullOrWhiteSpace($nodeExe)) {
-    $cmd = Get-Command -Name "node.exe" -CommandType Application -ErrorAction SilentlyContinue
+    # PATH may hold several node.exe entries (hosted runners do); the first
+    # resolution is the one every caller would execute.
+    $cmd = Get-Command -Name "node.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $cmd) { Fail "node.exe was not found on PATH" }
     $nodeExe = $cmd.Source
   }
@@ -615,7 +618,7 @@ function Resolve-Toolchain {
   if ([string]::IsNullOrEmpty($pythonExe)) { Fail "no usable Python 3.8-3.13 interpreter found for gyp" }
   Assert-NoReparsePathChain -Path $pythonExe -Label "Python interpreter"
 
-  # --- Visual Studio 2022 Community via trusted vswhere ---
+  # --- Visual Studio 2022 via trusted vswhere ---
   $pfX86 = Get-TrustedProgramFilesX86
   $pf = Get-TrustedProgramFiles
   $vswhere = Join-Path $pfX86 "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -629,10 +632,22 @@ function Resolve-Toolchain {
     $t = $line.Trim()
     if (-not [string]::IsNullOrWhiteSpace($t)) { $vsRoot = $t; break }
   }
-  $expectedVsRoot = Join-Path $pf $script:VsRootSuffix
   if ([string]::IsNullOrWhiteSpace($vsRoot)) { Fail "vswhere returned no VS installation with VC tools" }
-  if (-not $vsRoot.Equals(([IO.Path]::GetFullPath($expectedVsRoot)), [StringComparison]::OrdinalIgnoreCase)) {
-    Fail "resolved VS installation does not match the pinned VS2022 Community root"
+  # The toolset identity is pinned by the exact MSVC directory and binary
+  # versions below; the edition only decides where VS 2022 lives. Accept the
+  # standard VS 2022 edition roots under the trusted Program Files folders
+  # (Community on the reviewed DJ PC, Enterprise on hosted release runners).
+  $allowedVsRoots = @()
+  foreach ($edition in $script:VsAllowedEditions) {
+    $allowedVsRoots += [IO.Path]::GetFullPath((Join-Path $pf ("Microsoft Visual Studio\2022\" + $edition)))
+    $allowedVsRoots += [IO.Path]::GetFullPath((Join-Path $pfX86 ("Microsoft Visual Studio\2022\" + $edition)))
+  }
+  $vsRootAllowed = $false
+  foreach ($allowedVsRoot in $allowedVsRoots) {
+    if ($vsRoot.Equals($allowedVsRoot, [StringComparison]::OrdinalIgnoreCase)) { $vsRootAllowed = $true; break }
+  }
+  if (-not $vsRootAllowed) {
+    Fail "resolved VS installation is not a standard VS 2022 edition root under trusted Program Files"
   }
   Assert-NoReparsePathChain -Path $vsRoot -Label "Visual Studio installation"
 
