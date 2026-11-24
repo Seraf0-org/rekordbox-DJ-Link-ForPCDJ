@@ -1,5 +1,9 @@
 # rb-output API
 
+This document defines HTTP endpoints and wire formats. Operator setup and
+launch commands live in [README.md](README.md); cross-repository pedal ownership
+and dated acceptance evidence live in [SYNDOCAL_PEDAL_HANDOFF.md](SYNDOCAL_PEDAL_HANDOFF.md).
+
 The server listens on `http://<host>:8787` by default. The core state API is
 read-only and does not require authentication, so it can be consumed by
 another computer or music application on the LAN. The separately gated DJ
@@ -7,6 +11,96 @@ Agent diagnostic action routes are local control endpoints and are available
 only when the extension is explicitly enabled.
 
 ## Current state
+
+### Current Syndocal authority — product source 1.1.12 / production v1.1.11 any-deck strict v3
+
+For the current config template, CSV, and initialization procedure, use the
+[operator guide](README.md). A mapped track may be admitted from any actually
+playing Rekordbox deck. MASTER/master-change is diagnostic only and never
+assigns show-control ownership.
+
+The current product source is `1.1.12`. The production schema, external config,
+and CustomMIDI1 CSV remain the v1.1.11 contract. The controlled product-source
+1.1.12 change is the current controlled-source tranche and checkpoint. This
+document does not claim an installer, tag, public release, deployment, or
+physical hardware acceptance.
+
+### Explicit standalone Rekordbox local test
+
+Product source `1.1.12` has a separate test-only mode labelled
+`REKORDBOX LOCAL TEST / NO SYNDOCAL`. It is selected only by the explicit
+launcher argument and the fixed external config
+`C:\SyndocalShow\rb-output-rekordbox-local-test-v1.json`:
+
+```powershell
+.\start-all.bat --init-rekordbox-local-test
+.\start-all.bat --preflight-rekordbox-local-test
+.\start-all.bat --rekordbox-local-test
+```
+
+Run these commands from the checkout root on the controlled Windows DJ PC.
+Initialization creates the fixed target only when absent. It enumerates MIDI
+outputs and requires exactly one valid `CustomMIDI1` entry with an integer port
+in `0..4096`, then writes that entry's current port; it does not guess a port or
+overwrite the target.
+Preflight enumerates `CustomMIDI1` again and requires the stored device/port to
+match the one unique current entry. It starts no build, server, Rekordbox, Hook,
+MIDI send, or pedal action. The full-runtime command performs the Hook rebuild
+and provenance check, restarts the same-mode local source server, injects the
+Hook, and opens `http://127.0.0.1:8787`. Its process gate enumerates exact-
+checkout `node` source processes independent of listener port and launch state
+(including pre-listen processes) before launch, after an eligible same-mode
+listener stop, immediately before spawn, and after the new child owns the
+requested listener but before success. Any opposite-mode process is
+reported with visible PID and mode and fails closed; no opposite-mode process
+is ever terminated automatically. Automatic restart is limited to an exact
+checkout same-mode process that is listening on the currently requested port.
+A same-mode process on another port or in pre-listen state requires an explicit
+stop before retrying.
+
+This exact-checkout fence is shared by the no-argument launcher and the explicit
+local-test launcher; mode ownership is never inferred from a port alone. A
+valid `DJ_AGENT_CONFIG_PATH` selects the production/Syndocal mode; when it is
+unset, the no-argument launcher starts the core standalone without Syndocal.
+Direct/manual `node` launches outside `start-all.bat` are not automatically
+managed by this restart path and must be stopped explicitly before launch.
+
+This mode never reads `DJ_AGENT_CONFIG_PATH` or other environment-selected
+configuration. It has no token, NIC selection, or Syndocal network leg. Its
+status reports `localTestMode:true`, `testOnly:true`, and the exact delivery
+policy `not-applicable/local-only`; local delivery has no ACK requirement.
+Timeline/Stage 2 is disabled and no `DJ_TIMELINE_*` event is sent.
+F13 revalidates the frozen local owner at every macro phase. Before this macro
+sends Stop, a replaced, stopped, stale, or foreign owner cancels every remaining
+phase. Only after this macro's own successful Stop may the exact frozen detector
+owner receive its neutral HPF/fader reset; a replacement lineage or identity
+never receives that reset.
+
+Local action admission is fail-closed to the current fresh, actually playing
+candidate with the exact admitted deck, `deckId`, `playSessionId`, and frozen
+identity. The selector is `titleContains` with NFC/case-sensitive
+`人生オーバー`; when the title does not match, only a fresh playing Deck 1 may
+be selected by the bounded `1400 ms` fallback. Stale, stopped, foreign,
+replaced, or identity-incomplete candidates do not drive MIDI. F14 runs local
+LoopHalf handling. F13 runs Filter HPF (CC16, 64→127 over 1000 ms), then
+ChannelFader fade (CC17, 127→0 over 1000 ms), then Cue/Stop Note37 exactly once,
+and resets HPF to 64 and the fader to 127 after Stop.
+
+No physical acceptance is claimed. Remaining evidence is the controlled-DJ-PC
+check of unique `CustomMIDI1` enumeration/port, actual Rekordbox Learn and
+MIDI output for LoopHalf/HPF/ChannelFader/Cue-Stop, live Hook identity and both
+title-match and Deck 1 `1400 ms` fallback cases, F14 loop response, F13 order and
+reset, stale/foreign-owner blocking, loopback-only status showing
+`not-applicable/local-only`, and the separate production ACK/disconnect path.
+
+The explicit local-test configuration and routing do not relax the normal
+production ACK boundary. Separately, the common no-argument launcher now applies
+a fixed 15-second identity settle fence before injecting a Rekordbox process it
+launched itself. In production, a fresh candidate must receive a terminal
+`accepted` or `duplicate` `DJ_TRACK_ACTIVE` ACK from Syndocal before admission
+and local MIDI. During a disconnect, production MIDI continues only for an owner
+already admitted by that terminal ACK; the offline path never admits a fresh
+no-Syndocal candidate.
 
 `GET /api/now-playing` (also available as `GET /api/state`) returns the complete
 snapshot used by the web UI. The loop-only endpoint is:
@@ -78,11 +172,23 @@ once for each known deck.
 
 ## DJ Agent extension
 
-The DJ Agent extension is disabled unless DJ_AGENT_ENABLED=true or a JSON
-file with "enabled": true is supplied through DJ_AGENT_CONFIG_PATH. When
-disabled, `GET /api/dj-agent/status` still returns HTTP 200 with
+In normal production mode, the DJ Agent extension is disabled unless an exact
+external v1.1.11 `filter-then-fade-then-stop` JSON file is supplied through
+`DJ_AGENT_CONFIG_PATH`. The no-argument source launcher still starts the core
+without that file, so Syndocal is optional for Now Playing/Hook operation. The
+explicit local-test mode above is the separate exception and uses only its
+fixed test schema.
+`DJ_AGENT_ENABLED`, inline JSON, and every Syndocal/MIDI/pedal environment
+override fail closed with one fixed secret-free reason. When disabled,
+`GET /api/dj-agent/status` still returns HTTP 200 with
 `enabled:false`; the POST action routes return 404 and the existing APIs
 remain unchanged.
+
+The [one-way show-config upgrade](README.md#one-way-show-config-upgrade)
+documents the operator migration procedure. Migration creates the v1.1.11
+target exclusively, leaves the predecessor unchanged, and never starts the
+runtime or prints token/config content. Its retirement depends on confirmed
+adoption by all controlled DJ PCs, not completion of an unrelated code task.
 
 GET /api/dj-agent/status reports the optional Syndocal, MIDI, and pedal
 adapter states. The diagnostic action routes use the same router as the
@@ -93,74 +199,191 @@ physical pedal:
 * POST /api/dj-agent/actions/release
 * POST /api/dj-agent/actions/track-active
 
-When configured, `midi.deckChannels` maps a one-based Rekordbox deck to a MIDI
-channel, for example `{ "1": 1, "2": 2 }`. The current detector master deck
-selects the channel for loop-half, release, and every filter-ramp CC message;
-an unmapped deck falls back to the mapping's configured `channel`. Action
-results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads expose `targetDeck` and
-`targetChannel`. The equivalent environment override is the JSON-valued
-`MIDI_DECK_CHANNELS` variable.
+The exact configuration fixes `midi.deckChannels` to `{ "1": 1, "2": 2 }`.
+The admitted owner deck (not the current MASTER diagnostic) selects the channel
+for loop-half, release, every filter-ramp CC message, and the ChannelFader fade.
+An unmapped deck is blocked; it never falls back to a mapping channel or an
+environment override.
+Action results and `DJ_LOOP_STATE`/`DJ_RELEASE` payloads expose `targetDeck` and
+`targetChannel`.
 
-POST actions are loopback-only by default. IPv4 `127.0.0.0/8`, IPv4-mapped
-IPv6 loopback, and `::1` are accepted. A remote request receives HTTP 403 unless
-`DJ_AGENT_ALLOW_REMOTE_ACTIONS=true` is explicitly configured. The read-only
-status route remains remotely readable.
+POST actions are permanently loopback-only. IPv4 `127.0.0.0/8`, IPv4-mapped
+IPv6 loopback, and `::1` are accepted; a remote request receives HTTP 403. The
+read-only status route remains remotely readable. The retired
+`return-to-dj-control` route is not registered and returns 404; ownership cannot
+be changed by a browser-local fallback. An operator return is initiated by
+Syndocal through the correlated `operatorReturnRequestId` in the authoritative
+Timeline state. rb-output only reannounces the current candidate and the normal
+`DJ_TRACK_ACTIVE` ACK decides admission.
 
-For actions that send `DJ_RELEASE` or `DJ_LOOP_STATE`, HTTP 202 with
-`ok:false`/`ackState:"pending"` means the local action was sent and is waiting
-for a Syndocal ACK. ACK `ok:false`, timeout, disconnected send, and local MIDI
-failure remain failures; they are never reported as `ok:true` merely because a
-send call returned.
+For production actions that send `DJ_RELEASE`, HTTP 202 with
+`ok:false`/`ackState:"pending"` means the Syndocal leg is waiting for an ACK.
+ACK rejection, timeout, disconnected send, and local MIDI failure remain
+separate failures; one leg is never reported successful merely because the
+other send returned. Stage 1 F13 routes one correlated DJ_RELEASE at the same
+initial HPF action edge, before the local fade/Stop tail, even when any local
+Rekordbox MIDI send fails.
 
-Track activity is derived from the existing Hook UDP snapshots and
-master_change packets. DJ_TRACK_LOADED is diagnostic only; it never emits
-the timeline event. The standard show trigger is
-DJ_MASTER_TRACK_ACTIVE, which requires a known track identity, an explicitly
-selected (or documented fallback) master deck, and isPlaying: true.
+For an already admitted production owner, Physical Stage 1 F14 arms a 50..1500 ms
+response window (default 500 ms) before attempting local MIDI. Fresh, valid,
+same-lineage hook measurement is primary
+and is sent as `DJ_LOOP_STATE`. Invalid, stale, or contradictory same-lineage
+responses suppress prediction fail-closed. Only actual no-response emits the
+distinct `DJ_LOOP_FALLBACK` with source `pedal-no-response-predicted`. Its exact
+absolute profile is `8, 4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64`; it saturates
+only at `1/64`. A late fresh measured report overrides and rebases prediction.
+`DJ_LOOP_STATE` puts the exact measured fields under `payload.loop`; a flat
+measured-loop wire payload is retired and rejected. Every fallback carries a
+monotonic `pedalIntentId`, `baseMeasuredLoopRevision`, and `baseLoopDivision`.
+Syndocal accepts it only when that causal base still equals its current state
+and the target is exactly one downward step (or the saturated `1/64` floor).
 
-The built-in Syndocal transport has an explicit adapter registry. The only
-built-in choice is `generic-json`, and it must be selected explicitly; unknown
-or empty adapter names are reported unavailable rather than silently falling
-back. This repository has no authoritative Syndocal/KDMX protocol contract, so
-generic-json is only an adapter boundary. It provides reconnect, heartbeat,
-event IDs, monotonically increasing sequence values, ACK tracking for
-DJ_RELEASE and DJ_LOOP_STATE, delivery states, and DJ_STATE_SYNC on reconnect.
-When Syndocal is disabled, local-only MIDI actions continue to work without a
-network. When handoff is enabled, the initial connection, reconnection, and
-disconnected interval are fail-closed until an authoritative timeline snapshot
-is received; Stage 1 pedals send no Rekordbox MIDI while that snapshot is
-pending. Stale pedal events are not replayed after reconnection.
+Track activity is derived from Hook UDP snapshots. Rekordbox MASTER and
+master_change are diagnostics only. DJ_TRACK_LOADED remains diagnostic.
+DJ_TRACK_ACTIVE is emitted once for every actually playing deck session with
+exactly one identity form, positionAtSendSec, effectiveBpm, a monotonic
+positionRevision, and a sample no older than 1500 ms. A nonempty contentId is
+authoritative; exact title+artist is used only when contentId is absent.
+DJ_TRACK_SYNC then carries later revisions for that exact admitted
+deck/deckId/playSessionId and identity; missing, null, nonfinite, stale,
+duplicate, reordered, foreign, or cross-identity samples fail closed.
+The first emitted ACTIVE freezes that session's one-of wire identity; late
+metadata enrichment is diagnostic only and cannot alter later ACTIVE or SYNC.
+
+On a definite transition between two nonempty content IDs, `track_load` and a
+valid OLVC content-ID ingress (`@TrackBrowserID` or `@ContentID`) clear the old
+deck and global now-playing track-bound metadata before the replacement snapshot
+is published. This prevents a new ID from being paired with a stale title or
+artist, including the 2026-08-28 observation where `contentId=235403562` was
+paired with the previous `More One Night × 動く、動く (Agate Trance&Makina
+bootleg)` title while Demo Track 2 was loading. Same-ID replay and null-to-ID
+enrichment preserve existing metadata; owner selection never re-admits from the
+cleared old title. The source checkpoint's focused
+`node --test tests/track-identity-transition.test.js` is **5/5**. DJ-PC
+pull/restart/reverification and physical, mapped-track, or pedal acceptance
+remain unverified.
+
+The sole current/production adapter is `syndocal-envelope-v3`.
+Every frame has exactly `{v:3,type,agentId,sessionId,sequence,eventId,payload}`.
+Flat, v1, and v2 frames, retired adapter names, aliases, and unknown names are
+rejected visibly; there is no compatibility adapter or fallback. The transport
+provides reconnect, heartbeat, event IDs, monotonically increasing wire
+sequence values, ACK tracking, and DJ_STATE_SYNC. Reconnect replay is fail-closed:
+only a pending, exactly correlated `DJ_RELEASE` may survive a socket close/error.
+That release retains its eventId and semantic payload (including playSessionId)
+while it waits for a matching current-socket ACK or an exact authoritative running
+timeline snapshot (`pedalOwner:"timeline"`, matching timelineId/playSessionId, and
+matching releaseEventId); replay uses a fresh connection sessionId and a new
+monotonic wire sequence. Every other pending physical event is finalized immediately
+as `send-failed` with the teardown reason and is never replayed. Duplicate ACK
+outcome is success.
+The generic State Sync payload is exactly `{released}` when no session is
+admitted, or `{released,ownerDeck,ownerDeckId,activePlaySessionId}` when all
+three owner-correlation fields are present. Rekordbox MASTER is never encoded
+as show-control ownership. `DJ_LOOP_STATE` and `DJ_LOOP_FALLBACK` likewise
+correlate only to the admitted deck/deckId/playSessionId; foreign, mixed, or
+master-scoped payloads fail closed. `DJ_MASTER_*` is not a current production
+v1.1.11
+operator capability; it remains only deployed historical v1.1.5 evidence.
+`DJ_TRACK_SYNC` is non-ACK continuous telemetry: it uses an O(1)
+connection-generation + wire-sequence eventId, never enters the durable
+physical-event registry, and is never replayed after reconnect. A fresh sync
+must arrive for the new connection/session; late frames stay socket-fenced.
+In production, Stage 1 MIDI/fallback actions require a terminal `accepted` or
+`duplicate` ACK for the exact candidate deck/session; they otherwise fail
+closed. Network fallback/release delivery remains visible and is never queued
+as a successful Syndocal action. The explicit local-test mode uses
+`not-applicable/local-only` delivery and does not require an ACK. Production
+Stage 2 remains fail-closed until an authoritative timeline snapshot is
+received, and stale pedal events are not replayed after reconnection.
+The correlated `DJ_RELEASE` is the exception to ACK-only completion: an exact
+current authoritative running snapshot can terminalize that release without
+fabricating an ACK result.
+Within one connection generation, an accepted timeline session replacement
+retires the prior session ID permanently for that generation; later frames from
+that ID are rejected even with a higher sequence, preventing ABA re-keying.
+The retired-session fence is reset only when a replacement connection generation
+is accepted.
+
+`DJ_TIMELINE_STATE_REQUEST` is a control-only request and never enters the physical
+pending/replay registry. The automatic request after hello and a public request use
+the same current eventId/sequence/socket-generation correlation. An exact current
+`accepted`/`duplicate` ACK means only that the request was accepted; it does not make
+the timeline snapshot ready. A current `rejected`/`no_mapping`/`busy` ACK, or a
+current ACK carrying a code, updates sanitized `lastError`/`message` and emits a
+visible timeline warning/control failure. Foreign, stale, and old-socket ACKs are
+ignored. A valid current `DJ_TIMELINE_STATE` response clears the request correlation.
 
 `GET /api/dj-agent/status` also exposes the handoff state machine:
 `mode` is `dj-control`, `handoff-pending`, or `timeline-control`; `timelineState`
 is the last authoritative state (`idle`, `running`, `stopped`, `ended`, or
-`reset`); `timelineLoopActive` is the authoritative loop value; and
+`reset`); `timelineLoopActive` is the authoritative loop value;
+`timelineTransitionHoldActive` is the authoritative transition-hold value; and
 `lastTimelineAction` contains the last Stage 2 action and its ACK delivery.
-`releaseMacroSequence` is `parallel` or `filter-then-fade`, and
-`releaseMacroPhase` reports `idle`, `filter-ramp`, `parallel-ramp`, `fade-ramp`,
-`stopping`, `resetting`, `handoff-pending`, `complete`, or `failed`.
-`releaseMacroReason` carries the terminal ramp/delivery failure reason when
-the phase is `failed` (otherwise it is `null`), and `lastAction` is updated
-with the same canonical release eventId, delivery state, phase, and reason.
-`filter-then-fade` guarantees that the first ChannelFader MIDI message is
-sent only after the Filter ramp completion callback; a Filter failure starts
-no fade/Stop/Release, and a fade failure attempts Filter reset without
-starting Stop/Release. `parallel` remains the backwards-compatible default.
+`releaseMacroSequence` is exactly `filter-then-fade-then-stop`, and
+`releaseMacroPhase` reports `idle`, `blocked`, `filter-ramp`, `fade-ramp`,
+`filter-failed-awaiting-boundary`, `fade-failed-awaiting-boundary`, `stopping`,
+`handoff-pending`, `complete`, or `failed`. `releaseMacroReason` and
+`lastAction.localFailure` preserve local Filter/fade/Stop/reset failure without
+promoting it to success. F13 starts the owner-deck Filter HPF at 64 and routes
+one correlated `DJ_RELEASE` at that same initial action edge. After the HPF
+boundary it starts the ChannelFader fade on CC17 (127→0 over 1000ms), then
+attempts Cue/Stop exactly once. The HPF and fader reset to 64 and 127 only
+after Stop. Syndocal delivery/ACK is never gated by local MIDI success. An ACK
+alone does not enter Stage 2; only the correlated, authoritative running
+timeline state does. Stage 2 sends zero Rekordbox MIDI.
 Stage 1 F15 returns an explicit `ignored:true`, `state:"inactive"` result and
 HTTP 200 so an intentional no-op is not rendered as a hardware/network error.
+`authorityConsistency` combines the latest authoritative Timeline owner/session
+with local candidate state and the last ACTIVE ACK from the current Syndocal
+connection generation. A rejected ACTIVE is considered only when its
+playSessionId matches the current authoritative Timeline owner; reconnects and
+idle snapshots therefore clear stale `SYNC REQUIRED` conditions. The status is
+diagnostic only and never changes the local admitted owner or silently takes
+ownership.
 
 When Stage 2 is active, the pedal aliases are:
 
-* F13 / `release` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": -4 }`
-* F14 / `loop-half` → `DJ_TIMELINE_LOOP_SET` with an absolute `{ "active": true|false }`
-* F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4 }`
+* F13 / `release` → one absolute `DJ_TIMELINE_LOOP_SET` with `{ "active": true|false, "timelineId": "...", "playSessionId": "..." }`, using the opposite of the exact current `loopActive` value; authored loops and post-Follow transition holds share this action, while `transitionHoldActive` remains a strict diagnostic field
+* F14 / `loop-half` → active-loop-only `DJ_TIMELINE_LOOP_HALF` with `{ "timelineId": "...", "playSessionId": "..." }`; it never sends Rekordbox MIDI
+* F15 / `filter-close` → `DJ_TIMELINE_BEAT_JUMP` with `{ "bars": 4, "timelineId": "...", "playSessionId": "..." }`
 
-`DJ_TIMELINE_STATE` is an inbound generic-json adapter message. It must include
-`state` and a boolean `loopActive`; `timelineId` and `positionBars` are
-optional. With the `syndocal-envelope-v1` adapter the same fields arrive nested
-inside the v1 envelope `payload` object. A connected client requests a fresh
-snapshot after hello and after each reconnect. Timeline actions require that
-snapshot and a connected socket,
+F13 and F14 have independent pending latches. Repeated presses of either control
+are blocked until that control's authoritative/delivery terminal condition
+clears its latch. F14 fails closed when the authoritative loop is inactive or
+unknown. Missing snapshot, invalid correlation, or disconnect
+sends neither a beat jump nor MIDI. The beat-jump encoder accepts only `+4`;
+the retired `-4` value is rejected. All commands stamp the authoritative
+snapshot's exact current `timelineId` and `playSessionId`. Their encoders accept only those exact payload fields; any
+unknown field fails closed, and the internal local-source marker
+(`source:"pedal"`) is stripped so transmitted frames carry only canonical
+fields. Authoritative `DJ_TIMELINE_STATE` frames are fenced within one session
+by `sessionId` + `sequence`: stale/equal sequences are dropped without
+mutation, and the fence re-keys on each new connection generation after a
+reconnect instead of comparing across sessions. A skipped or terminally failed
+(rejected/timed-out/send-failed) `DJ_TIMELINE_LOOP_SET` clears its pending
+toggle latch immediately and stays retryable as a fresh absolute value on the
+next press of the same control.
+
+`DJ_TIMELINE_STATE` is an exact v3 envelope. Its current payload has exactly
+`state`, `loopActive`, `transitionHoldActive`, `timelineId`, `positionBars`, `playSessionId`,
+`pedalOwner`, `releaseEventId`, and `operatorReturnRequestId`.
+The request ID is either `null` or the exact canonical
+`syndocal-dj-operator-return-<epoch>-<counter>` form, where `<epoch>` is 32
+lowercase ASCII hex characters and `<counter>` is canonical decimal
+`1..18446744073709551615` (u64::MAX), with no leading zero. Missing, unknown,
+arbitrary, and noncanonical payload fields/IDs are rejected fail-closed.
+The active epoch retains a BigInt counter high-water across reconnects, so
+lower/equal replays remain ignored after 257+ IDs. A different epoch is
+accepted only with a different authoritative Timeline `sessionId`; the prior
+epoch is retired permanently. Retired epochs are bounded at 64 and capacity
+failure latches visibly instead of evicting an old epoch. Reconnect snapshots
+carrying the same ID do not trigger a second reannouncement. A generic `running` state never transfers
+pedal ownership. `pedalOwner:"timeline"` is accepted only when playSessionId
+matches the current show session and releaseEventId matches its correlated
+DJ_RELEASE. Late sync for a released session is fenced and cannot reacquire
+control. A connected client requests a fresh snapshot after hello and after
+each reconnect. Timeline actions require that snapshot and a connected socket,
 and use the same eventId/sequence/ACK delivery states as other action events.
 The full Japanese integration contract is in
 [`SYNDOCAL_PEDAL_HANDOFF.md`](SYNDOCAL_PEDAL_HANDOFF.md).

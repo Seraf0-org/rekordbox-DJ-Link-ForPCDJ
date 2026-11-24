@@ -1,0 +1,67 @@
+{
+  "schema": "rb-output.ableton-link.source-manifest/1",
+  "meta": {
+    "packageName": "@ktamas77/abletonlink",
+    "packageVersion": "1.2.3",
+    "lockIntegrity": "sha512-xST1G85OiYtpU2DXmhPlf4r6VwuNNiru82atuD3LSVLowuGOhsrcOh+grn7R4XIK2MP7bXJ6olFiKlrEb8j6/g==",
+    "treeHashAlgorithm": "sha256 over UTF-8 concatenation of per-file lines '<relPath>\\n<size>\\n<lowercase-sha256-hex>\\n' with relPath POSIX-normalized, sorted case-insensitively then ordinally",
+    "scopeNote": "Exact reviewed compile surface of the npm package. Everything outside these entries (docs, tests, assets) is deliberately not copied into staging."
+  },
+  "files": [
+    {
+      "path": "binding.gyp",
+      "size": 1578,
+      "sha256": "7cbc3ca6dc8f4bae1731dbb54fcc5667c6cfde0cc6c39781350c0cdaba105b20"
+    },
+    {
+      "path": "package.json",
+      "size": 1537,
+      "sha256": "b6ad9dfeb39e3e69b493c3bfd5df72337d31e0560c6156e7d205d2360aa2dde1"
+    }
+  ],
+  "trees": [
+    {
+      "path": "src",
+      "fileCount": 2,
+      "bytes": 16645,
+      "treeSha256": "939b70ddee80d7045dd460694622bc5e07ac5cd10e8f7021f7fb0d4f6e726c52"
+    },
+    {
+      "path": "link/include",
+      "fileCount": 71,
+      "bytes": 294308,
+      "treeSha256": "7fa0e584698e1f27d8beba3be35eaad50d94055cc7cbb695c10590fa932e7269"
+    },
+    {
+      "path": "link/modules/asio-standalone/asio/include",
+      "fileCount": 622,
+      "bytes": 5090674,
+      "treeSha256": "327076abb2faead633d3dfe6aae36758f9585c3b5132b028ee27584ba9a84adc"
+    },
+    {
+      "path": "node_modules/node-addon-api",
+      "fileCount": 18,
+      "bytes": 420314,
+      "treeSha256": "f1997444841cd22e329d295a4f2bf2a07c510cd63df2e1b6776043c44ca0f503"
+    }
+  ],
+  "patch": {
+    "target": "binding.gyp",
+    "expectedOrigSha256": "7cbc3ca6dc8f4bae1731dbb54fcc5667c6cfde0cc6c39781350c0cdaba105b20",
+    "operations": [
+      "remove the global '\"cflags_cc\": [ \"-std=c++14\" ],' entry (Node-provided C++20 standard must win)",
+      "remove the global '\"LINK_PLATFORM_MACOSX=1\",' define (retained only inside the OS=='mac' condition)",
+      "remove the Windows '\"AdditionalOptions\": [ \"/std:c++14\" ]' entry, keeping '\"ExceptionHandling\": 1' (avoids D9025 /std override)"
+    ],
+    "patchedReference": "binding.gyp.patched",
+    "expectedPatchedSha256": "b3dc833d8e80cb8e0cd36c3087f39f04dfa12e2b37f435931bbb5fec256e0cca"
+  },
+  "build": {
+    "nodeTarget": "22.22.1",
+    "nodeArch": "x64",
+    "napiTarget": 10,
+    "msvcToolsVersion": "14.44.35207",
+    "visualStudioRootName": "Microsoft Visual Studio\\2022\\Community",
+    "nodeGypVersion": "12.4.0"
+  }
+}

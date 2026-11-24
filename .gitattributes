@@ -1,0 +1,7 @@
+# The reviewed Ableton Link GYP reference is a byte-exact generated artifact.
+patches/ableton-link-source/binding.gyp.patched -text -whitespace
+
+# cmd.exe batch files must have CRLF line endings on every checkout,
+# whatever core.autocrlf is (release runners check out with it disabled).
+*.bat text eol=crlf
+*.cmd text eol=crlf

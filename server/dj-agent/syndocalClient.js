@@ -1,5 +1,7 @@
 const { EventEmitter } = require("node:events");
 const crypto = require("node:crypto");
+const { exactFallbackPayload } = require("./stage1LoopFallback");
+const { hasUnicodeControl, validToken } = require("./tokenValidation");
 
 function makeId() {
   return typeof crypto.randomUUID === "function"
@@ -8,29 +10,55 @@ function makeId() {
 }
 
 const TIMELINE_STATES = new Set(["idle", "running", "stopped", "ended", "reset"]);
+const OPERATOR_RETURN_REQUEST_ID_PREFIX = "syndocal-dj-operator-return-";
+const OPERATOR_RETURN_EPOCH_LENGTH = 32;
+const OPERATOR_RETURN_COUNTER_MAX = (1n << 64n) - 1n;
+const OPERATOR_RETURN_REQUEST_ID_PATTERN = new RegExp(
+  `^${OPERATOR_RETURN_REQUEST_ID_PREFIX}([0-9a-f]{${OPERATOR_RETURN_EPOCH_LENGTH}})-([1-9][0-9]*)$`,
+  "u",
+);
 const SUPPORTED_EVENT_TYPES = new Set([
-  "DJ_MASTER_CHANGED",
-  "DJ_MASTER_TRACK_ACTIVE",
+  "DJ_TRACK_ACTIVE",
+  "DJ_TRACK_SYNC",
   "DJ_LOOP_STATE",
+  "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
   "DJ_TIMELINE_STATE_REQUEST",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
+  "DJ_TIMELINE_LOOP_HALF",
 ]);
 const PHYSICAL_EVENT_TYPES = new Set([
-  "DJ_MASTER_CHANGED",
-  "DJ_MASTER_TRACK_ACTIVE",
+  "DJ_TRACK_ACTIVE",
   "DJ_LOOP_STATE",
+  "DJ_LOOP_FALLBACK",
   "DJ_RELEASE",
   "DJ_TIMELINE_BEAT_JUMP",
   "DJ_TIMELINE_LOOP_SET",
+  "DJ_TIMELINE_LOOP_HALF",
 ]);
+// Reconnect replay is deliberately fail-closed: only a release handoff may
+// survive a socket teardown. All other physical commands are relative to the
+// state that the next connection's sync/snapshot will establish.
+const RECONNECT_REPLAY_EVENT_TYPES = new Set(["DJ_RELEASE"]);
+const TRANSIENT_TELEMETRY_TYPES = new Set(["DJ_TRACK_SYNC"]);
 const ACK_OUTCOMES = new Set(["accepted", "duplicate", "no_mapping", "rejected", "busy"]);
+// Control ACK codes are deliberately allowlisted before they can reach user
+// visible status/events. Never reflect arbitrary adapter/native text.
+const TIMELINE_STATE_REQUEST_ACK_CODES = new Set([
+  "project_mapping_not_loaded",
+  "no_mapping",
+  "busy",
+  "rejected",
+]);
 const DEFAULT_DELIVERY_HISTORY_MAX = 256;
 const DEFAULT_MAX_PENDING_ACKS = 256;
 const DEFAULT_PHYSICAL_EVENT_ID_REGISTRY_MAX = 262_144;
+// A v3 connection may observe a bounded number of session replacements. Once
+// this high-water is reached, fail closed rather than evicting a retired ID
+// and reopening an ABA path within the same socket generation.
+const TIMELINE_SESSION_FENCE_MAX_RETIRED = 64;
 const MAX_STRING_UTF8_BYTES = 256;
-const MIN_TOKEN_UTF8_BYTES = 32;
 let processControlIdCounter = 0;
 
 function makeControlId() {
@@ -39,23 +67,6 @@ function makeControlId() {
   }
   processControlIdCounter += 1;
   return `control-${processControlIdCounter}-${makeId()}`;
-}
-
-function hasUnicodeControl(value) {
-  if (/\p{Cc}/u.test(value)) {
-    return true;
-  }
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) return true;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function isPlainRecord(value) {
@@ -112,6 +123,30 @@ function normalizeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function parseOperatorReturnRequestId(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = OPERATOR_RETURN_REQUEST_ID_PATTERN.exec(value);
+  if (!match || match[2].length > 20) {
+    return null;
+  }
+  let counter;
+  try {
+    counter = BigInt(match[2]);
+  } catch {
+    return null;
+  }
+  if (counter < 1n || counter > OPERATOR_RETURN_COUNTER_MAX) {
+    return null;
+  }
+  return {
+    id: value,
+    epoch: match[1],
+    counter,
+  };
+}
+
 function optionalField(source, name, normalizer) {
   if (!Object.hasOwn(source, name)) {
     return { present: false, valid: true, value: null };
@@ -146,284 +181,6 @@ function optionalNumberField(source, name) {
   }
   const value = normalizeFiniteNumber(source[name]);
   return { present: true, valid: value != null, value };
-}
-
-function normalizeMasterTrackState(track) {
-  if (track == null) {
-    return null;
-  }
-  if (!isPlainRecord(track)) {
-    return null;
-  }
-  const normalized = { contentId: null, title: null, artist: null, isPlaying: false };
-  for (const field of ["contentId", "title", "artist"]) {
-    const result = optionalField(track, field, normalizeOptionalString);
-    if (!result.valid) return null;
-    normalized[field] = result.value;
-  }
-  const playing = Object.hasOwn(track, "isPlaying")
-    ? optionalBooleanField(track, "isPlaying")
-    : optionalBooleanField(track, "playing");
-  if (!playing.valid || playing.value == null) return null;
-  normalized.isPlaying = playing.value;
-  return normalized;
-}
-
-function encodeFlatStateSync(state = {}) {
-  if (!isPlainRecord(state)) {
-    return null;
-  }
-  const loopDivision = optionalNumberField(state, "loopDivision");
-  if (
-    !loopDivision.valid ||
-    (loopDivision.value != null &&
-      (!Number.isInteger(loopDivision.value) || loopDivision.value < 0 || loopDivision.value > 63))
-  ) {
-    return null;
-  }
-  const released = Object.hasOwn(state, "released") ? state.released : false;
-  if (typeof released !== "boolean") return null;
-  const masterDeck = optionalField(state, "masterDeck", normalizeDeck);
-  if (!masterDeck.valid) return null;
-  if (Object.hasOwn(state, "masterTrack") && state.masterTrack === undefined) return null;
-  const masterTrack = normalizeMasterTrackState(state.masterTrack);
-  if (state.masterTrack != null && masterTrack == null) return null;
-  return {
-    loopDivision: loopDivision.value,
-    released,
-    masterDeck: masterDeck.value,
-    masterTrack,
-  };
-}
-
-function encodeFlatEvent(event = {}) {
-  if (!isPlainRecord(event) || typeof event.type !== "string") {
-    return null;
-  }
-  const type = event.type;
-  const eventId = normalizeIdentity(event.eventId);
-  if (!eventId || !Number.isSafeInteger(event.sequence) || event.sequence < 1) return null;
-  if (
-    Object.hasOwn(event, "payload") &&
-    !isPlainRecord(event.payload)
-  ) {
-    return null;
-  }
-  const payload = event.payload || {};
-  const envelope = { type, eventId, sequence: event.sequence };
-  if (!SUPPORTED_EVENT_TYPES.has(type)) return null;
-
-  switch (type) {
-    case "DJ_MASTER_CHANGED": {
-      const masterDeck = optionalField(payload, "masterDeck", normalizeDeck);
-      const deck = optionalField(payload, "deck", normalizeDeck);
-      const playing = Object.hasOwn(payload, "isPlaying")
-        ? optionalBooleanField(payload, "isPlaying")
-        : optionalBooleanField(payload, "playing");
-      const master = optionalBooleanField(payload, "master");
-      if (!masterDeck.valid || !deck.valid || (!masterDeck.value && !deck.value) || !playing.valid || !master.valid) {
-        return null;
-      }
-      const message = { ...envelope };
-      if (masterDeck.value) message.masterDeck = masterDeck.value;
-      if (deck.value) message.deck = deck.value;
-      if (playing.value != null) message.isPlaying = playing.value;
-      if (master.value != null) message.master = master.value;
-      return message;
-    }
-    case "DJ_MASTER_TRACK_ACTIVE": {
-      const deck = normalizeDeck(Object.hasOwn(payload, "deck") ? payload.deck : payload.masterDeck);
-      const playSessionId = normalizeOptionalString(payload.playSessionId);
-      const playing = Object.hasOwn(payload, "isPlaying")
-        ? optionalBooleanField(payload, "isPlaying")
-        : optionalBooleanField(payload, "playing");
-      const master = optionalBooleanField(payload, "master");
-      if (deck == null || playSessionId == null || !playing.valid || playing.value !== true || !master.valid) {
-        return null;
-      }
-      const message = {
-        ...envelope,
-        deck,
-        playSessionId,
-        isPlaying: true,
-        master: master.value == null ? true : master.value,
-      };
-      for (const field of ["contentId", "title", "artist", "deckId", "startedAt"]) {
-        const result = optionalField(payload, field, normalizeOptionalString);
-        if (!result.valid) return null;
-        if (result.value != null) message[field] = result.value;
-      }
-      const trackBpm = optionalNumberField(payload, "trackBpm");
-      if (!trackBpm.valid || (trackBpm.value != null && (trackBpm.value < 0 || trackBpm.value > 1_000))) return null;
-      if (trackBpm.value != null) message.trackBpm = trackBpm.value;
-      const positionSec = optionalNumberField(payload, "positionSec");
-      if (!positionSec.valid || (positionSec.value != null && positionSec.value < 0)) return null;
-      if (positionSec.value != null) message.positionSec = positionSec.value;
-      return message;
-    }
-    case "DJ_LOOP_STATE": {
-      const division = optionalNumberField(payload, "division");
-      const enabled = optionalBooleanField(payload, "enabled");
-      if (!division.valid || division.value == null || !Number.isInteger(division.value) || division.value < 0 || division.value > 63 || !enabled.valid) {
-        return null;
-      }
-      const message = { ...envelope, division: division.value };
-      if (enabled.value != null) message.enabled = enabled.value;
-      return message;
-    }
-    case "DJ_RELEASE": {
-      const state = optionalField(payload, "state", normalizeOptionalString);
-      if (!state.valid) return null;
-      const message = { ...envelope };
-      if (state.value != null) message.state = state.value;
-      return message;
-    }
-    case "DJ_TIMELINE_STATE_REQUEST":
-      return envelope;
-    case "DJ_TIMELINE_BEAT_JUMP": {
-      const bars = optionalNumberField(payload, "bars");
-      const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
-      if (!bars.valid || bars.value == null || !Number.isInteger(bars.value) || ![-4, 4].includes(bars.value) || !timelineId.valid || timelineId.value == null) {
-        return null;
-      }
-      return { ...envelope, bars: bars.value, timelineId: timelineId.value };
-    }
-    case "DJ_TIMELINE_LOOP_SET": {
-      const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
-      const active = optionalBooleanField(payload, "active");
-      if (!timelineId.valid || timelineId.value == null || !active.valid || active.value == null) {
-        return null;
-      }
-      return { ...envelope, active: active.value, timelineId: timelineId.value };
-    }
-    default:
-      return null;
-  }
-}
-
-function normalizeTimelineState(message = {}) {
-  const fields = [
-    "type",
-    "eventId",
-    "sequence",
-    "state",
-    "loopActive",
-    "timelineId",
-    "positionBars",
-  ];
-  if (!hasExactFields(message, fields)) {
-    return null;
-  }
-  if (message.type !== "DJ_TIMELINE_STATE") {
-    return null;
-  }
-  if (typeof message.state !== "string" || !TIMELINE_STATES.has(message.state)) {
-    return null;
-  }
-  if (typeof message.loopActive !== "boolean") {
-    return null;
-  }
-  const eventId = normalizeIdentity(message.eventId);
-  const timelineId = normalizeIdentity(message.timelineId);
-  if (!eventId || eventId !== message.eventId || !timelineId || timelineId !== message.timelineId) {
-    return null;
-  }
-  if (!Number.isSafeInteger(message.sequence) || message.sequence < 1) {
-    return null;
-  }
-  if (!Number.isSafeInteger(message.positionBars) || message.positionBars < 0) {
-    return null;
-  }
-  return {
-    type: "DJ_TIMELINE_STATE",
-    state: message.state,
-    loopActive: message.loopActive,
-    timelineId,
-    positionBars: message.positionBars,
-    eventId,
-    sequence: message.sequence,
-  };
-}
-
-function createGenericJsonAdapter({ token = "" } = {}) {
-  return {
-    name: "generic-json",
-    encodeHello({ eventId, sequence }) {
-      return {
-        type: "DJ_AGENT_HELLO",
-        eventId,
-        sequence,
-        protocol: "generic-json",
-        token: token || undefined,
-        capabilities: [
-          "DJ_MASTER_CHANGED",
-          "DJ_MASTER_TRACK_ACTIVE",
-          "DJ_LOOP_STATE",
-          "DJ_RELEASE",
-          "DJ_TIMELINE_BEAT_JUMP",
-          "DJ_TIMELINE_LOOP_SET",
-          "DJ_TIMELINE_STATE",
-          "DJ_TIMELINE_STATE_REQUEST",
-          "DJ_STATE_SYNC",
-        ],
-      };
-    },
-    encodeEvent(event) {
-      return encodeFlatEvent(event);
-    },
-    encodeStateSync({ eventId, sequence, state }) {
-      const encoded = encodeFlatStateSync(state);
-      return encoded ? {
-        type: "DJ_STATE_SYNC",
-        eventId,
-        sequence,
-        ...encoded,
-      } : null;
-    },
-    encodeHeartbeat({ eventId, sequence }) {
-      return {
-        type: "DJ_HEARTBEAT",
-        eventId,
-        sequence,
-        at: new Date().toISOString(),
-      };
-    },
-    decode(data) {
-      if (data && typeof data === "object" && "data" in data) {
-        return this.decode(data.data);
-      }
-      if (data && typeof data === "object") {
-        return data;
-      }
-      try {
-        return JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
-      } catch {
-        return null;
-      }
-    },
-    isAck(message) {
-      return Boolean(message && message.type === "ACK");
-    },
-    isStateSyncRequest(message) {
-      return Boolean(
-        message &&
-          (message.type === "DJ_STATE_SYNC_REQUEST" || message.type === "STATE_SYNC_REQUEST")
-      );
-    },
-    isTimelineState(message) {
-      return Boolean(message && String(message.type || "").trim().toUpperCase() === "DJ_TIMELINE_STATE");
-    },
-    decodeTimelineState(message) {
-      return normalizeTimelineState(message);
-    },
-    encodeTimelineStateRequest({ eventId, sequence }) {
-      return {
-        type: "DJ_TIMELINE_STATE_REQUEST",
-        eventId,
-        sequence,
-      };
-    },
-  };
 }
 
 let bundledWs = null;
@@ -488,6 +245,23 @@ function socketIsOpen(socket) {
   return socket.readyState === 1;
 }
 
+// Adapter names that may be reflected on externally readable status
+// surfaces (/api/state, /api/status). Any other value - including a
+// configured-but-unrecognized SYNDOCAL_WS_ADAPTER string - stays internal
+// and is reported as null so hostile configuration is never echoed back.
+const RECOGNIZED_ADAPTER_NAMES = new Set(["syndocal-envelope-v3"]);
+
+function publicAdapterName(adapterObject) {
+  const name = adapterObject && typeof adapterObject === "object" ? adapterObject.name : null;
+  return RECOGNIZED_ADAPTER_NAMES.has(name) ? name : null;
+}
+
+// Stable, non-reflective reason for an unrecognized adapter selection: it
+// must never embed the configured value, its length, or any derived
+// fingerprint, because status.message/lastError are LAN-readable.
+const UNRECOGNIZED_ADAPTER_ERROR =
+  "Syndocal adapter must be syndocal-envelope-v3; flat and v1/v2 protocols are retired and rejected";
+
 function resolveAdapter({ adapter, adapterFactory, token }) {
   if (adapter && typeof adapter === "object") {
     return { adapterObject: adapter, error: null };
@@ -504,12 +278,9 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
     }
   }
   const name = String(adapter || "").trim().toLocaleLowerCase();
-  if (name === "generic-json") {
-    return { adapterObject: createGenericJsonAdapter({ token }), error: null };
-  }
-  if (name === "syndocal-envelope-v1") {
+  if (name === "syndocal-envelope-v3") {
     try {
-      return { adapterObject: createSyndocalEnvelopeV1Adapter({ token }), error: null };
+      return { adapterObject: createSyndocalEnvelopeV3Adapter({ token }), error: null };
     } catch (error) {
       return { adapterObject: null, error: error?.message || String(error) };
     }
@@ -517,49 +288,40 @@ function resolveAdapter({ adapter, adapterFactory, token }) {
   if (!name) {
     return {
       adapterObject: null,
-      error: "Syndocal adapter is not configured; select generic-json explicitly or provide an adapterFactory",
+      error: "Syndocal adapter is not configured; syndocal-envelope-v3 is required",
     };
   }
   return {
     adapterObject: null,
-    error: `Syndocal adapter '${String(adapter)}' is unavailable; no silent generic fallback is allowed`,
+    error: UNRECOGNIZED_ADAPTER_ERROR,
   };
 }
 
-function validToken(value) {
-  if (
-    typeof value !== "string" ||
-    !value ||
-    value.trim() !== value ||
-    /\s/u.test(value) ||
-    hasUnicodeControl(value)
-  ) {
-    return false;
-  }
-  const byteLength = Buffer.byteLength(value, "utf8");
-  return byteLength >= MIN_TOKEN_UTF8_BYTES && byteLength <= MAX_STRING_UTF8_BYTES;
+const ENVELOPE_V3_PROTOCOL_VERSION = 3;
+const ENVELOPE_V3_MAX_SAMPLE_AGE_MS = 1_500;
+const ENVELOPE_V3_MAX_FRAME_BYTES = 64 * 1024;
+const ENVELOPE_V3_AGENT_ID = "rb-output-dj-agent";
+const ENVELOPE_V3_PEDAL_OWNERS = new Set(["dj", "timeline"]);
+const ENVELOPE_V3_ACK_FIELDS = ["v", "type", "eventId", "sequence", "outcome", "code", "stateGeneration"];
+
+function v3EnvelopeStringOk(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= MAX_STRING_UTF8_BYTES &&
+    !hasUnicodeControl(value)
+  );
 }
 
-function validateTypedAck(message) {
-  const fields = [
-    "type",
-    "eventId",
-    "ok",
-    "message",
-    "outcome",
-    "sequence",
-    "code",
-    "stateGeneration",
-  ];
-  if (!hasExactFields(message, fields)) {
+function validateEnvelopeV3Ack(message) {
+  if (!isPlainRecord(message)) return { valid: false, reason: "ack-not-object" };
+  if (!hasExactFields(message, ENVELOPE_V3_ACK_FIELDS)) {
     return { valid: false, reason: "ack-fields-invalid" };
   }
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return { valid: false, reason: "ack-not-object" };
+  if (message.v !== ENVELOPE_V3_PROTOCOL_VERSION) {
+    return { valid: false, reason: "ack-version-invalid" };
   }
-  if (message.type !== "ACK") {
-    return { valid: false, reason: "ack-type-mismatch" };
-  }
+  if (message.type !== "ACK") return { valid: false, reason: "ack-type-mismatch" };
   const eventId = normalizeIdentity(message.eventId);
   if (!eventId || eventId !== message.eventId) {
     return { valid: false, reason: "ack-event-id-invalid" };
@@ -570,320 +332,465 @@ function validateTypedAck(message) {
   if (!Number.isSafeInteger(message.stateGeneration) || message.stateGeneration < 0) {
     return { valid: false, reason: "ack-state-generation-invalid" };
   }
-  if (typeof message.ok !== "boolean") {
-    return { valid: false, reason: "ack-ok-invalid" };
-  }
-  const ackMessage = normalizeOptionalString(message.message);
-  if (!ackMessage || ackMessage !== message.message) {
-    return { valid: false, reason: "ack-message-invalid" };
-  }
   if (typeof message.outcome !== "string" || !ACK_OUTCOMES.has(message.outcome)) {
     return { valid: false, reason: "ack-outcome-invalid" };
   }
-  if (
-    message.code !== null &&
-    (typeof message.code !== "string" ||
-      hasUnicodeControl(message.code) ||
-      Buffer.byteLength(message.code, "utf8") > MAX_STRING_UTF8_BYTES)
-  ) {
-    return { valid: false, reason: "ack-code-invalid" };
-  }
-  const successOutcome = message.outcome === "accepted" || message.outcome === "duplicate";
-  if (message.outcome === "busy" && message.ok !== false) {
-    return { valid: false, reason: "ack-busy-ok-inconsistent" };
-  }
-  if (message.outcome !== "busy" && message.ok !== successOutcome) {
-    return { valid: false, reason: "ack-outcome-ok-inconsistent" };
-  }
-  return { valid: true, eventId, outcome: message.outcome };
-}
-
-// Dedicated KDMX/Syndocal legacy v1 envelope wire contract, traced from
-// KDMX crates/protocol/src/lib.rs (DjLinkEnvelope/DjLinkAck and bounds) and
-// crates/io/src/remote_ws.rs (handle_dj_link_client envelope branch). The
-// envelope path is a distinct wire format from generic-json flat frames:
-// every frame carries {v,type,agentId,sessionId,sequence,eventId,payload},
-// typed payloads are deny-unknown-fields, and the server serializes
-// DjLinkAck without ok/message on this wire.
-const ENVELOPE_V1_PROTOCOL_VERSION = 1;
-const ENVELOPE_V1_MAX_SEQUENCE = 9_007_199_254_740_991;
-const ENVELOPE_V1_MAX_FRAME_BYTES = 64 * 1024;
-const ENVELOPE_V1_AGENT_ID = "rb-output-dj-agent";
-const ENVELOPE_ACK_FIELDS = ["v", "type", "eventId", "sequence", "outcome", "code", "stateGeneration"];
-
-function envelopeStringOk(value) {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    Buffer.byteLength(value, "utf8") <= MAX_STRING_UTF8_BYTES &&
-    !hasUnicodeControl(value)
-  );
-}
-
-function validateEnvelopeAck(message) {
-  if (!isPlainRecord(message)) {
-    return { valid: false, reason: "ack-not-object" };
-  }
-  if (!hasExactFields(message, ENVELOPE_ACK_FIELDS)) {
-    return { valid: false, reason: "ack-fields-invalid" };
-  }
-  if (message.v !== ENVELOPE_V1_PROTOCOL_VERSION) {
-    return { valid: false, reason: "ack-version-invalid" };
-  }
-  if (message.type !== "ACK") {
-    return { valid: false, reason: "ack-type-mismatch" };
-  }
-  const eventId = normalizeIdentity(message.eventId);
-  if (!eventId || eventId !== message.eventId) {
-    return { valid: false, reason: "ack-event-id-invalid" };
-  }
-  if (
-    !Number.isSafeInteger(message.sequence) ||
-    message.sequence < 1 ||
-    message.sequence > ENVELOPE_V1_MAX_SEQUENCE
-  ) {
-    return { valid: false, reason: "ack-sequence-invalid" };
-  }
-  if (!Number.isSafeInteger(message.stateGeneration) || message.stateGeneration < 0) {
-    return { valid: false, reason: "ack-state-generation-invalid" };
-  }
-  if (typeof message.outcome !== "string" || !ACK_OUTCOMES.has(message.outcome)) {
-    return { valid: false, reason: "ack-outcome-invalid" };
-  }
-  if (
-    message.code !== null &&
-    !envelopeStringOk(message.code)
-  ) {
+  if (message.code !== null && !v3EnvelopeStringOk(message.code)) {
     return { valid: false, reason: "ack-code-invalid" };
   }
   return { valid: true, eventId, outcome: message.outcome };
 }
 
-// Typed payload encoders mirror the KDMX DjLink*Payload serde structs
-// exactly (required fields present, optional fields omitted when null,
-// numeric/string bounds enforced before any send).
-function encodeEnvelopeMasterChanged(payload = {}) {
-  const masterDeck = optionalField(payload, "masterDeck", normalizeDeck);
-  const deck = optionalField(payload, "deck", normalizeDeck);
-  const playing = Object.hasOwn(payload, "isPlaying")
-    ? optionalBooleanField(payload, "isPlaying")
-    : optionalBooleanField(payload, "playing");
-  const master = optionalBooleanField(payload, "master");
-  if (!masterDeck.valid || !deck.valid || (!masterDeck.value && !deck.value) || !playing.valid || !master.valid) {
-    return null;
-  }
-  const encoded = {};
-  if (masterDeck.value) encoded.masterDeck = masterDeck.value;
-  if (deck.value) encoded.deck = deck.value;
-  encoded.isPlaying = playing.value != null ? playing.value : false;
-  encoded.master = master.value != null ? master.value : true;
-  return encoded;
+function requiredString(payload, name) {
+  const value = normalizeIdentity(payload?.[name]);
+  return value && value === payload[name] ? value : null;
 }
 
-function encodeEnvelopeMasterTrackActive(payload = {}) {
-  const deck = normalizeDeck(Object.hasOwn(payload, "deck") ? payload.deck : payload.masterDeck);
-  const playSessionId = normalizeOptionalString(payload.playSessionId);
-  const playing = Object.hasOwn(payload, "isPlaying")
-    ? optionalBooleanField(payload, "isPlaying")
-    : optionalBooleanField(payload, "playing");
-  const master = optionalBooleanField(payload, "master");
-  if (deck == null || playSessionId == null || !playing.valid || playing.value !== true || !master.valid) {
-    return null;
-  }
-  const encoded = { deck, playSessionId, isPlaying: true };
-  for (const field of ["contentId", "title", "artist", "deckId", "startedAt"]) {
-    const result = optionalField(payload, field, normalizeOptionalString);
-    if (!result.valid) return null;
-    if (result.value != null) encoded[field] = result.value;
-  }
-  const trackBpm = optionalNumberField(payload, "trackBpm");
-  if (!trackBpm.valid || (trackBpm.value != null && (trackBpm.value < 0 || trackBpm.value > 1_000))) return null;
-  if (trackBpm.value != null) encoded.trackBpm = trackBpm.value;
-  const positionSec = optionalNumberField(payload, "positionSec");
-  if (!positionSec.valid || (positionSec.value != null && positionSec.value < 0)) return null;
-  if (positionSec.value != null) encoded.positionSec = positionSec.value;
-  encoded.master = master.value == null ? true : master.value;
-  return encoded;
+function strictFinite(payload, name, { min = -Infinity, max = Infinity, integer = false } = {}) {
+  const value = payload?.[name];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) return null;
+  if (integer && !Number.isSafeInteger(value)) return null;
+  return value;
 }
 
-function encodeEnvelopeLoopState(payload = {}) {
-  const division = optionalNumberField(payload, "division");
-  const enabled = optionalBooleanField(payload, "enabled");
+function encodeV3Loop(loop) {
+  if (loop === null) return null;
+  if (!isPlainRecord(loop)) return undefined;
+  const required = ["active", "startBeat", "endBeat", "lengthBeats", "revision", "sampleAgeMs", "source"];
+  if (!hasExactFields(loop, required) || typeof loop.active !== "boolean") return undefined;
+  const revision = strictFinite(loop, "revision", { min: 1, integer: true });
+  const sampleAgeMs = strictFinite(loop, "sampleAgeMs", {
+    min: 0,
+    max: ENVELOPE_V3_MAX_SAMPLE_AGE_MS,
+  });
+  const source = requiredString(loop, "source");
+  if (revision == null || sampleAgeMs == null || source !== "rekordbox-hook-measured") return undefined;
+  const values = {};
+  for (const name of ["startBeat", "endBeat", "lengthBeats"]) {
+    if (loop[name] === null) values[name] = null;
+    else {
+      const value = strictFinite(loop, name, { min: 0 });
+      if (value == null) return undefined;
+      values[name] = value;
+    }
+  }
   if (
-    !division.valid ||
-    division.value == null ||
-    !Number.isInteger(division.value) ||
-    division.value < 0 ||
-    division.value > 63 ||
-    !enabled.valid
+    loop.active &&
+    (values.startBeat == null ||
+      values.endBeat == null ||
+      values.lengthBeats == null ||
+      values.endBeat <= values.startBeat ||
+      values.lengthBeats <= 0 ||
+      Math.abs(values.endBeat - values.startBeat - values.lengthBeats) > 0.001)
+  ) {
+    return undefined;
+  }
+  if (
+    !loop.active &&
+    (values.startBeat !== null || values.endBeat !== null || values.lengthBeats !== null)
+  ) {
+    return undefined;
+  }
+  return {
+    active: loop.active,
+    startBeat: values.startBeat,
+    endBeat: values.endBeat,
+    lengthBeats: values.lengthBeats,
+    revision,
+    sampleAgeMs,
+    source,
+  };
+}
+
+function encodeV3TrackCandidate(payload) {
+  if (!isPlainRecord(payload)) return null;
+  const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
+  const deckId = requiredString(payload, "deckId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  const positionAtSendSec = strictFinite(payload, "positionAtSendSec", { min: 0, max: 7_200 });
+  const effectiveBpm = strictFinite(payload, "effectiveBpm", { min: Number.MIN_VALUE, max: 1_000 });
+  const positionRevision = strictFinite(payload, "positionRevision", { min: 1, integer: true });
+  const sampleAgeMs = strictFinite(payload, "sampleAgeMs", {
+    min: 0,
+    max: ENVELOPE_V3_MAX_SAMPLE_AGE_MS,
+  });
+  const startedAt = requiredString(payload, "startedAt");
+  if (
+    deck == null ||
+    deckId !== `rekordbox-deck-${deck}` ||
+    !playSessionId ||
+    positionAtSendSec == null ||
+    effectiveBpm == null ||
+    positionRevision == null ||
+    sampleAgeMs == null ||
+    payload.isPlaying !== true ||
+    !startedAt ||
+    !Number.isFinite(Date.parse(startedAt))
   ) {
     return null;
   }
-  return { division: division.value, enabled: enabled.value == null ? true : enabled.value };
+  const commonFields = [
+    "deck",
+    "deckId",
+    "positionAtSendSec",
+    "effectiveBpm",
+    "positionRevision",
+    "sampleAgeMs",
+    "isPlaying",
+    "startedAt",
+    "playSessionId",
+  ];
+  const hasTrackBpm = Object.hasOwn(payload, "trackBpm");
+  const hasLoop = Object.hasOwn(payload, "loop");
+  const optionalFields = [
+    ...(hasTrackBpm ? ["trackBpm"] : []),
+    ...(hasLoop ? ["loop"] : []),
+  ];
+  const identity = hasExactFields(payload, [
+    ...commonFields,
+    ...optionalFields,
+    "contentId",
+  ])
+    ? "content"
+    : hasExactFields(payload, [
+        ...commonFields,
+        ...optionalFields,
+        "title",
+        "artist",
+      ])
+      ? "text"
+      : null;
+  if (!identity) return null;
+  const trackBpm = hasTrackBpm
+    ? strictFinite(payload, "trackBpm", { min: Number.MIN_VALUE, max: 1_000 })
+    : null;
+  if (hasTrackBpm && payload.trackBpm !== null && trackBpm == null) return null;
+  const loop = hasLoop
+    ? (payload.loop === null ? null : encodeV3Loop(payload.loop))
+    : undefined;
+  if (loop === undefined && hasLoop) return null;
+  if (identity === "content") {
+    const contentId = requiredString(payload, "contentId");
+    if (!contentId) return null;
+    return {
+      deck,
+      deckId,
+      contentId,
+      ...(hasTrackBpm ? { trackBpm } : {}),
+      positionAtSendSec,
+      effectiveBpm,
+      positionRevision,
+      sampleAgeMs,
+      isPlaying: true,
+      startedAt,
+      playSessionId,
+      ...(hasLoop ? { loop } : {}),
+    };
+  }
+  const title = requiredString(payload, "title");
+  const artist = requiredString(payload, "artist");
+  if (!title || !artist) return null;
+  return {
+    deck,
+    deckId,
+    title,
+    artist,
+    ...(hasTrackBpm ? { trackBpm } : {}),
+    positionAtSendSec,
+    effectiveBpm,
+    positionRevision,
+    sampleAgeMs,
+    isPlaying: true,
+    startedAt,
+    playSessionId,
+    ...(hasLoop ? { loop } : {}),
+  };
 }
 
-function encodeEnvelopeRelease(payload = {}) {
-  const state = optionalField(payload, "state", normalizeOptionalString);
-  if (!state.valid) return null;
-  const encoded = {};
-  if (state.value != null) encoded.state = state.value;
-  return encoded;
-}
-
-function encodeEnvelopeBeatJump(payload = {}) {
-  const bars = optionalNumberField(payload, "bars");
-  const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
+function encodeV3MeasuredLoop(payload) {
+  const outerFields = [
+    "deck",
+    "deckId",
+    "playSessionId",
+    "active",
+    "startBeat",
+    "endBeat",
+    "lengthBeats",
+    "revision",
+    "sampleAgeMs",
+    "source",
+  ];
+  if (!hasExactFields(payload, outerFields)) return null;
+  const deck = strictFinite(payload, "deck", { min: 1, max: 4, integer: true });
+  const deckId = requiredString(payload, "deckId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  const loop = encodeV3Loop({
+    active: payload.active,
+    startBeat: payload.startBeat,
+    endBeat: payload.endBeat,
+    lengthBeats: payload.lengthBeats,
+    revision: payload.revision,
+    sampleAgeMs: payload.sampleAgeMs,
+    source: payload.source,
+  });
   if (
-    !bars.valid ||
-    bars.value == null ||
-    !Number.isInteger(bars.value) ||
-    ![-4, 4].includes(bars.value) ||
-    !timelineId.valid ||
-    timelineId.value == null
+    deck == null ||
+    deckId !== `rekordbox-deck-${deck}` ||
+    !playSessionId ||
+    !loop
+  ) return null;
+  return { deck, deckId, playSessionId, loop };
+}
+
+function encodeV3Release(payload) {
+  if (!isPlainRecord(payload) || payload.state !== "released") return null;
+  const timelineId = requiredString(payload, "timelineId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  if (!timelineId || !playSessionId) return null;
+  return { state: "released", timelineId, playSessionId };
+}
+
+function encodeV3LoopFallback(payload) {
+  return exactFallbackPayload(payload);
+}
+
+// Timeline command payloads accept exactly the canonical wire fields plus,
+// optionally, the single intentional local-only metadata field the router
+// supplies: source must be the exact string "pedal". Any other own key
+// (including symbols), a missing wire field, or wrong metadata rejects the
+// payload; only canonical wire fields are ever emitted onto the wire.
+const V3_TIMELINE_COMMAND_LOCAL_SOURCE = "pedal";
+
+function v3TimelineCommandShapeOk(payload, wireFields) {
+  if (!isPlainRecord(payload)) return false;
+  const keys = Reflect.ownKeys(payload);
+  if (
+    keys.length < wireFields.length ||
+    keys.length > wireFields.length + 1 ||
+    !keys.every((key) =>
+      typeof key === "string" &&
+      (wireFields.includes(key) || key === "source"))
   ) {
-    return null;
+    return false;
   }
-  return { bars: bars.value, timelineId: timelineId.value };
+  if (!wireFields.every((field) => Object.hasOwn(payload, field))) return false;
+  if (Object.hasOwn(payload, "source") && requiredString(payload, "source") !== V3_TIMELINE_COMMAND_LOCAL_SOURCE) {
+    return false;
+  }
+  return true;
 }
 
-function encodeEnvelopeLoopSet(payload = {}) {
-  const timelineId = optionalField(payload, "timelineId", normalizeOptionalString);
-  const active = optionalBooleanField(payload, "active");
-  if (!timelineId.valid || timelineId.value == null || !active.valid || active.value == null) {
-    return null;
-  }
-  return { active: active.value, timelineId: timelineId.value };
+function encodeV3BeatJump(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["bars", "timelineId", "playSessionId"])) return null;
+  const bars = strictFinite(payload, "bars", { integer: true });
+  const timelineId = requiredString(payload, "timelineId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  return bars === 4 && timelineId && playSessionId
+    ? { bars, timelineId, playSessionId }
+    : null;
 }
 
-function encodeEnvelopeTypedEvent(type, payload) {
+function encodeV3LoopSet(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["active", "timelineId", "playSessionId"])) return null;
+  if (typeof payload.active !== "boolean") return null;
+  const timelineId = requiredString(payload, "timelineId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  return timelineId && playSessionId
+    ? { active: payload.active, timelineId, playSessionId }
+    : null;
+}
+
+function encodeV3LoopHalf(payload) {
+  if (!v3TimelineCommandShapeOk(payload, ["timelineId", "playSessionId"])) return null;
+  const timelineId = requiredString(payload, "timelineId");
+  const playSessionId = requiredString(payload, "playSessionId");
+  return timelineId && playSessionId
+    ? { timelineId, playSessionId }
+    : null;
+}
+
+function encodeV3TypedEvent(type, payload) {
   switch (type) {
-    case "DJ_MASTER_CHANGED":
-      return encodeEnvelopeMasterChanged(payload);
-    case "DJ_MASTER_TRACK_ACTIVE":
-      return encodeEnvelopeMasterTrackActive(payload);
+    case "DJ_TRACK_ACTIVE":
+    case "DJ_TRACK_SYNC":
+      return encodeV3TrackCandidate(payload);
     case "DJ_LOOP_STATE":
-      return encodeEnvelopeLoopState(payload);
+      return encodeV3MeasuredLoop(payload);
+    case "DJ_LOOP_FALLBACK":
+      return encodeV3LoopFallback(payload);
     case "DJ_RELEASE":
-      return encodeEnvelopeRelease(payload);
+      return encodeV3Release(payload);
     case "DJ_TIMELINE_BEAT_JUMP":
-      return encodeEnvelopeBeatJump(payload);
+      return encodeV3BeatJump(payload);
     case "DJ_TIMELINE_LOOP_SET":
-      return encodeEnvelopeLoopSet(payload);
+      return encodeV3LoopSet(payload);
+    case "DJ_TIMELINE_LOOP_HALF":
+      return encodeV3LoopHalf(payload);
     default:
       return null;
   }
 }
 
-function createSyndocalEnvelopeV1Adapter({ token = "" } = {}) {
-  // The HELLO authToken must satisfy the KDMX DjLinkHelloPayload bounds
-  // before any connection is attempted; fail at factory time instead of
-  // sending an unauthenticated HELLO.
+function decodeV3TimelineState(message) {
+  if (
+    !isPlainRecord(message) ||
+    message.v !== ENVELOPE_V3_PROTOCOL_VERSION ||
+    message.type !== "DJ_TIMELINE_STATE" ||
+    !hasExactFields(message, ["v", "type", "agentId", "sessionId", "sequence", "eventId", "payload"])
+  ) return null;
+  if (!v3EnvelopeStringOk(message.agentId) || !v3EnvelopeStringOk(message.sessionId)) return null;
+  if (!Number.isSafeInteger(message.sequence) || message.sequence < 1) return null;
+  if (!requiredString(message, "eventId")) return null;
+  const payload = message.payload;
+  const fields = [
+    "state",
+    "loopActive",
+    "transitionHoldActive",
+    "timelineId",
+    "positionBars",
+    "playSessionId",
+    "pedalOwner",
+    "releaseEventId",
+    "operatorReturnRequestId",
+  ];
+  if (!isPlainRecord(payload)) return null;
+  // `operatorReturnRequestId` is part of the current v3 correlation contract.
+  // Keep the payload exact: missing and unknown fields must not reach the
+  // router. Its only valid values are null or the exact canonical ID format.
+  if (!hasExactFields(payload, fields)) return null;
+  if (typeof payload.state !== "string" || !TIMELINE_STATES.has(payload.state)) return null;
+  if (typeof payload.loopActive !== "boolean") return null;
+  if (typeof payload.transitionHoldActive !== "boolean") return null;
+  const timelineId = payload.timelineId === null ? null : requiredString(payload, "timelineId");
+  const playSessionId = payload.playSessionId === null ? null : requiredString(payload, "playSessionId");
+  const releaseEventId = payload.releaseEventId === null ? null : requiredString(payload, "releaseEventId");
+  const operatorReturnRequestId = payload.operatorReturnRequestId === null
+    ? null
+    : parseOperatorReturnRequestId(payload.operatorReturnRequestId)?.id || null;
+  const positionBars = strictFinite(payload, "positionBars", { min: 0, integer: true });
+  if (
+    (payload.timelineId !== null && !timelineId) ||
+    (payload.playSessionId !== null && !playSessionId) ||
+    (payload.releaseEventId !== null && !releaseEventId) ||
+    (payload.operatorReturnRequestId !== null && !operatorReturnRequestId) ||
+    positionBars == null ||
+    (payload.pedalOwner !== null && !ENVELOPE_V3_PEDAL_OWNERS.has(payload.pedalOwner))
+  ) return null;
+  if (payload.state === "running" && (!timelineId || !playSessionId)) return null;
+  if (payload.pedalOwner === "timeline" && (!playSessionId || !releaseEventId)) return null;
+  return {
+    type: "DJ_TIMELINE_STATE",
+    state: payload.state,
+    loopActive: payload.loopActive,
+    transitionHoldActive: payload.transitionHoldActive,
+    timelineId,
+    positionBars,
+    playSessionId,
+    pedalOwner: payload.pedalOwner,
+    releaseEventId,
+    operatorReturnRequestId,
+    // Session identity plus the monotonic per-session sequence let the
+    // router fence same-session stale/equal replays without mutation.
+    sessionId: message.sessionId,
+    eventId: message.eventId,
+    sequence: message.sequence,
+  };
+}
+
+function createSyndocalEnvelopeV3Adapter({ token = "" } = {}) {
   if (!validToken(token)) {
-    throw new Error("Syndocal syndocal-envelope-v1 token is required and must be 32..256 UTF-8 bytes");
+    throw new Error("Syndocal syndocal-envelope-v3 token is required and must be 32..256 UTF-8 bytes");
   }
+  let sessionId = null;
   const sessionIdFor = () => {
-    // KDMX requires every envelope frame to repeat the HELLO agentId/sessionId
-    // (a mismatch is rejected as session_mismatch), while a repeated HELLO
-    // shape is admitted as Duplicate and the socket is closed. A fresh
-    // session identity is minted per HELLO so reconnects never replay.
-    if (!sessionId) {
-      sessionId = `rb-output-${Date.now().toString(36)}-${makeId()}`;
-    }
+    if (!sessionId) sessionId = `rb-output-v3-${Date.now().toString(36)}-${makeId()}`;
     return sessionId;
   };
-  let sessionId = null;
-  function envelopeFrame({ type, eventId, sequence }, payload) {
-    const sessionIdValue = sessionIdFor();
-    if (!sessionIdValue) {
-      return null;
-    }
-    return {
-      v: ENVELOPE_V1_PROTOCOL_VERSION,
-      type,
-      agentId: ENVELOPE_V1_AGENT_ID,
-      sessionId: sessionIdValue,
-      sequence,
-      eventId,
-      payload,
-    };
-  }
+  const frame = ({ type, eventId, sequence }, payload) => ({
+    v: ENVELOPE_V3_PROTOCOL_VERSION,
+    type,
+    agentId: ENVELOPE_V3_AGENT_ID,
+    sessionId: sessionIdFor(),
+    sequence,
+    eventId,
+    payload,
+  });
   return {
-    name: "syndocal-envelope-v1",
-    validateAck: validateEnvelopeAck,
+    name: "syndocal-envelope-v3",
+    validateAck: validateEnvelopeV3Ack,
     encodeHello({ eventId, sequence }) {
-      // A new connection must not inherit a previous session identity.
       sessionId = null;
-      return envelopeFrame({ type: "DJ_AGENT_HELLO", eventId, sequence }, {
+      return frame({ type: "DJ_AGENT_HELLO", eventId, sequence }, {
         authToken: token,
-        version: ENVELOPE_V1_PROTOCOL_VERSION,
+        version: ENVELOPE_V3_PROTOCOL_VERSION,
         capabilities: [
-          "DJ_MASTER_CHANGED",
-          "DJ_MASTER_TRACK_ACTIVE",
+          "DJ_TRACK_ACTIVE",
+          "DJ_TRACK_SYNC",
           "DJ_LOOP_STATE",
+          "DJ_LOOP_FALLBACK",
           "DJ_RELEASE",
           "DJ_TIMELINE_BEAT_JUMP",
           "DJ_TIMELINE_LOOP_SET",
+          "DJ_TIMELINE_LOOP_HALF",
           "DJ_TIMELINE_STATE_REQUEST",
           "DJ_STATE_SYNC",
         ],
       });
     },
     encodeEvent(event) {
-      if (!isPlainRecord(event) || typeof event.type !== "string") {
-        return null;
-      }
-      if (!SUPPORTED_EVENT_TYPES.has(event.type)) {
-        return null;
-      }
-      // KDMX DjLinkTimelineStateRequestPayload is an empty deny-unknown-fields
-      // struct; the request never carries payload fields on this wire.
-      const encoded = event.type === "DJ_TIMELINE_STATE_REQUEST"
-        ? {}
-        : encodeEnvelopeTypedEvent(event.type, isPlainRecord(event.payload) ? event.payload : {});
-      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1) {
-        return null;
-      }
+      if (!isPlainRecord(event) || !SUPPORTED_EVENT_TYPES.has(event.type)) return null;
+      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1) return null;
       const eventId = normalizeIdentity(event.eventId);
-      if (!eventId) return null;
-      return encoded
-        ? envelopeFrame({ type: event.type, eventId, sequence: event.sequence }, encoded)
-        : null;
+      if (!eventId || eventId !== event.eventId) return null;
+      const payload = event.type === "DJ_TIMELINE_STATE_REQUEST"
+        ? {}
+        : encodeV3TypedEvent(event.type, event.payload);
+      return payload ? frame({ type: event.type, eventId, sequence: event.sequence }, payload) : null;
     },
     encodeStateSync({ eventId, sequence, state }) {
-      if (!Number.isSafeInteger(sequence) || sequence < 1) return null;
-      const eventIdValue = normalizeIdentity(eventId);
-      if (!eventIdValue) return null;
-      const flat = encodeFlatStateSync(state);
-      if (!flat) return null;
-      const payload = { released: flat.released };
-      if (flat.loopDivision != null) payload.loopDivision = flat.loopDivision;
-      if (flat.masterDeck != null) payload.masterDeck = flat.masterDeck;
-      if (flat.masterTrack != null) payload.masterTrack = flat.masterTrack;
-      return envelopeFrame(
-        { type: "DJ_STATE_SYNC", eventId: eventIdValue, sequence },
-        payload,
-      );
+      if (!Number.isSafeInteger(sequence) || sequence < 1 || !normalizeIdentity(eventId)) return null;
+      if (!isPlainRecord(state) || typeof state.released !== "boolean") return null;
+      const normalizedOwnerDeck = state.ownerDeck == null ? null : normalizeDeck(state.ownerDeck);
+      const ownerDeck = normalizedOwnerDeck == null ? null : Number(normalizedOwnerDeck);
+      const ownerDeckId = state.ownerDeckId == null ? null : normalizeIdentity(state.ownerDeckId);
+      const activePlaySessionId = state.activePlaySessionId == null
+        ? null
+        : normalizeIdentity(state.activePlaySessionId);
+      const hasOwnerDeck = state.ownerDeck != null;
+      const hasOwnerDeckId = state.ownerDeckId != null;
+      const hasActivePlaySessionId = state.activePlaySessionId != null;
+      if (
+        (hasOwnerDeck && (!Number.isInteger(ownerDeck) || ownerDeck < 1 || ownerDeck > 4)) ||
+        (hasOwnerDeckId && !ownerDeckId) ||
+        (hasActivePlaySessionId && !activePlaySessionId) ||
+        hasOwnerDeck !== hasOwnerDeckId ||
+        hasOwnerDeck !== hasActivePlaySessionId ||
+        (ownerDeckId && ownerDeckId !== `rekordbox-deck-${ownerDeck}`) ||
+        (hasOwnerDeck && (!ownerDeck || !ownerDeckId || !activePlaySessionId))
+      ) {
+        return null;
+      }
+      const payload = {
+        released: state.released,
+      };
+      if (hasOwnerDeck) {
+        payload.ownerDeck = ownerDeck;
+        payload.ownerDeckId = ownerDeckId;
+        payload.activePlaySessionId = activePlaySessionId;
+      }
+      return frame({ type: "DJ_STATE_SYNC", eventId, sequence }, payload);
     },
     encodeHeartbeat({ eventId, sequence }) {
-      return envelopeFrame({ type: "DJ_HEARTBEAT", eventId, sequence }, {});
+      return frame({ type: "DJ_HEARTBEAT", eventId, sequence }, {});
     },
     encodeTimelineStateRequest({ eventId, sequence }) {
-      return envelopeFrame({ type: "DJ_TIMELINE_STATE_REQUEST", eventId, sequence }, {});
+      return frame({ type: "DJ_TIMELINE_STATE_REQUEST", eventId, sequence }, {});
     },
     decode(data) {
-      let text;
-      if (typeof data === "string") {
-        text = data;
-      } else if (Buffer.isBuffer(data)) {
-        text = data.toString("utf8");
-      } else if (data && typeof data === "object" && typeof data.data !== "undefined") {
-        return this.decode(data.data);
-      } else {
-        return null;
-      }
-      if (Buffer.byteLength(text, "utf8") > ENVELOPE_V1_MAX_FRAME_BYTES) {
-        return null;
-      }
+      let text = data;
+      if (data && typeof data === "object" && Object.hasOwn(data, "data")) text = data.data;
+      if (Buffer.isBuffer(text)) text = text.toString("utf8");
+      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > ENVELOPE_V3_MAX_FRAME_BYTES) return null;
       try {
         const parsed = JSON.parse(text);
         return isPlainRecord(parsed) ? parsed : null;
@@ -892,69 +799,41 @@ function createSyndocalEnvelopeV1Adapter({ token = "" } = {}) {
       }
     },
     isAck(message) {
-      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V1_PROTOCOL_VERSION && message.type === "ACK");
+      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V3_PROTOCOL_VERSION && message.type === "ACK");
     },
     isStateSyncRequest() {
-      // The KDMX DJ Link server never solicits state sync on the v1
-      // envelope wire; it only broadcasts DJ_TIMELINE_STATE frames.
       return false;
     },
     isTimelineState(message) {
-      return Boolean(
-        isPlainRecord(message) &&
-          message.v === ENVELOPE_V1_PROTOCOL_VERSION &&
-          message.type === "DJ_TIMELINE_STATE"
-      );
+      return Boolean(isPlainRecord(message) && message.v === ENVELOPE_V3_PROTOCOL_VERSION && message.type === "DJ_TIMELINE_STATE");
     },
-    decodeTimelineState(message) {
-      if (
-        !isPlainRecord(message) ||
-        message.v !== ENVELOPE_V1_PROTOCOL_VERSION ||
-        message.type !== "DJ_TIMELINE_STATE"
-      ) {
-        return null;
-      }
-      if (!envelopeStringOk(message.agentId) || !envelopeStringOk(message.sessionId)) {
-        return null;
-      }
-      if (
-        !Number.isSafeInteger(message.sequence) ||
-        message.sequence < 1 ||
-        message.sequence > ENVELOPE_V1_MAX_SEQUENCE
-      ) {
-        return null;
-      }
-      const payload = message.payload;
-      if (!isPlainRecord(payload)) return null;
-      const fields = ["state", "loopActive", "timelineId", "positionBars"];
-      if (!hasExactFields(payload, fields)) {
-        return null;
-      }
-      if (typeof payload.state !== "string" || !TIMELINE_STATES.has(payload.state)) {
-        return null;
-      }
-      if (typeof payload.loopActive !== "boolean") {
-        return null;
-      }
-      const eventId = normalizeIdentity(message.eventId);
-      const timelineId = normalizeIdentity(payload.timelineId);
-      if (!eventId || eventId !== message.eventId || !timelineId || timelineId !== payload.timelineId) {
-        return null;
-      }
-      if (!Number.isSafeInteger(payload.positionBars) || payload.positionBars < 0) {
-        return null;
-      }
-      return {
-        type: "DJ_TIMELINE_STATE",
-        state: payload.state,
-        loopActive: payload.loopActive,
-        timelineId,
-        positionBars: payload.positionBars,
-        eventId,
-        sequence: message.sequence,
-      };
-    },
+    decodeTimelineState: decodeV3TimelineState,
   };
+}
+
+const DEFAULT_INTERVAL_API = Object.freeze({
+  setInterval(callback, ms) {
+    return setInterval(callback, ms);
+  },
+  clearInterval(handle) {
+    clearInterval(handle);
+  },
+});
+
+function resolveIntervalApi(intervalApi) {
+  if (intervalApi == null) {
+    return DEFAULT_INTERVAL_API;
+  }
+  if (
+    (typeof intervalApi !== "object" && typeof intervalApi !== "function") ||
+    typeof intervalApi.setInterval !== "function" ||
+    typeof intervalApi.clearInterval !== "function"
+  ) {
+    throw new TypeError(
+      "Syndocal intervalApi must be an object providing setInterval and clearInterval functions",
+    );
+  }
+  return intervalApi;
 }
 
 function createSyndocalClient({
@@ -964,10 +843,11 @@ function createSyndocalClient({
   path = "/dj-link",
   nic = "",
   token = "",
-  adapter = "generic-json",
+  adapter = "syndocal-envelope-v3",
   adapterFactory = null,
   WebSocketImpl = null,
   wsModule = "ws",
+  intervalApi = null,
   reconnectMinMs = 500,
   reconnectMaxMs = 10_000,
   heartbeatMs = 5_000,
@@ -986,12 +866,11 @@ function createSyndocalClient({
   const resolvedAdapter = resolveAdapter({ adapter, adapterFactory, token });
   let adapterError = resolvedAdapter.error;
   const adapterObject = resolvedAdapter.adapterObject;
-  // Both proven wire contracts require a bounded HELLO credential; the
-  // envelope adapter additionally enforces this at factory time.
+  // The sole production wire contract requires a bounded HELLO credential.
   if (
     enabled &&
     adapterObject &&
-    (adapterObject.name === "generic-json" || adapterObject.name === "syndocal-envelope-v1") &&
+    adapterObject.name === "syndocal-envelope-v3" &&
     !validToken(token)
   ) {
     adapterError = "Syndocal token is required and must be 32..256 UTF-8 bytes";
@@ -1012,12 +891,14 @@ function createSyndocalClient({
   );
   const heartbeatInterval = Math.max(1, Number(heartbeatMs) || 1);
   const ackTimeout = Math.max(1, Number(ackTimeoutMs) || 1);
+  const intervals = resolveIntervalApi(intervalApi);
   let socket = null;
   let socketGeneration = 0;
   let generationCounter = 0;
   let running = false;
   let reconnectTimer = null;
   let heartbeatTimer = null;
+  let heartbeatArmed = false;
   let reconnectDelay = Math.max(50, reconnectMinMs);
   let wireSequence = 0;
   let physicalEventIdLatched = false;
@@ -1031,7 +912,7 @@ function createSyndocalClient({
       : "Syndocal integration disabled by config",
     url,
     nic: nic || null,
-    adapter: adapterObject?.name || (String(adapter || "").trim() || null),
+    adapter: publicAdapterName(adapterObject),
     updatedAt: new Date(now()).toISOString(),
     lastError: adapterError || null,
     lastAckAt: null,
@@ -1053,6 +934,8 @@ function createSyndocalClient({
   const deliveryHistory = new Map();
   const physicalEventIdRegistry = new Set();
   const socketCleanups = [];
+  let timelineStateFence = null;
+  let timelineStateRequestCorrelation = null;
 
   function updateStatus(patch) {
     status = {
@@ -1061,7 +944,7 @@ function createSyndocalClient({
       enabled: Boolean(enabled),
       url,
       nic: nic || null,
-      adapter: adapterObject?.name || (String(adapter || "").trim() || null),
+      adapter: publicAdapterName(adapterObject),
       connectionGeneration: socketGeneration,
       wireSequence,
       lastAckResult: lastAckResult ? { ...lastAckResult } : null,
@@ -1091,6 +974,21 @@ function createSyndocalClient({
     return { eventId: generated, sequence: wireSequence };
   }
 
+  function makeTransientTelemetryId(type, sequence) {
+    if (
+      !TRANSIENT_TELEMETRY_TYPES.has(type) ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 1
+    ) {
+      return null;
+    }
+    // O(1), session-local identity: continuous telemetry is fenced by the
+    // connection generation plus the globally monotonic wire sequence. It is
+    // intentionally absent from the durable physical-event registry and is
+    // never replayed after reconnect.
+    return `telemetry-${socketGeneration}-${sequence}`;
+  }
+
   function reportControlEnvelopeFailure(kind) {
     const reason = wireSequence >= Number.MAX_SAFE_INTEGER
       ? "control-sequence-overflow"
@@ -1102,7 +1000,12 @@ function createSyndocalClient({
 
   function reservePhysicalEventId(candidate) {
     const eventId = normalizeIdentity(candidate);
-    if (!eventId || eventId.startsWith("control-") || physicalEventIdRegistry.has(eventId)) {
+    if (
+      !eventId ||
+      eventId.startsWith("control-") ||
+      eventId.startsWith("telemetry-") ||
+      physicalEventIdRegistry.has(eventId)
+    ) {
       return null;
     }
     if (physicalEventIdLatched || physicalEventIdRegistry.size >= maxEventIds) {
@@ -1124,10 +1027,13 @@ function createSyndocalClient({
   }
 
   function clearHeartbeat() {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
+    if (!heartbeatArmed) {
+      return;
     }
+    heartbeatArmed = false;
+    const handle = heartbeatTimer;
+    heartbeatTimer = null;
+    intervals.clearInterval(handle);
   }
 
   function trimDeliveryHistory() {
@@ -1167,7 +1073,13 @@ function createSyndocalClient({
     pending.retryTimer = null;
   }
 
-  function finalizeDelivery(eventId, state, extra = {}, expected = null) {
+  function finalizeDelivery(
+    eventId,
+    state,
+    extra = {},
+    expected = null,
+    { includeAckResult = true } = {},
+  ) {
     const pending = pendingAcks.get(eventId);
     if (!pending) {
       return null;
@@ -1192,6 +1104,7 @@ function createSyndocalClient({
       ...extra,
     });
     const ackResult =
+      includeAckResult &&
       (delivery.ackRequired || ["rejected", "timed-out", "send-failed"].includes(state)) &&
       state !== "pending"
         ? {
@@ -1203,6 +1116,16 @@ function createSyndocalClient({
             message: delivery.message || null,
             outcome: delivery.ack?.outcome || null,
             code: delivery.ack?.code || null,
+            connectionGeneration: pending.generation,
+            deck: Number.isSafeInteger(pending.event?.payload?.deck)
+              ? pending.event.payload.deck
+              : null,
+            deckId: typeof pending.event?.payload?.deckId === "string"
+              ? pending.event.payload.deckId
+              : null,
+            playSessionId: typeof pending.event?.payload?.playSessionId === "string"
+              ? pending.event.payload.playSessionId
+              : null,
             stateGeneration: Number.isSafeInteger(delivery.ack?.stateGeneration)
               ? delivery.ack.stateGeneration
               : null,
@@ -1214,6 +1137,190 @@ function createSyndocalClient({
       emitter.emit("ack-timeout", { eventId: delivery.eventId, type: delivery.type, delivery: snapshot });
     }
     return snapshot;
+  }
+
+  function acceptTimelineState(timelineState, generation) {
+    if (
+      adapterObject?.name !== "syndocal-envelope-v3" ||
+      !timelineState ||
+      !Number.isSafeInteger(timelineState.sequence) ||
+      timelineState.sequence < 1 ||
+      typeof timelineState.sessionId !== "string" ||
+      !timelineState.sessionId
+    ) {
+      return true;
+    }
+    if (!timelineStateFence || timelineStateFence.generation !== generation) {
+      timelineStateFence = {
+        generation,
+        sessionId: timelineState.sessionId,
+        sequence: timelineState.sequence,
+        retiredSessionIds: new Set(),
+      };
+      return true;
+    }
+    if (timelineStateFence.sessionId === timelineState.sessionId) {
+      if (timelineState.sequence <= timelineStateFence.sequence) {
+        return false;
+      }
+      timelineStateFence.sequence = timelineState.sequence;
+      return true;
+    }
+    if (
+      timelineStateFence.retiredSessionIds.has(timelineState.sessionId) ||
+      timelineStateFence.retiredSessionIds.size >= TIMELINE_SESSION_FENCE_MAX_RETIRED
+    ) {
+      return false;
+    }
+    timelineStateFence.retiredSessionIds.add(timelineStateFence.sessionId);
+    timelineStateFence = {
+      generation,
+      sessionId: timelineState.sessionId,
+      sequence: timelineState.sequence,
+      retiredSessionIds: timelineStateFence.retiredSessionIds,
+    };
+    return true;
+  }
+
+  function finalizeCorrelatedRelease(timelineState, candidate, generation) {
+    if (
+      timelineState?.state !== "running" ||
+      timelineState.pedalOwner !== "timeline" ||
+      typeof timelineState.releaseEventId !== "string" ||
+      !timelineState.releaseEventId ||
+      typeof timelineState.timelineId !== "string" ||
+      !timelineState.timelineId ||
+      typeof timelineState.playSessionId !== "string" ||
+      !timelineState.playSessionId
+    ) {
+      return null;
+    }
+    const pending = pendingAcks.get(timelineState.releaseEventId);
+    const payload = pending?.type === "DJ_RELEASE" ? pending.event?.payload : null;
+    if (
+      !pending ||
+      pending.socket !== candidate ||
+      pending.generation !== generation ||
+      !payload ||
+      payload.state !== "released" ||
+      payload.timelineId !== timelineState.timelineId ||
+      payload.playSessionId !== timelineState.playSessionId
+    ) {
+      return null;
+    }
+    return finalizeDelivery(
+      timelineState.releaseEventId,
+      "acknowledged",
+      { reason: "timeline-state-correlated" },
+      { pending, generation, socket: candidate },
+      { includeAckResult: false },
+    );
+  }
+
+  function normalizeTimelineStateRequestAckCode(value) {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const normalized = value.trim().toLowerCase();
+    return TIMELINE_STATE_REQUEST_ACK_CODES.has(normalized) ? normalized : null;
+  }
+
+  function clearCurrentTimelineStateRequestCorrelation(candidate, generation) {
+    if (
+      timelineStateRequestCorrelation &&
+      timelineStateRequestCorrelation.socket === candidate &&
+      timelineStateRequestCorrelation.generation === generation
+    ) {
+      timelineStateRequestCorrelation = null;
+    }
+  }
+
+  function handleTimelineStateRequestAck(message, validation, candidate, generation) {
+    if (adapterObject?.name !== "syndocal-envelope-v3") {
+      return false;
+    }
+    const correlation = timelineStateRequestCorrelation;
+    if (
+      !correlation ||
+      correlation.eventId !== validation.eventId ||
+      correlation.sequence !== message.sequence ||
+      correlation.socket !== candidate ||
+      correlation.generation !== generation
+    ) {
+      return false;
+    }
+
+    const safeCode = normalizeTimelineStateRequestAckCode(message.code);
+    const requestAccepted =
+      (validation.outcome === "accepted" || validation.outcome === "duplicate") &&
+      message.code === null;
+    const visibleMessage = requestAccepted
+      ? "Syndocal timeline state request accepted; awaiting authoritative timeline state"
+      : safeCode
+        ? `Syndocal timeline state request failed: ${safeCode}`
+        : `Syndocal timeline state request failed (${validation.outcome})`;
+    const receivedAt = new Date(now()).toISOString();
+    const ackResult = {
+      eventId: validation.eventId,
+      type: "DJ_TIMELINE_STATE_REQUEST",
+      sequence: message.sequence,
+      ok: requestAccepted,
+      state: requestAccepted ? "accepted" : "rejected",
+      message: visibleMessage,
+      outcome: validation.outcome,
+      code: safeCode,
+      stateGeneration: message.stateGeneration,
+      connectionGeneration: generation,
+      receivedAt,
+    };
+    lastAckResult = ackResult;
+    status.lastAckAt = receivedAt;
+    if (!requestAccepted) {
+      // A rejected request cannot produce the authoritative response this
+      // correlation represents. Fence later copies until the next request.
+      timelineStateRequestCorrelation = null;
+    }
+    updateStatus({
+      lastAckAt: receivedAt,
+      lastAckResult,
+      lastError: requestAccepted ? null : visibleMessage,
+      message: visibleMessage,
+    });
+    const safeAck = {
+      v: ENVELOPE_V3_PROTOCOL_VERSION,
+      type: "ACK",
+      eventId: validation.eventId,
+      sequence: message.sequence,
+      outcome: validation.outcome,
+      code: safeCode,
+      stateGeneration: message.stateGeneration,
+    };
+    emitter.emit("ack", {
+      eventId: validation.eventId,
+      ok: requestAccepted,
+      control: true,
+      message: safeAck,
+      delivery: null,
+    });
+    if (!requestAccepted) {
+      const failure = {
+        kind: "timeline-state-request",
+        reason: "control-ack-failed",
+        eventId: validation.eventId,
+        sequence: message.sequence,
+        outcome: validation.outcome,
+        code: safeCode,
+        message: visibleMessage,
+      };
+      emitter.emit("control-failure", failure);
+      emitter.emit("warning", {
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        reason: failure.reason,
+        code: safeCode,
+        message: visibleMessage,
+      });
+    }
+    return true;
   }
 
   function finalizeAllPending(state, extra = {}) {
@@ -1362,6 +1469,17 @@ function createSyndocalClient({
       return;
     }
     emitter.emit("message", message);
+    if (adapterObject.name === "syndocal-envelope-v3" && message.v !== ENVELOPE_V3_PROTOCOL_VERSION) {
+      const failure = {
+        reason: message.v === 1 || message.v === 2
+          ? "retired-protocol-v1-or-v2"
+          : "strict-envelope-v3-required",
+        message,
+      };
+      updateStatus({ lastError: failure.reason });
+      emitter.emit("protocol-failure", failure);
+      return;
+    }
     const looksLikeAck =
       message.type === "ACK" ||
       (typeof message.type === "string" && message.type.trim().toUpperCase() === "ACK") ||
@@ -1375,7 +1493,7 @@ function createSyndocalClient({
     if (looksLikeAck || adapterObject.isAck?.(message)) {
       const validation = typeof adapterObject.validateAck === "function"
         ? adapterObject.validateAck(message)
-        : validateTypedAck(message);
+        : { valid: false, reason: "adapter-ack-validator-missing" };
       if (!validation.valid) {
         const failure = { reason: validation.reason, message };
         emitter.emit("protocol-failure", failure);
@@ -1383,6 +1501,9 @@ function createSyndocalClient({
         return;
       }
       const { eventId, outcome } = validation;
+      if (handleTimelineStateRequestAck(message, validation, candidate, generation)) {
+        return;
+      }
       const pending = eventId ? pendingAcks.get(eventId) : null;
       if (
         !eventId ||
@@ -1441,10 +1562,27 @@ function createSyndocalClient({
     ) {
       const timelineState = adapterObject.decodeTimelineState?.(message);
       if (!timelineState) {
-        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state and boolean loopActive";
+        const warning = "Invalid DJ_TIMELINE_STATE ignored; expected state, boolean loopActive, required boolean transitionHoldActive, and canonical operatorReturnRequestId";
         updateStatus({ lastError: warning });
         emitter.emit("warning", { message: warning, type: "DJ_TIMELINE_STATE", raw: message });
         return;
+      }
+      // The router has its own timeline-state fence, but the client must not
+      // consume or forward a stale correlated snapshot before that event
+      // reaches it. In particular, a retired session ID must not re-key the
+      // router and terminalize a pending Release through an ABA replay.
+      const timelineStateAccepted = adapterObject.name !== "syndocal-envelope-v3" ||
+        acceptTimelineState(timelineState, generation);
+      if (!timelineStateAccepted) {
+        emitter.emit("warning", {
+          message: "Stale duplicate DJ_TIMELINE_STATE ignored",
+          type: "DJ_TIMELINE_STATE",
+        });
+        return;
+      }
+      if (timelineStateAccepted) {
+        clearCurrentTimelineStateRequestCorrelation(candidate, generation);
+        finalizeCorrelatedRelease(timelineState, candidate, generation);
       }
       emitter.emit("timeline-state", timelineState);
       return;
@@ -1505,15 +1643,15 @@ function createSyndocalClient({
     if (!envelope) {
       return reportControlEnvelopeFailure("heartbeat");
     }
-    const message = adapterObject?.encodeHeartbeat
-      ? adapterObject.encodeHeartbeat(envelope)
-      : { type: "DJ_HEARTBEAT", ...envelope };
+    const message = adapterObject?.encodeHeartbeat?.(envelope);
+    if (!message) return reportControlEnvelopeFailure("heartbeat-encode");
     return sendRaw(message, { kind: "heartbeat" });
   }
 
   function startHeartbeat() {
     clearHeartbeat();
-    heartbeatTimer = setInterval(sendHeartbeat, heartbeatInterval);
+    heartbeatTimer = intervals.setInterval(sendHeartbeat, heartbeatInterval);
+    heartbeatArmed = true;
   }
 
   function sendHello() {
@@ -1521,9 +1659,8 @@ function createSyndocalClient({
     if (!envelope) {
       return reportControlEnvelopeFailure("hello");
     }
-    const message = adapterObject?.encodeHello
-      ? adapterObject.encodeHello(envelope)
-      : { type: "DJ_AGENT_HELLO", ...envelope };
+    const message = adapterObject?.encodeHello?.(envelope);
+    if (!message) return reportControlEnvelopeFailure("hello-encode");
     return sendRaw(message, { kind: "hello" });
   }
 
@@ -1563,38 +1700,6 @@ function createSyndocalClient({
       emitter.emit("send-failed", failure);
       return false;
     }
-    let flatState = null;
-    try {
-      flatState = adapterObject?.name === "generic-json" ? encodeFlatStateSync(state) : true;
-    } catch (error) {
-      const failure = {
-        kind: "state-sync",
-        reason: "state-sync-validation-error",
-        error,
-      };
-      updateStatus({
-        stateSync: "error",
-        lastError: "Syndocal state sync snapshot validation failed",
-        message: "Syndocal state sync failed",
-      });
-      emitter.emit("state-sync-error", failure);
-      emitter.emit("send-failed", failure);
-      return false;
-    }
-    if (adapterObject?.name === "generic-json" && !flatState) {
-      const failure = {
-        kind: "state-sync",
-        reason: "invalid-state-sync",
-      };
-      updateStatus({
-        stateSync: "error",
-        lastError: "Syndocal state sync snapshot failed KDMX validation",
-        message: "Syndocal state sync failed",
-      });
-      emitter.emit("state-sync-error", failure);
-      emitter.emit("send-failed", failure);
-      return false;
-    }
     const envelope = nextControlEnvelope();
     if (!envelope) {
       const failure = { kind: "state-sync", reason: "control-sequence-overflow" };
@@ -1605,11 +1710,9 @@ function createSyndocalClient({
     }
     let message;
     try {
-      message = adapterObject?.name === "generic-json"
-        ? { type: "DJ_STATE_SYNC", ...envelope, ...flatState }
-        : adapterObject?.encodeStateSync
-          ? adapterObject.encodeStateSync({ ...envelope, state })
-          : { type: "DJ_STATE_SYNC", ...envelope, ...encodeFlatStateSync(state) };
+      message = adapterObject?.encodeStateSync
+        ? adapterObject.encodeStateSync({ ...envelope, state })
+        : null;
     } catch (error) {
       const failure = { kind: "state-sync", reason: "state-sync-encode-error", error };
       updateStatus({
@@ -1637,173 +1740,90 @@ function createSyndocalClient({
     return sent;
   }
 
-  function sendTimelineStateRequest() {
+  function sendTimelineStateRequest({ returnEventResult = false } = {}) {
+    const eventResult = ({
+      eventId = null,
+      sequence = null,
+      sent = false,
+      reason = sent ? undefined : "not-sent",
+    }) => {
+      if (!returnEventResult) {
+        return sent;
+      }
+      const delivery = {
+        eventId,
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        state: sent ? "acknowledged" : "send-failed",
+        ackState: sent ? "acknowledged" : "send-failed",
+        ok: sent,
+        sent,
+        ackRequired: false,
+        attempts: 1,
+        busyRetries: 0,
+        createdAt: new Date(now()).toISOString(),
+        updatedAt: new Date(now()).toISOString(),
+      };
+      if (reason !== undefined) {
+        delivery.reason = reason;
+      }
+      publishDelivery(delivery);
+      return {
+        eventId,
+        sequence,
+        type: "DJ_TIMELINE_STATE_REQUEST",
+        sent,
+        ackRequired: false,
+        ok: sent,
+        state: delivery.state,
+        ackState: delivery.ackState,
+        awaitingAck: false,
+        delivery: { ...delivery },
+      };
+    };
+
     if (typeof adapterObject?.encodeTimelineStateRequest !== "function") {
-      return false;
+      return eventResult({ reason: "timeline-state-request-unsupported" });
     }
     const envelope = nextControlEnvelope();
     if (!envelope) {
-      return reportControlEnvelopeFailure("timeline-state-request");
-    }
-    const message = adapterObject.encodeTimelineStateRequest(envelope);
-    return sendRaw(message, { kind: "timeline-state-request" });
-  }
-
-  function sendControlEvent(type, source, requestedId) {
-    if (requestedId) {
-      return {
-        eventId: requestedId,
-        type,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-event-id-not-accepted",
-      };
-    }
-    const hasSequence = Object.hasOwn(source, "sequence");
-    const controlEventSequence = hasSequence ? source.sequence : wireSequence + 1;
-    if (requestedId && physicalEventIdRegistry.has(requestedId)) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-id-conflicts-with-physical",
-      };
-    }
-    if (!hasSequence && wireSequence >= Number.MAX_SAFE_INTEGER) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-sequence-overflow",
-      };
-    }
-    if (!Number.isSafeInteger(controlEventSequence) || controlEventSequence < 1) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "invalid-sequence",
-      };
-    }
-    if (hasSequence && controlEventSequence <= wireSequence) {
-      return {
-        eventId: requestedId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "sequence-rollback",
-      };
-    }
-    const eventId = requestedId || makeControlId();
-    if (!eventId) {
-      return {
-        eventId: null,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "control-id-generation-failed",
-      };
+      reportControlEnvelopeFailure("timeline-state-request");
+      return eventResult({ reason: "control-sequence-overflow" });
     }
     let message;
     try {
-      message = adapterObject.name === "generic-json"
-        ? encodeFlatEvent({
-            type,
-            eventId,
-            sequence: controlEventSequence,
-            payload: Object.hasOwn(source, "payload") ? source.payload : {},
-          })
-        : adapterObject.encodeEvent
-          ? adapterObject.encodeEvent({
-              type,
-              eventId,
-              sequence: controlEventSequence,
-              payload: Object.hasOwn(source, "payload") ? source.payload : {},
-            })
-          : encodeFlatEvent({
-            type,
-            eventId,
-            sequence: controlEventSequence,
-            payload: Object.hasOwn(source, "payload") ? source.payload : {},
-          });
+      message = adapterObject.encodeTimelineStateRequest(envelope);
     } catch {
       message = null;
     }
     if (!message || typeof message !== "object" || Array.isArray(message)) {
-      return {
-        eventId,
-        type,
-        sequence: controlEventSequence,
-        sent: false,
-        ok: false,
-        skipped: true,
-        state: "skipped",
-        ackState: "skipped",
-        reason: "invalid-payload",
-      };
+      reportControlEnvelopeFailure("timeline-state-request-encode");
+      return eventResult({ eventId: envelope.eventId, sequence: envelope.sequence, reason: "invalid-payload" });
     }
-    wireSequence = controlEventSequence;
-    const delivery = {
-      eventId,
-      type,
-      state: "pending",
-      ackState: "pending",
-      ok: false,
-      sent: false,
-      ackRequired: false,
-      attempts: 1,
-      busyRetries: 0,
-      createdAt: new Date(now()).toISOString(),
-      updatedAt: new Date(now()).toISOString(),
-    };
-    const sent = sendRaw(message, { kind: "control-event", type, eventId });
-    delivery.sent = sent;
-    delivery.state = sent ? "acknowledged" : "send-failed";
-    delivery.ackState = delivery.state;
-    delivery.ok = sent;
-    delivery.reason = sent ? undefined : "not-sent";
-    publishDelivery(delivery);
-    return {
-      eventId,
-      sequence: controlEventSequence,
-      type,
+    const correlation = adapterObject.name === "syndocal-envelope-v3"
+      ? {
+          eventId: envelope.eventId,
+          sequence: envelope.sequence,
+          socket,
+          generation: socketGeneration,
+        }
+      : null;
+    timelineStateRequestCorrelation = correlation;
+    const sent = sendRaw(message, {
+      kind: "timeline-state-request",
+      eventId: envelope.eventId,
+      generation: socketGeneration,
+    });
+    if (!sent && timelineStateRequestCorrelation === correlation) {
+      timelineStateRequestCorrelation = null;
+    }
+    return eventResult({
+      eventId: envelope.eventId,
+      sequence: envelope.sequence,
       sent,
-      ackRequired: false,
-      ok: delivery.ok,
-      state: delivery.state,
-      ackState: delivery.ackState,
-      awaitingAck: false,
-      delivery: { ...delivery },
-    };
+    });
   }
 
-  function sendPhysicalEncodedEvent({ eventId, type, sequence: eventSequence, message, requiresAck }) {
+  function sendPhysicalEncodedEvent({ eventId, type, sequence: eventSequence, message, requiresAck, event }) {
     const delivery = {
       eventId,
       type,
@@ -1817,9 +1837,31 @@ function createSyndocalClient({
       createdAt: new Date(now()).toISOString(),
       updatedAt: new Date(now()).toISOString(),
     };
+    if (!requiresAck) {
+      const sent = sendRaw(message, { kind: "event", type, eventId, generation: socketGeneration });
+      delivery.sent = sent;
+      delivery.state = sent ? "acknowledged" : "send-failed";
+      delivery.ackState = delivery.state;
+      delivery.ok = sent;
+      delivery.reason = sent ? null : "not-sent";
+      publishDelivery(delivery);
+      return {
+        eventId,
+        sequence: eventSequence,
+        type,
+        sent,
+        ackRequired: false,
+        ok: sent,
+        state: delivery.state,
+        ackState: delivery.state,
+        awaitingAck: false,
+        delivery: { ...delivery },
+      };
+    }
     const pending = {
       type,
       message,
+      event: { ...event, payload: { ...(event?.payload || {}) } },
       sequence: eventSequence,
       generation: socketGeneration,
       socket,
@@ -1896,6 +1938,7 @@ function createSyndocalClient({
       };
     }
     const type = source.type;
+    const transientTelemetry = TRANSIENT_TELEMETRY_TYPES.has(type);
     const requestedId = Object.hasOwn(source, "eventId") ? normalizeIdentity(source.eventId) : null;
     if (!type) {
       return { sent: false, ok: false, state: "send-failed", ackState: "send-failed", reason: "missing-type" };
@@ -1972,9 +2015,9 @@ function createSyndocalClient({
           reason: "invalid-payload",
         };
       }
-      return sendControlEvent(type, source, requestedId);
+      return sendTimelineStateRequest({ returnEventResult: true });
     }
-    if (requestedId && physicalEventIdRegistry.has(requestedId)) {
+    if (!transientTelemetry && requestedId && physicalEventIdRegistry.has(requestedId)) {
       return {
         eventId: requestedId,
         type,
@@ -2043,7 +2086,9 @@ function createSyndocalClient({
         reason: "invalid-payload",
       };
     }
-    const eventIdCandidate = requestedId || normalizeIdentity(makeId());
+    const eventIdCandidate = transientTelemetry
+      ? makeTransientTelemetryId(type, eventSequence)
+      : requestedId || normalizeIdentity(makeId());
     if (!eventIdCandidate) {
       return {
         eventId: requestedId,
@@ -2065,11 +2110,7 @@ function createSyndocalClient({
         sequence: eventSequence,
         payload: Object.hasOwn(source, "payload") ? source.payload : {},
       };
-      const message = adapterObject.name === "generic-json"
-        ? encodeFlatEvent(event)
-        : adapterObject.encodeEvent
-          ? adapterObject.encodeEvent(event)
-          : encodeFlatEvent(event);
+      const message = adapterObject.encodeEvent ? adapterObject.encodeEvent(event) : null;
       if (!message || typeof message !== "object" || Array.isArray(message)) {
         return {
           eventId: eventIdCandidate,
@@ -2083,7 +2124,7 @@ function createSyndocalClient({
           reason: "invalid-payload",
         };
       }
-      eventId = reservePhysicalEventId(eventIdCandidate);
+      eventId = transientTelemetry ? eventIdCandidate : reservePhysicalEventId(eventIdCandidate);
       if (!eventId) {
         updateStatus({ lastError: "Syndocal event identity admission rejected" });
         return {
@@ -2097,6 +2138,8 @@ function createSyndocalClient({
           ackState: "skipped",
           reason: eventIdCandidate.startsWith("control-")
             ? "event-id-conflicts-with-control"
+            : eventIdCandidate.startsWith("telemetry-")
+              ? "event-id-conflicts-with-telemetry"
             : requestedId && physicalEventIdRegistry.has(requestedId)
               ? "event-id-reused"
               : physicalEventIdLatched
@@ -2111,6 +2154,7 @@ function createSyndocalClient({
         sequence: eventSequence,
         message,
         requiresAck,
+        event,
       });
     } catch {
       return {
@@ -2146,9 +2190,26 @@ function createSyndocalClient({
     const closingSocket = candidate || socket;
     clearHeartbeat();
     clearSocketListeners();
+    timelineStateRequestCorrelation = null;
     socket = null;
     socketGeneration = 0;
-    finalizeAllPending("send-failed", { reason });
+    // Finalization removes entries from pendingAcks, so iterate over a stable
+    // snapshot. Only the named reconnect allowlist may remain pending.
+    for (const [eventId, pending] of [...pendingAcks.entries()]) {
+      clearPendingTimers(pending);
+      if (!RECONNECT_REPLAY_EVENT_TYPES.has(pending.type)) {
+        finalizeDelivery(eventId, "send-failed", { reason }, { pending });
+        continue;
+      }
+      pending.socket = null;
+      pending.generation = 0;
+      pending.delivery.state = "retrying";
+      pending.delivery.ackState = "retrying";
+      pending.delivery.ok = false;
+      pending.delivery.reason = reason;
+      pending.delivery.updatedAt = new Date(now()).toISOString();
+      publishDelivery(pending.delivery);
+    }
     if (error) {
       updateStatus({
         state: "disconnected",
@@ -2170,6 +2231,8 @@ function createSyndocalClient({
     if (!isCurrentSocket(candidate, generation)) {
       return;
     }
+    timelineStateFence = null;
+    timelineStateRequestCorrelation = null;
     reconnectDelay = Math.max(50, reconnectMinMs);
     updateStatus({ state: "connected", message: "Syndocal connected", lastError: null });
     startHeartbeat();
@@ -2177,6 +2240,51 @@ function createSyndocalClient({
     const stateSyncSent = sendStateSync();
     if (stateSyncSent) {
       sendTimelineStateRequest();
+    }
+    for (const [eventId, pending] of pendingAcks) {
+      if (!pending.event || wireSequence >= Number.MAX_SAFE_INTEGER) {
+        finalizeDelivery(eventId, "send-failed", { reason: "reconnect-sequence-overflow" }, { pending });
+        continue;
+      }
+      wireSequence += 1;
+      const replayEvent = {
+        ...pending.event,
+        eventId,
+        sequence: wireSequence,
+        payload: { ...(pending.event.payload || {}) },
+      };
+      const replayMessage = adapterObject.encodeEvent?.(replayEvent);
+      if (!replayMessage) {
+        finalizeDelivery(eventId, "rejected", { reason: "reconnect-payload-invalid" }, { pending });
+        continue;
+      }
+      clearPendingTimers(pending);
+      pending.event = replayEvent;
+      pending.message = replayMessage;
+      pending.sequence = wireSequence;
+      pending.socket = candidate;
+      pending.generation = generation;
+      pending.attempts += 1;
+      pending.delivery.state = "pending";
+      pending.delivery.ackState = "pending";
+      pending.delivery.reason = "reconnect-retry";
+      pending.delivery.attempts = pending.attempts;
+      pending.delivery.sequence = wireSequence;
+      const sent = sendRaw(replayMessage, {
+        kind: "event-reconnect-retry",
+        type: pending.type,
+        eventId,
+        generation,
+        attempt: pending.attempts,
+      });
+      pending.delivery.sent = sent;
+      pending.delivery.updatedAt = new Date(now()).toISOString();
+      if (!sent && pendingAcks.has(eventId)) {
+        finalizeDelivery(eventId, "send-failed", { reason: "reconnect-retry-send-failed" }, { pending });
+      } else if (pendingAcks.has(eventId)) {
+        publishDelivery(pending.delivery);
+        armAckTimeout(eventId, pending);
+      }
     }
     emitter.emit("connected", { url, generation });
   }
@@ -2284,6 +2392,7 @@ function createSyndocalClient({
     clearHeartbeat();
     const closingSocket = socket;
     clearSocketListeners();
+    timelineStateRequestCorrelation = null;
     socket = null;
     socketGeneration = 0;
     finalizeAllPending("send-failed", { reason: "stopped" });
@@ -2330,14 +2439,15 @@ function createSyndocalClient({
 }
 
 module.exports = {
-  createGenericJsonAdapter,
   createSyndocalClient,
-  createSyndocalEnvelopeV1Adapter,
-  encodeFlatEvent,
-  encodeFlatStateSync,
-  normalizeTimelineState,
+  createSyndocalEnvelopeV3Adapter,
+  decodeV3TimelineState,
+  encodeV3LoopFallback,
+  encodeV3MeasuredLoop,
+  encodeV3Release,
+  encodeV3TrackCandidate,
+  parseOperatorReturnRequestId,
   resolveAdapter,
   resolveWebSocketImplementation,
-  validateEnvelopeAck,
-  validateTypedAck,
+  validateEnvelopeV3Ack,
 };

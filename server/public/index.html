@@ -26,59 +26,117 @@
         <details class="dropdown-setting" style="margin-top: 1rem;">
           <summary class="label" style="cursor: pointer; user-select: none;">&#9662; DISPLAY FIELDS</summary>
           <div class="dropdown-content" id="fieldSortableList">
-            <label class="setting sortable-item" data-field="title" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" checked disabled />
-              <span class="label" style="margin-bottom: 0;">Title</span>
-            </label>
-            <label class="setting sortable-item" data-field="artist" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" checked disabled />
-              <span class="label" style="margin-bottom: 0;">Artist</span>
-            </label>
-            <label class="setting sortable-item" data-field="album" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleAlbum" />
-              <span class="label" style="margin-bottom: 0;">Album</span>
-            </label>
-            <label class="setting sortable-item" data-field="genre" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleGenre" />
-              <span class="label" style="margin-bottom: 0;">Genre</span>
-            </label>
-            <label class="setting sortable-item" data-field="key" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleKey" />
-              <span class="label" style="margin-bottom: 0;">Key</span>
-            </label>
-            <label class="setting sortable-item" data-field="label" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleLabel" />
-              <span class="label" style="margin-bottom: 0;">Label</span>
-            </label>
-            <label class="setting sortable-item" data-field="realtimebpm" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" checked disabled />
-              <span class="label" style="margin-bottom: 0;">Realtime BPM</span>
-            </label>
-            <label class="setting sortable-item" data-field="trackbpm" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleTrackBpm" checked />
-              <span class="label" style="margin-bottom: 0;">Track BPM</span>
-            </label>
-            <label class="setting sortable-item" data-field="time" style="cursor: grab;">
-              <span style="color: var(--muted); padding-right: 4px;">&#9776;</span>
-              <input type="checkbox" id="toggleTime" checked />
-              <span class="label" style="margin-bottom: 0;">Time</span>
-            </label>
+            <div class="sortable-item" data-field="title">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" checked disabled />
+                <span class="label">Title</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Title up" disabled aria-disabled="true">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Title down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="artist">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" checked disabled />
+                <span class="label">Artist</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Artist up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Artist down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="album">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleAlbum" />
+                <span class="label">Album</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Album up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Album down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="genre">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleGenre" />
+                <span class="label">Genre</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Genre up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Genre down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="key">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleKey" />
+                <span class="label">Key</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Key up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Key down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="label">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleLabel" />
+                <span class="label">Label</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Label up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Label down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="realtimebpm">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" checked disabled />
+                <span class="label">Realtime BPM</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Realtime BPM up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Realtime BPM down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="trackbpm">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleTrackBpm" checked />
+                <span class="label">Track BPM</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Track BPM up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Track BPM down">&#9660;</button>
+              </span>
+            </div>
+            <div class="sortable-item" data-field="time">
+              <span class="drag-glyph" aria-hidden="true">&#9776;</span>
+              <label class="sortable-label">
+                <input type="checkbox" id="toggleTime" checked />
+                <span class="label">Time</span>
+              </label>
+              <span class="sortable-controls">
+                <button type="button" class="sortable-move" data-move="up" aria-label="Move Time up">&#9650;</button>
+                <button type="button" class="sortable-move" data-move="down" aria-label="Move Time down" disabled aria-disabled="true">&#9660;</button>
+              </span>
+            </div>
           </div>
+          <p id="fieldSortableStatus" class="sortable-status" role="status" aria-live="polite" aria-atomic="true"></p>
         </details>
       </section>
 
       <section id="djAgentPanel" class="card dj-agent-panel" hidden>
         <div class="label">DJ AGENT EXTENSION</div>
+        <div id="djAgentSafetyBanner" class="dj-agent-safety-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+          REKORDBOX LOCAL TEST / NO SYNDOCAL
+        </div>
         <div class="row">
-          <span class="label">Syndocal</span>
+          <span class="label">Syndocal / remote delivery</span>
           <span id="djAgentSyndocalStatus" class="dj-agent-status">DISCONNECTED</span>
         </div>
         <div class="row">
@@ -88,6 +146,18 @@
         <div class="row">
           <span class="label">Pedal Mode</span>
           <span id="djAgentMode" class="dj-agent-status">DJ-CONTROL</span>
+        </div>
+        <div id="djAgentOwnerRow" class="row" hidden>
+          <span class="label">Admitted Owner</span>
+          <span id="djAgentOwner" class="dj-agent-value dj-agent-owner">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Deck 1 Candidate</span>
+          <span id="djAgentCandidateStage" class="dj-agent-status">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Authority Sync</span>
+          <span id="djAgentAuthorityConsistency" class="dj-agent-status">-</span>
         </div>
         <div class="row">
           <span class="label">Timeline State</span>
@@ -110,7 +180,7 @@
           <span id="djAgentLastTimelineAction" class="dj-agent-value">-</span>
         </div>
         <div class="row">
-          <span class="label">Last ACK</span>
+          <span class="label">Last remote delivery</span>
           <span id="djAgentLastAck" class="dj-agent-value">-</span>
         </div>
         <div id="djAgentActionResult" class="dj-agent-action-result" role="status" aria-live="polite" aria-atomic="true">
@@ -122,6 +192,163 @@
           <button type="button" data-dj-action="release">Test Release</button>
           <button type="button" data-dj-action="track-active">Test Track Active</button>
         </div>
+      </section>
+
+      <section id="djAgentSetupCard" class="card dj-agent-setup-card" aria-labelledby="djAgentSetupTitle">
+        <div class="dj-agent-setup-heading">
+          <div>
+            <div id="djAgentSetupTitle" class="label">DJ AGENT FIRST-RUN SETUP</div>
+            <p class="dj-agent-setup-lead">Read-only readiness and DJ PC handoff. This card remains visible while the Agent is disabled.</p>
+          </div>
+          <button id="djAgentSetupRefresh" type="button">Refresh</button>
+        </div>
+        <div id="djAgentSetupMessage" class="dj-agent-setup-message" role="status" aria-live="polite" aria-atomic="true">
+          Setup status not loaded yet.
+        </div>
+
+        <section class="dj-agent-setup-section dj-agent-connection-section" aria-labelledby="djAgentConnectionTitle">
+          <h2 id="djAgentConnectionTitle">Connection draft</h2>
+          <div class="dj-agent-setup-controls">
+            <label class="dj-agent-setup-field">
+              <span>Syndocal host</span>
+              <input id="djAgentSyndocalHost" type="text" inputmode="url" autocomplete="off" placeholder="Required: DJ PC host" required aria-required="true" />
+            </label>
+            <label class="dj-agent-setup-field">
+              <span>Local NIC</span>
+              <select id="djAgentSyndocalNic" required aria-required="true">
+                <option value="">Required: select local NIC</option>
+              </select>
+            </label>
+            <label class="dj-agent-setup-field">
+              <span>MIDI output</span>
+              <select id="djAgentMidiOutput" required aria-required="true">
+                <option value="">Required: select MIDI output</option>
+              </select>
+            </label>
+            <label class="dj-agent-setup-field">
+              <span>Adapter</span>
+              <select id="djAgentAdapter" required aria-required="true">
+                <option value="">Required: select adapter</option>
+                <option value="syndocal-envelope-v3">syndocal-envelope-v3</option>
+              </select>
+            </label>
+          </div>
+          <p class="dj-agent-muted">Selections update this page's preview only. They are not persisted, sent to the server, or stored in localStorage.</p>
+        </section>
+
+        <div class="dj-agent-setup-grid">
+          <section class="dj-agent-setup-section" aria-labelledby="djAgentReadinessTitle">
+            <h2 id="djAgentReadinessTitle">Readiness</h2>
+            <div id="djAgentSetupReadiness" class="dj-agent-readiness" aria-live="polite">
+              <p class="dj-agent-muted">Waiting for the localhost setup endpoint.</p>
+            </div>
+          </section>
+
+          <section class="dj-agent-setup-section" aria-labelledby="djAgentMidiPortsTitle">
+            <h2 id="djAgentMidiPortsTitle">MIDI outputs</h2>
+            <div id="djAgentMidiPorts" class="dj-agent-midi-ports" aria-live="polite">
+              <p class="dj-agent-muted">No MIDI enumeration yet.</p>
+            </div>
+          </section>
+
+          <section class="dj-agent-setup-section" aria-labelledby="djAgentArtifactTitle">
+            <h2 id="djAgentArtifactTitle">CustomMIDI1 artifact</h2>
+            <div id="djAgentMappingArtifact" class="dj-agent-artifact" aria-live="polite">
+              <p class="dj-agent-muted">Versioned CSV status unavailable.</p>
+            </div>
+          </section>
+
+          <section class="dj-agent-setup-section" aria-labelledby="djAgentConfigTitle">
+            <h2 id="djAgentConfigTitle">Token-free config preview</h2>
+              <pre id="djAgentConfigPreview" class="dj-agent-config-preview" aria-label="Token-free DJ Agent config preview">{
+  "version": "1.1.11",
+  "enabled": true,
+  "syndocal": {
+    "enabled": true,
+    "host": "192.168.50.1",
+    "port": 9100,
+    "path": "/dj-link",
+    "nic": "192.168.50.2",
+    "adapter": "syndocal-envelope-v3",
+    "heartbeatMs": 5000
+  },
+  "pedal": {
+    "enabled": true,
+    "bindings": { "release": "F13", "loopHalf": "F14", "filterClose": "F15" }
+  },
+  "trackActivity": {
+    "ownerSelection": {
+      "mode": "titleContains",
+      "titleNeedle": "人生オーバー",
+      "deck1MetadataWaitMs": 1400
+    }
+  },
+  "midi": {
+    "enabled": true,
+    "device": "CustomMIDI1",
+    "port": 1,
+    "mappings": {
+      "loopHalf": { "channel": 1, "messageType": "noteOn", "note": 36, "value": 127 },
+      "stop": { "channel": 1, "messageType": "noteOn", "note": 37, "value": 127 },
+      "filter": { "channel": 1, "messageType": "controlChange", "cc": 16 },
+      "releaseFade": { "channel": 1, "messageType": "controlChange", "cc": 17 }
+    },
+    "deckChannels": { "1": 1, "2": 2 },
+    "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50 },
+    "releaseFade": {
+      "enabled": true,
+      "mapping": "releaseFade",
+      "target": "deck",
+      "startValue": 127,
+      "endValue": 0,
+      "durationMs": 1000,
+      "updateIntervalMs": 50,
+      "resetAfterStop": true,
+      "resetValue": 127,
+      "resetDelayMs": 0
+    },
+    "releaseMacro": {
+      "enabled": true,
+      "sequence": "filter-then-fade-then-stop",
+      "filter": { "startValue": 64, "endValue": 127, "durationMs": 1000, "updateIntervalMs": 50, "resetValue": 64 },
+      "resetAfterStop": true,
+      "resetDelayMs": 0
+    }
+  }
+}</pre>
+            <div class="dj-agent-setup-actions">
+              <button id="djAgentConfigDownload" type="button">Download config preview</button>
+              <button id="djAgentConfigCopy" type="button">Copy config preview</button>
+            </div>
+            <p class="dj-agent-muted">No token field is generated, stored, or sent by this page. The production title selector is 人生オーバー; a matching title waits for Rekordbox artist metadata before v3 network admission. Deck 1 fallback waits 1400 ms, reserving 100 ms inside the v3 1500-ms freshness bound. This is a token-free preview only; the controlled launcher still requires the exact external v1.1.11 configuration.</p>
+          </section>
+        </div>
+
+        <section class="dj-agent-setup-section dj-agent-stage-section" aria-labelledby="djAgentStageTitle">
+          <h2 id="djAgentStageTitle">Pedal contract</h2>
+          <div class="dj-agent-table-scroll">
+            <table class="dj-agent-stage-table">
+              <caption>Stage 1 local DJ PC control and Stage 2 authoritative timeline control</caption>
+              <thead>
+                <tr><th scope="col">Pedal</th><th scope="col">Stage 1</th><th scope="col">Stage 2</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">F13</th><td>Local HPF start + correlated DJ_RELEASE at the same edge → ChannelFader fade → Cue/Stop</td><td>Absolute Timeline loop ON/OFF toggle; no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F14</th><td>Local LoopHalf MIDI and DJ_LOOP_STATE</td><td>Active Timeline loop → ACKed DJ_TIMELINE_LOOP_HALF (exact timeline/play session); inactive or unknown loop fails closed, no Rekordbox MIDI</td></tr>
+                <tr><th scope="row">F15</th><td>Inactive</td><td>+4 bars BeatJump; only while authoritative timeline is running</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <details class="dj-agent-guided-steps">
+          <summary>DJ PC guided confirmation</summary>
+          <ol>
+            <li>On the DJ PC, confirm Rekordbox, the selected MIDI output, virtual MIDI, and Stream Deck Pedal are installed and visible.</li>
+            <li>Use the versioned CSV download above and import it manually in Rekordbox MIDI Learn; do not overwrite the source artifact.</li>
+            <li>Confirm the F13/F14/F15 mapping and run physical acceptance on the DJ PC. This page does not install drivers, edit Elgato profiles, or operate Rekordbox.</li>
+          </ol>
+        </details>
       </section>
 
       <section class="card mixer-panel" aria-label="Mixer fader state">
@@ -289,7 +516,6 @@
       </footer>
     </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/app.js"></script>
   </body>

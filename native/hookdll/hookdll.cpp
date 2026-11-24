@@ -1,3 +1,10 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef WINVER
+#define WINVER 0x0600
+#endif
+
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -17,11 +24,13 @@
 
 #include "MinHook.h"
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 namespace {
 
-constexpr const char* kVersion = "rb-hook-7.2.13-7.2.18-v1.1.1-mixer-faders";
+constexpr const char* kVersion = "rb-hook-7.2.13-7.2.20-v1.1.2-mixer-faders";
 constexpr const char* kUdpHost = "127.0.0.1";
 constexpr uint16_t kUdpPort = 22346;
 
@@ -43,6 +52,12 @@ constexpr const char* kMainComponentSig7 =
 constexpr const char* kMainComponentSig7218 =
     "49 89 9F 10 0B 00 00 49 89 9F 18 0B 00 00 49 89 9F 20 0B 00 00 "
     "49 89 9F 28 0B 00 00 49 89 9F 30 0B 00 00 41 88 9F 38 0B 00 00 "
+    "4C 89 3D ?? ?? ?? ??";
+// 7.2.20 MainComponent 参照。フィールドが 0x38 後ろへ移動し、末尾が word 書き込みになった。
+// UiManager も MainComponent+0x4C0 へ移動している (7.2.18 は +0x490)。
+constexpr const char* kMainComponentSig7220 =
+    "49 89 9F 48 0B 00 00 49 89 9F 50 0B 00 00 49 89 9F 58 0B 00 00 "
+    "49 89 9F 60 0B 00 00 49 89 9F 68 0B 00 00 66 41 89 9F 70 0B 00 00 "
     "4C 89 3D ?? ?? ?? ??";
 // 7.0.1+ getInstance（TrackBrowser singleton を返す）。旧版の一意な末尾も含める。
 constexpr const char* kGetInstanceSig701 =
@@ -72,23 +87,36 @@ constexpr const char* kNotifyMasterChangeSig708 =
 constexpr const char* kNotifyMasterChangeSigFallback =
     "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 C8 FE FF FF";
 
-// Rekordbox 7.2.18 (7.2.18.0311) DjMixerUnit RTTI/vtable layout.
-// These RVAs are never used alone: all four vtable pointers are validated on
-// a live writable object before any getter is called. Older-version paths stay
-// untouched when this exact composite layout is absent.
-constexpr uintptr_t kDjMixerPrimaryVtableRva7218 = 0x5563D10;
-constexpr uintptr_t kDjMixerControlVtableRva7218 = 0x5563598;
-constexpr uintptr_t kDjMixerStateVtableRva7218 = 0x5563750;
-constexpr uintptr_t kDjMixerTimerVtableRva7218 = 0x5563948;
-constexpr uintptr_t kDjMixerControlOffset7218 = 0x158;
-constexpr uintptr_t kDjMixerStateOffset7218 = 0x160;
-constexpr uintptr_t kDjMixerTimerOffset7218 = 0x180;
-// 7.2.18 djplay::AutoMixCrossfaderWrapper. RTTI, exact vtable and getter
-// address are all validated before calling into Rekordbox. This path remains
-// dormant on every older/unknown build.
-constexpr uintptr_t kAutoMixCrossfaderWrapperVtableRva7218 = 0x38DB1B8;
-constexpr uintptr_t kAutoMixCrossfaderGetterRva7218 = 0x19B39F0;
-constexpr uintptr_t kChannelFaderVtableRva7218 = 0x557EF48;
+// Per-build mixer layouts (DjMixerUnit, djplay::AutoMixCrossfaderWrapper,
+// ChannelFader). RVAs are never trusted alone: a profile is selected only when
+// every vtable's MSVC RTTI (CompleteObjectLocator offset + type name) and the
+// crossfader getter slot match the running image, and each live object is
+// re-validated before any getter is called. Unknown builds keep the mixer path
+// dormant.
+struct MixerProfile {
+  const char* label;
+  uintptr_t djMixerPrimaryVtableRva;
+  uintptr_t djMixerControlVtableRva;
+  uintptr_t djMixerStateVtableRva;
+  uintptr_t djMixerTimerVtableRva;
+  uintptr_t djMixerControlOffset;
+  uintptr_t djMixerStateOffset;
+  uintptr_t djMixerTimerOffset;
+  uintptr_t crossfaderWrapperVtableRva;
+  uintptr_t crossfaderGetterRva;
+  uintptr_t crossfaderInnerMixerOffset;
+  uintptr_t channelFaderVtableRva;
+};
+constexpr MixerProfile kMixerProfiles[] = {
+    // Rekordbox 7.2.18 (7.2.18.0311)
+    {"7.2.18", 0x5563D10, 0x5563598, 0x5563750, 0x5563948, 0x158, 0x160, 0x180,
+     0x38DB1B8, 0x19B39F0, 0x220, 0x557EF48},
+    // Rekordbox 7.2.20 (7.2.20.0): timer sub-object moved to +0x190 and the
+    // crossfader wrapper's inner mixer pointer moved to +0x230.
+    {"7.2.20", 0x58A4198, 0x58A3C18, 0x58A3DD0, 0x58A3FC8, 0x158, 0x160, 0x190,
+     0x3B646F0, 0x1B2BA50, 0x230, 0x58B60C8},
+};
+const MixerProfile* g_mixerProfile = nullptr;
 constexpr uintptr_t kChannelFaderModeOffset7218 = 0x20;
 constexpr uintptr_t kChannelFaderRawValueOffset7218 = 0x30;
 constexpr float kChannelFaderRawMaximum7218 = 1023.0f;
@@ -100,9 +128,6 @@ using GetInstanceFn = uintptr_t(*)();
 using GetRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t, uint32_t, uintptr_t, uint32_t, uint32_t);
 using InitRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t);
 using DestrRowDataTrackFn = uintptr_t(__fastcall*)(uintptr_t);
-using MixerNoArgFloatFn = float(__fastcall*)(uintptr_t);
-using MixerIndexedFloatFn = float(__fastcall*)(uintptr_t, int);
-using MixerTwoIndexFloatFn = float(__fastcall*)(uintptr_t, int, int);
 using CrossfaderGetterFn = float(__fastcall*)(uintptr_t);
 
 SOCKET g_socket = INVALID_SOCKET;
@@ -118,6 +143,12 @@ bool g_olvcHookInstalled = false;
 bool g_loadFileHookInstalled = false;
 bool g_masterChangeHookInstalled = false;
 bool g_rowDataLayout7218 = false;
+// 7.2.20: UiPlayer には TrackBrowserID が直接無く、UiPlayer+0x4D0 の
+// djplay::SongInfo (+0x8) が content ID を保持する。RTTI 検証済みの経路なので
+// 小さな ID (例: 5, 181) も受理する。
+bool g_playerLayout7220 = false;
+constexpr uintptr_t kUiPlayerSongInfoOffset7220 = 0x4D0;
+constexpr uintptr_t kSongInfoContentIdOffset7220 = 0x8;
 ULONGLONG g_lastProbeTick[8] = {};
 uintptr_t g_playerSlots[4] = {};
 bool g_playerSlotsResolved = false;
@@ -128,7 +159,6 @@ uint8_t g_lastPlayerStableHits[4] = {};
 ULONGLONG g_lastPlayerProbeTick[4] = {};
 uint32_t g_lastTitleHash[4] = {};
 uint32_t g_lastArtistHash[4] = {};
-ULONGLONG g_lastRowDataDiagTick[4] = {};
 uint32_t g_trackIdHits[4] = {};
 uint32_t g_trackIdMisses[4] = {};
 uint32_t g_loadDetourHits = 0;
@@ -140,7 +170,6 @@ std::unordered_map<std::string, ULONGLONG> g_lastMixerProbeTick;
 std::unordered_map<std::string, uintptr_t> g_lastMixerProbeValue;
 std::unordered_map<std::string, uint32_t> g_mixerProbeCount;
 std::vector<uintptr_t> g_mixerUnits7218;
-std::unordered_map<uintptr_t, std::vector<float>> g_lastMixerStateProbe;
 std::vector<uintptr_t> g_crossfaderWrappers7218;
 std::vector<uintptr_t> g_channelFaders7218;
 std::vector<float> g_lastMixerFaderValues;
@@ -171,15 +200,6 @@ struct LoopState {
 
 LoopState g_loopState[4] = {};
 uint32_t g_loopTrackId[4] = {};
-
-std::string wchar_to_utf8(const wchar_t* wstr) {
-  if (!wstr) return "";
-  int size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
-  if (size <= 1) return "";
-  std::string result(static_cast<size_t>(size - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &result[0], size, nullptr, nullptr);
-  return result;
-}
 
 uint32_t simple_hash(const std::string& s) {
   uint32_t h = 5381;
@@ -277,16 +297,6 @@ bool safe_read_float(uintptr_t address, float& outValue) {
   return std::isfinite(outValue);
 }
 
-uintptr_t module_image_size(HMODULE module) {
-  if (!module) return 0;
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-      reinterpret_cast<uintptr_t>(module) + static_cast<uintptr_t>(dos->e_lfanew));
-  if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-  return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
-}
-
 bool is_writable_mixer_scan_region(const MEMORY_BASIC_INFORMATION& mbi) {
   if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE ||
       (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
@@ -297,15 +307,83 @@ bool is_writable_mixer_scan_region(const MEMORY_BASIC_INFORMATION& mbi) {
          protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+uintptr_t module_image_size(uintptr_t moduleBase) {
+  auto* dos = reinterpret_cast<PIMAGE_DOS_HEADER>(moduleBase);
+  if (!moduleBase || dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+  auto* nt = reinterpret_cast<PIMAGE_NT_HEADERS>(moduleBase + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+  return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+}
+
+// MSVC x64 RTTI: vtable[-1] -> CompleteObjectLocator
+//   {u32 signature(=1), u32 offset, u32 cdOffset, u32 typeDescriptorRva,
+//    u32 classHierarchyRva, u32 selfRva}; TypeDescriptor name at +0x10.
+bool vtable_rtti_matches(uintptr_t moduleBase, uintptr_t imageSize, uintptr_t vtableRva,
+                         uintptr_t expectedOffset, const char* expectedName) {
+  if (!moduleBase || vtableRva < sizeof(uintptr_t) || vtableRva >= imageSize) return false;
+  uintptr_t col = 0;
+  if (!safe_read_ptr(moduleBase + vtableRva - sizeof(uintptr_t), col) ||
+      col < moduleBase || col + 24 > moduleBase + imageSize) {
+    return false;
+  }
+  uint32_t signature = 0, offset = 0, typeRva = 0, selfRva = 0;
+  if (!safe_read_u32(col, signature) || signature != 1 ||
+      !safe_read_u32(col + 4, offset) || offset != expectedOffset ||
+      !safe_read_u32(col + 12, typeRva) || !safe_read_u32(col + 20, selfRva) ||
+      selfRva != col - moduleBase) {
+    return false;
+  }
+  const size_t nameLength = strlen(expectedName) + 1;
+  const uintptr_t name = moduleBase + typeRva + 0x10;
+  if (typeRva == 0 || typeRva + 0x10 + nameLength > imageSize ||
+      IsBadReadPtr(reinterpret_cast<const void*>(name), nameLength)) {
+    return false;
+  }
+  return memcmp(reinterpret_cast<const void*>(name), expectedName, nameLength) == 0;
+}
+
+bool mixer_profile_matches(const MixerProfile& profile, uintptr_t moduleBase) {
+  const uintptr_t imageSize = module_image_size(moduleBase);
+  if (!imageSize) return false;
+  uintptr_t getter = 0;
+  return vtable_rtti_matches(moduleBase, imageSize, profile.djMixerPrimaryVtableRva, 0,
+                             ".?AVDjMixerUnit@@") &&
+         vtable_rtti_matches(moduleBase, imageSize, profile.djMixerControlVtableRva,
+                             profile.djMixerControlOffset, ".?AVDjMixerUnit@@") &&
+         vtable_rtti_matches(moduleBase, imageSize, profile.djMixerStateVtableRva,
+                             profile.djMixerStateOffset, ".?AVDjMixerUnit@@") &&
+         vtable_rtti_matches(moduleBase, imageSize, profile.djMixerTimerVtableRva,
+                             profile.djMixerTimerOffset, ".?AVDjMixerUnit@@") &&
+         vtable_rtti_matches(moduleBase, imageSize, profile.crossfaderWrapperVtableRva, 0,
+                             ".?AVAutoMixCrossfaderWrapper@djplay@@") &&
+         safe_read_ptr(moduleBase + profile.crossfaderWrapperVtableRva + 2 * sizeof(uintptr_t),
+                       getter) &&
+         getter == moduleBase + profile.crossfaderGetterRva &&
+         vtable_rtti_matches(moduleBase, imageSize, profile.channelFaderVtableRva, 0,
+                             ".?AVChannelFader@@");
+}
+
+const MixerProfile* select_mixer_profile() {
+  const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+  for (const auto& profile : kMixerProfiles) {
+    if (mixer_profile_matches(profile, moduleBase)) {
+      return &profile;
+    }
+  }
+  return nullptr;
+}
+
 bool matches_mixer_unit_7218(uintptr_t candidate, uintptr_t moduleBase) {
-  static const struct {
+  if (!g_mixerProfile) return false;
+  const MixerProfile& profile = *g_mixerProfile;
+  const struct {
     uintptr_t offset;
     uintptr_t vtableRva;
   } expected[] = {
-      {0, kDjMixerPrimaryVtableRva7218},
-      {kDjMixerControlOffset7218, kDjMixerControlVtableRva7218},
-      {kDjMixerStateOffset7218, kDjMixerStateVtableRva7218},
-      {kDjMixerTimerOffset7218, kDjMixerTimerVtableRva7218},
+      {0, profile.djMixerPrimaryVtableRva},
+      {profile.djMixerControlOffset, profile.djMixerControlVtableRva},
+      {profile.djMixerStateOffset, profile.djMixerStateVtableRva},
+      {profile.djMixerTimerOffset, profile.djMixerTimerVtableRva},
   };
   for (const auto& item : expected) {
     uintptr_t value = 0;
@@ -320,8 +398,9 @@ bool matches_mixer_unit_7218(uintptr_t candidate, uintptr_t moduleBase) {
 std::vector<uintptr_t> find_mixer_units_7218() {
   std::vector<uintptr_t> result;
   const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-  if (!moduleBase) return result;
-  const uintptr_t primaryVtable = moduleBase + kDjMixerPrimaryVtableRva7218;
+  if (!moduleBase || !g_mixerProfile) return result;
+  const uintptr_t primaryVtable = moduleBase + g_mixerProfile->djMixerPrimaryVtableRva;
+  const uintptr_t timerOffset = g_mixerProfile->djMixerTimerOffset;
 
   SYSTEM_INFO systemInfo = {};
   GetSystemInfo(&systemInfo);
@@ -334,9 +413,9 @@ std::vector<uintptr_t> find_mixer_units_7218() {
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
     const uintptr_t size = static_cast<uintptr_t>(mbi.RegionSize);
-    if (is_writable_mixer_scan_region(mbi) && size >= kDjMixerTimerOffset7218 + sizeof(uintptr_t)) {
+    if (is_writable_mixer_scan_region(mbi) && size >= timerOffset + sizeof(uintptr_t)) {
       const uintptr_t begin = (base + sizeof(uintptr_t) - 1) & ~(sizeof(uintptr_t) - 1);
-      const uintptr_t end = base + size - (kDjMixerTimerOffset7218 + sizeof(uintptr_t));
+      const uintptr_t end = base + size - (timerOffset + sizeof(uintptr_t));
       for (uintptr_t cursor = begin; cursor <= end; cursor += sizeof(uintptr_t)) {
         if (*reinterpret_cast<const uintptr_t*>(cursor) == primaryVtable &&
             matches_mixer_unit_7218(cursor, moduleBase)) {
@@ -356,19 +435,20 @@ bool matches_crossfader_wrapper_7218(uintptr_t candidate, uintptr_t moduleBase) 
   uintptr_t getter = 0;
   uintptr_t inner = 0;
   uintptr_t mixer = 0;
+  if (!g_mixerProfile) return false;
   return safe_read_ptr(candidate, vtable) &&
-         vtable == moduleBase + kAutoMixCrossfaderWrapperVtableRva7218 &&
+         vtable == moduleBase + g_mixerProfile->crossfaderWrapperVtableRva &&
          safe_read_ptr(vtable + 2 * sizeof(uintptr_t), getter) &&
-         getter == moduleBase + kAutoMixCrossfaderGetterRva7218 &&
+         getter == moduleBase + g_mixerProfile->crossfaderGetterRva &&
          safe_read_ptr(candidate + 8, inner) && inner != 0 &&
-         safe_read_ptr(inner + 0x220, mixer) && mixer != 0;
+         safe_read_ptr(inner + g_mixerProfile->crossfaderInnerMixerOffset, mixer) && mixer != 0;
 }
 
 std::vector<uintptr_t> find_crossfader_wrappers_7218() {
   std::vector<uintptr_t> result;
   const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-  if (!moduleBase) return result;
-  const uintptr_t wrapperVtable = moduleBase + kAutoMixCrossfaderWrapperVtableRva7218;
+  if (!moduleBase || !g_mixerProfile) return result;
+  const uintptr_t wrapperVtable = moduleBase + g_mixerProfile->crossfaderWrapperVtableRva;
 
   SYSTEM_INFO systemInfo = {};
   GetSystemInfo(&systemInfo);
@@ -402,8 +482,9 @@ bool matches_channel_fader_7218(uintptr_t candidate, uintptr_t moduleBase) {
   uintptr_t vtable = 0;
   uint32_t mode = 0;
   float rawValue = 0.0f;
+  if (!g_mixerProfile) return false;
   return safe_read_ptr(candidate, vtable) &&
-         vtable == moduleBase + kChannelFaderVtableRva7218 &&
+         vtable == moduleBase + g_mixerProfile->channelFaderVtableRva &&
          safe_read_u32(candidate + kChannelFaderModeOffset7218, mode) && mode == 1 &&
          safe_read_float(candidate + kChannelFaderRawValueOffset7218, rawValue) &&
          rawValue >= 0.0f && rawValue <= kChannelFaderRawMaximum7218;
@@ -412,8 +493,8 @@ bool matches_channel_fader_7218(uintptr_t candidate, uintptr_t moduleBase) {
 std::vector<uintptr_t> find_channel_faders_7218() {
   std::vector<uintptr_t> candidates;
   const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-  if (!moduleBase) return candidates;
-  const uintptr_t channelFaderVtable = moduleBase + kChannelFaderVtableRva7218;
+  if (!moduleBase || !g_mixerProfile) return candidates;
+  const uintptr_t channelFaderVtable = moduleBase + g_mixerProfile->channelFaderVtableRva;
 
   SYSTEM_INFO systemInfo = {};
   GetSystemInfo(&systemInfo);
@@ -446,6 +527,8 @@ std::vector<uintptr_t> find_channel_faders_7218() {
   // Rekordbox 7.2.18 creates the four mode-1 engine faders in UI order
   // 1, 3, 2, 4. Live movement verification identifies entries 0 and 2 as
   // the two decks exposed by this project. Do not guess on another layout.
+  // 7.2.20 uses the same ChannelFader field layout (+0x20 / +0x30); the
+  // creation order still needs live fader-movement confirmation.
   if (candidates.size() >= 3) {
     return {candidates[0], candidates[2]};
   }
@@ -454,12 +537,13 @@ std::vector<uintptr_t> find_channel_faders_7218() {
 
 void poll_mixer_faders_7218() {
   const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+  if (!g_mixerProfile) return;
   if (g_crossfaderWrappers7218.size() != 1 || g_channelFaders7218.size() != 2) return;
   const uintptr_t wrapper = g_crossfaderWrappers7218[0];
   if (!matches_crossfader_wrapper_7218(wrapper, moduleBase)) return;
 
   const float crossfader = reinterpret_cast<CrossfaderGetterFn>(
-      moduleBase + kAutoMixCrossfaderGetterRva7218)(wrapper);
+      moduleBase + g_mixerProfile->crossfaderGetterRva)(wrapper);
   if (!std::isfinite(crossfader) || crossfader < -0.01f || crossfader > 1.01f) return;
   std::vector<float> values = {std::clamp(crossfader, 0.0f, 1.0f)};
   for (const uintptr_t channelFader : g_channelFaders7218) {
@@ -484,135 +568,10 @@ void poll_mixer_faders_7218() {
   char payload[256] = {};
   _snprintf_s(
       payload, sizeof(payload), _TRUNCATE,
-      "{\"type\":\"mixer_state\",\"crossfader\":%.6f,\"channelFaders\":[%.6f,%.6f]}",
-      values[0], values[1], values[2]);
+      "{\"type\":\"mixer_state\",\"layout\":\"%s\",\"crossfader\":%.6f,"
+      "\"channelFaders\":[%.6f,%.6f]}",
+      g_mixerProfile->label, values[0], values[1], values[2]);
   send_packet(payload);
-}
-
-bool read_mixer_method_address(uintptr_t state, size_t index, uintptr_t& method) {
-  uintptr_t vtable = 0;
-  if (!safe_read_ptr(state, vtable)) return false;
-  const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-  const uintptr_t imageSize = module_image_size(reinterpret_cast<HMODULE>(moduleBase));
-  if (vtable != moduleBase + kDjMixerStateVtableRva7218 || imageSize == 0 || index >= 62) {
-    return false;
-  }
-  if (!safe_read_ptr(vtable + index * sizeof(uintptr_t), method)) return false;
-  return method >= moduleBase && method < moduleBase + imageSize &&
-         !IsBadCodePtr(reinterpret_cast<FARPROC>(method));
-}
-
-bool read_mixer_noarg_float(uintptr_t state, size_t index, float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerNoArgFloatFn>(method)(state);
-  return std::isfinite(value);
-}
-
-bool read_mixer_indexed_float(uintptr_t state, size_t index, int item, float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerIndexedFloatFn>(method)(state, item);
-  return std::isfinite(value);
-}
-
-bool read_mixer_two_index_float(uintptr_t state, size_t index, int item, int variant,
-                                float& value) {
-  uintptr_t method = 0;
-  if (!read_mixer_method_address(state, index, method)) return false;
-  value = reinterpret_cast<MixerTwoIndexFloatFn>(method)(state, item, variant);
-  return std::isfinite(value);
-}
-
-void poll_mixer_state_probe_7218() {
-  for (size_t unitIndex = 0; unitIndex < g_mixerUnits7218.size(); ++unitIndex) {
-    const uintptr_t unit = g_mixerUnits7218[unitIndex];
-    if (!matches_mixer_unit_7218(
-            unit, reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr)))) {
-      continue;
-    }
-    const uintptr_t state = unit + kDjMixerStateOffset7218;
-    std::vector<float> values;
-    values.reserve(34);
-    bool readOk = true;
-    const auto addNoArg = [&](size_t index) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_noarg_float(state, index, value);
-      values.push_back(value);
-    };
-    const auto addIndexed = [&](size_t index, int item) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_indexed_float(state, index, item, value);
-      values.push_back(value);
-    };
-    const auto addTwoIndex = [&](size_t index, int item, int variant) {
-      float value = 0.0f;
-      readOk = readOk && read_mixer_two_index_float(state, index, item, variant, value);
-      values.push_back(value);
-    };
-
-    for (int deck = 0; deck < 2; ++deck) addIndexed(16, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(17, deck);
-    addNoArg(18);
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 3; ++variant) addTwoIndex(19, deck, variant);
-    }
-    for (int deck = 0; deck < 2; ++deck) addIndexed(21, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(22, deck);
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 2; ++variant) addTwoIndex(28, deck, variant);
-    }
-    for (int deck = 0; deck < 2; ++deck) {
-      for (int variant = 0; variant < 2; ++variant) addTwoIndex(29, deck, variant);
-    }
-    for (int variant = 0; variant < 2; ++variant) addTwoIndex(30, 0, variant);
-    for (int variant = 0; variant < 2; ++variant) addIndexed(31, variant);
-    addNoArg(40);
-    addNoArg(41);
-    addNoArg(43);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(55, deck);
-    for (int deck = 0; deck < 2; ++deck) addIndexed(56, deck);
-    if (!readOk || values.size() != 34) {
-      continue;
-    }
-
-    bool changed = g_lastMixerStateProbe.find(unit) == g_lastMixerStateProbe.end();
-    if (!changed) {
-      const auto& previous = g_lastMixerStateProbe[unit];
-      for (size_t i = 0; i < values.size(); ++i) {
-        if (i >= previous.size() || std::fabs(values[i] - previous[i]) >= 0.002f) {
-          changed = true;
-          break;
-        }
-      }
-    }
-    if (!changed) continue;
-    g_lastMixerStateProbe[unit] = values;
-
-    char payload[2048] = {};
-    _snprintf_s(
-        payload, sizeof(payload), _TRUNCATE,
-        "{\"type\":\"mixer_state_probe\",\"unit\":%llu,\"address\":%llu,"
-        "\"c16\":[%.6f,%.6f],\"c17\":[%.6f,%.6f],\"c18\":%.6f,"
-        "\"c19\":[[%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f]],"
-        "\"c21\":[%.6f,%.6f],\"c22\":[%.6f,%.6f],"
-        "\"c28\":[[%.6f,%.6f],[%.6f,%.6f]],"
-        "\"c29\":[[%.6f,%.6f],[%.6f,%.6f]],"
-        "\"c30\":[%.6f,%.6f],\"c31\":[%.6f,%.6f],"
-        "\"c40\":%.6f,\"c41\":%.6f,\"c43\":%.6f,"
-        "\"c55\":[%.6f,%.6f],\"c56\":[%.6f,%.6f]}",
-        static_cast<unsigned long long>(unitIndex + 1),
-        static_cast<unsigned long long>(unit),
-        values[0], values[1], values[2], values[3], values[4],
-        values[5], values[6], values[7], values[8], values[9], values[10],
-        values[11], values[12], values[13], values[14],
-        values[15], values[16], values[17], values[18],
-        values[19], values[20], values[21], values[22],
-        values[23], values[24], values[25], values[26],
-        values[27], values[28], values[29],
-        values[30], values[31], values[32], values[33]);
-    send_packet(payload);
-  }
 }
 
 void try_add_candidate(uint32_t value, std::unordered_set<uint32_t>& seen,
@@ -789,9 +748,10 @@ bool is_likely_loop_olvc_name(const char* name) {
 }
 
 bool is_likely_track_id(uint32_t value);
+bool is_accepted_track_id(uint32_t value);
 
 void reset_loop_state_for_track(int deckOneBased, uint32_t trackId) {
-  if (deckOneBased < 1 || deckOneBased > 4 || !is_likely_track_id(trackId)) {
+  if (deckOneBased < 1 || deckOneBased > 4 || !is_accepted_track_id(trackId)) {
     return;
   }
   const int slot = deckOneBased - 1;
@@ -907,7 +867,7 @@ void send_loop_olvc_diagnostic(int deckOneBased, const char* name, uintptr_t raw
     return;
   }
 
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   if (g_lastLoopDiagTick != 0 && nowTick - g_lastLoopDiagTick < 250) {
     return;
   }
@@ -1093,7 +1053,7 @@ void send_mixer_olvc_probe(uintptr_t deckRaw, const char* name, uintptr_t rawVal
   std::string key = std::to_string(static_cast<unsigned long long>(deckRaw));
   key.push_back('|');
   key += name;
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   const auto lastTick = g_lastMixerProbeTick.find(key);
   const auto lastValue = g_lastMixerProbeValue.find(key);
   if (lastValue != g_lastMixerProbeValue.end() && lastValue->second == rawValue) {
@@ -1197,49 +1157,58 @@ void send_track_meta_extended(int deck, const TrackMetaFields& m) {
   send_packet(payload);
 }
 
-// 後方互換: 旧シグネチャの send_track_meta はそのまま維持
-void send_track_meta(int deck, const std::string& title, const std::string& artist) {
-  TrackMetaFields m;
-  m.title = title;
-  m.artist = artist;
-  send_track_meta_extended(deck, m);
-}
-
 // 前方宣言
 bool resolve_player_slots();
 bool is_likely_track_id(uint32_t value);
+bool is_accepted_track_id(uint32_t value);
+uint32_t read_song_info_content_id_7220(uintptr_t playerPtr);
 uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback = false);
 
-// RowDataTrack ポインタから全メタデータを読んで送信する共通処理
-void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
-  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0x4E0)) return;
+// object+offset の juce::String (UTF-8 文字列へのポインタ) を検証付きで読む。
+std::string read_track_text(uintptr_t object, uintptr_t offset) {
+  static const char* kBlockedPrefixes[] = {"@", "ActivePart", "FXPart", "TrackBrowserID", "BPM"};
+  uintptr_t ptr = 0;
+  if (!safe_read_ptr(object + offset, ptr)) return "";
+  if (!ptr || IsBadReadPtr(reinterpret_cast<const void*>(ptr), 4)) return "";
+  const char* src = reinterpret_cast<const char*>(ptr);
+  if (!looks_like_string(src, 512)) return "";
+  size_t rawLen = 0;
+  for (; rawLen < 512 && src[rawLen] != '\0'; ++rawLen) {}
+  if (rawLen == 0 || rawLen >= 511) return "";
+  std::string s(src, rawLen);
+  for (const char* prefix : kBlockedPrefixes) {
+    const size_t n = strlen(prefix);
+    if (s.size() >= n && _strnicmp(s.c_str(), prefix, n) == 0) return "";
+  }
+  std::wstring ws;
+  if (!utf8_to_wstring_checked(s, ws)) return "";
+  if (!is_likely_valid_track_text(ws)) return "";
+  return s;
+}
 
+// 重複送信を避けつつ track_meta を送る。title が空なら false。
+bool send_track_meta_if_changed(int deckOneBased, TrackMetaFields& m) {
+  if (m.title.empty()) return false;
+  if (m.artist == m.title) {
+    m.artist.clear();
+  }
   const int slot = (deckOneBased - 1) % 4;
-  auto is_reserved_track_text = [](const std::string& s) -> bool {
-    if (s.empty()) return true;
-    static const char* kBlockedPrefixes[] = {"@", "ActivePart", "FXPart", "TrackBrowserID", "BPM"};
-    for (const char* prefix : kBlockedPrefixes) {
-      const size_t n = strlen(prefix);
-      if (s.size() >= n && _strnicmp(s.c_str(), prefix, n) == 0) return true;
-    }
-    return false;
-  };
+  const uint32_t th = simple_hash(m.title);
+  const uint32_t ah = simple_hash(m.artist);
+  if (g_lastTitleHash[slot] == th && g_lastArtistHash[slot] == ah) return true;
+  g_lastTitleHash[slot] = th;
+  g_lastArtistHash[slot] = ah;
+  send_track_meta_extended(deckOneBased, m);
+  return true;
+}
+
+// RowDataTrack ポインタから全メタデータを読んで送信する共通処理。
+// title を読めた場合に true を返す。
+bool try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
+  if (!rowData || IsBadReadPtr(reinterpret_cast<const void*>(rowData), 0x4E0)) return false;
 
   auto read_utf8_str = [&](uintptr_t offset) -> std::string {
-    uintptr_t ptr = 0;
-    if (!safe_read_ptr(rowData + offset, ptr)) return "";
-    if (!ptr || IsBadReadPtr(reinterpret_cast<const void*>(ptr), 4)) return "";
-    const char* src = reinterpret_cast<const char*>(ptr);
-    if (!looks_like_string(src, 512)) return "";
-    size_t rawLen = 0;
-    for (; rawLen < 512 && src[rawLen] != '\0'; ++rawLen) {}
-    if (rawLen == 0 || rawLen >= 511) return "";
-    std::string s(src, rawLen);
-    if (is_reserved_track_text(s)) return "";
-    std::wstring ws;
-    if (!utf8_to_wstring_checked(s, ws)) return "";
-    if (!is_likely_valid_track_text(ws)) return "";
-    return s;
+    return read_track_text(rowData, offset);
   };
 
   auto read_u32_val = [&](uintptr_t offset) -> uint32_t {
@@ -1267,18 +1236,28 @@ void try_send_strings_from_row_data(int deckOneBased, uintptr_t rowData) {
   m.trackBpm   = read_u32_val(0x398 + postTitleShift);
   m.trackNumber = read_u32_val(0x340 + postTitleShift);
 
-  if (m.title.empty()) return;
-  if (m.artist == m.title) {
-    m.artist.clear();
-  }
+  return send_track_meta_if_changed(deckOneBased, m);
+}
 
-  const uint32_t th = simple_hash(m.title);
-  const uint32_t ah = simple_hash(m.artist);
-  if (g_lastTitleHash[slot] == th && g_lastArtistHash[slot] == ah) return;
-
-  g_lastTitleHash[slot] = th;
-  g_lastArtistHash[slot] = ah;
-  send_track_meta_extended(deckOneBased, m);
+// 7.2.20: getRowDataTrack は表示中ブラウザのキャッシュしか検索しないため、
+// 外部デバイス (USB/SD 等) から読み込んだ曲では失敗する。その場合はデッキの
+// djplay::SongInfo (RTTI 検証済み、ID 一致時のみ) から基本メタデータを読む。
+// SongInfo: +0x10 title, +0x18 artist, +0x20 album, +0x40 key.
+bool try_send_strings_from_song_info_7220(int deckOneBased, uint32_t trackId) {
+  if (!g_playerLayout7220 || deckOneBased < 1 || deckOneBased > 4) return false;
+  if (!resolve_player_slots()) return false;
+  const uintptr_t player = g_playerSlots[deckOneBased - 1];
+  if (!player || read_song_info_content_id_7220(player) != trackId) return false;
+  uintptr_t songInfo = 0;
+  if (!safe_read_ptr(player + kUiPlayerSongInfoOffset7220, songInfo) || !songInfo) return false;
+  TrackMetaFields m;
+  m.title = read_track_text(songInfo, 0x10);
+  m.artist = read_track_text(songInfo, 0x18);
+  m.album = read_track_text(songInfo, 0x20);
+  m.key = read_track_text(songInfo, 0x40);
+  // 読み取り中に別の曲へ差し替わっていないことを再確認する。
+  if (read_song_info_content_id_7220(player) != trackId) return false;
+  return send_track_meta_if_changed(deckOneBased, m);
 }
 
 // DB instance を取得するヘルパー（RB 7.x の間接参照に対応）
@@ -1297,7 +1276,7 @@ uintptr_t resolve_db_instance() {
 
 // trackId を指定して RowDataTrack を構築 → メタデータを送信
 void try_lookup_and_send_track_meta(int deckOneBased, uint32_t trackId) {
-  if (!g_getRowDataTrack || !is_likely_track_id(trackId)) return;
+  if (!g_getRowDataTrack || !is_accepted_track_id(trackId)) return;
   const uintptr_t instance = resolve_db_instance();
   if (!instance) return;
 
@@ -1307,9 +1286,28 @@ void try_lookup_and_send_track_meta(int deckOneBased, uint32_t trackId) {
     g_initRowDataTrack(rowData);
   }
   g_getRowDataTrack(instance, trackId, rowData, 1, 0);
-  try_send_strings_from_row_data(deckOneBased, rowData);
+  const bool rowDataSent = try_send_strings_from_row_data(deckOneBased, rowData);
   if (g_destrRowDataTrack) {
     g_destrRowDataTrack(rowData);
+  }
+  const bool songInfoSent = !rowDataSent && try_send_strings_from_song_info_7220(deckOneBased, trackId);
+
+  // デッキごとに、曲 ID かメタデータ取得元が変わった時だけ診断ログを送る。
+  if (g_playerLayout7220 && deckOneBased >= 1 && deckOneBased <= 4) {
+    static uint32_t lastDiagTrackId[4] = {};
+    static int lastDiagSource[4] = {-1, -1, -1, -1};
+    const int source = rowDataSent ? 1 : (songInfoSent ? 2 : 0);
+    const int slot = deckOneBased - 1;
+    if (lastDiagTrackId[slot] != trackId || lastDiagSource[slot] != source) {
+      lastDiagTrackId[slot] = trackId;
+      lastDiagSource[slot] = source;
+      char diag[192] = {};
+      _snprintf_s(diag, sizeof(diag), _TRUNCATE,
+                  "{\"type\":\"log\",\"message\":\"track meta source deck=%d id=%lu source=%s\"}",
+                  deckOneBased, static_cast<unsigned long>(trackId),
+                  source == 1 ? "rowdata" : (source == 2 ? "songinfo" : "none"));
+      send_packet(diag);
+    }
   }
 }
 
@@ -1321,10 +1319,10 @@ void poll_track_strings() {
 
   for (int deck = 0; deck < 4; ++deck) {
     uint32_t trackId = g_lastPlayerTrackId[deck];
-    if (!is_likely_track_id(trackId) && resolve_player_slots()) {
+    if (!is_accepted_track_id(trackId) && resolve_player_slots()) {
       trackId = read_player_track_browser_id(g_playerSlots[deck]);
     }
-    if (!is_likely_track_id(trackId)) {
+    if (!is_accepted_track_id(trackId)) {
       continue;
     }
     try_lookup_and_send_track_meta(deck + 1, trackId);
@@ -1350,7 +1348,12 @@ bool init_udp() {
   }
   g_destination.sin_family = AF_INET;
   g_destination.sin_port = htons(kUdpPort);
-  g_destination.sin_addr.s_addr = inet_addr(kUdpHost);
+  if (InetPtonA(AF_INET, kUdpHost, &g_destination.sin_addr) != 1) {
+    closesocket(g_socket);
+    g_socket = INVALID_SOCKET;
+    WSACleanup();
+    return false;
+  }
   return true;
 }
 
@@ -1715,14 +1718,36 @@ bool resolve_player_slots() {
   }
   HMODULE module = GetModuleHandleA(nullptr);
   uintptr_t mainComponentAddr = 0;
+  uintptr_t uiManagerOffset = 0x490;
   int32_t rel = 0;
-  const auto pattern7218 = parse_signature(kMainComponentSig7218);
-  const uintptr_t mainComponentRef7218 = scan_module_text_section(module, pattern7218);
+  // コード位置は不変なので、シグネチャ走査は初回だけ行う。
+  static bool signaturesScanned = false;
+  static uintptr_t mainComponentRef7218 = 0;
+  static uintptr_t mainComponentRef7220 = 0;
+  if (!signaturesScanned) {
+    mainComponentRef7218 = scan_module_text_section(module, parse_signature(kMainComponentSig7218));
+    if (!mainComponentRef7218) {
+      mainComponentRef7220 =
+          scan_module_text_section(module, parse_signature(kMainComponentSig7220));
+    }
+    signaturesScanned = true;
+  }
   if (mainComponentRef7218) {
     if (!safe_read_i32(mainComponentRef7218 + 0x2D, rel)) {
       return false;
     }
     mainComponentAddr = mainComponentRef7218 + 0x31 + static_cast<int64_t>(rel);
+  } else if (mainComponentRef7220) {
+    if (!safe_read_i32(mainComponentRef7220 + 0x2E, rel)) {
+      return false;
+    }
+    mainComponentAddr = mainComponentRef7220 + 0x32 + static_cast<int64_t>(rel);
+    uiManagerOffset = 0x4C0;
+    g_playerLayout7220 = true;
+  } else if (g_rowDataLayout7218) {
+    // 7.2.18+ のレイアウトでは旧 MainComponent シグネチャが無関係な関数に
+    // 一致する (7.2.20 で確認)。誤ったポインタを辿らないよう解決しない。
+    return false;
   } else {
     const auto pattern = parse_signature(kMainComponentSig7);
     const uintptr_t mainComponentRef = scan_module_text_section(module, pattern);
@@ -1738,7 +1763,7 @@ bool resolve_player_slots() {
   }
 
   uintptr_t uiManager = 0;
-  if (!safe_read_ptr(mainComponent + 0x490, uiManager) || !uiManager) {
+  if (!safe_read_ptr(mainComponent + uiManagerOffset, uiManager) || !uiManager) {
     return false;
   }
 
@@ -1788,6 +1813,34 @@ bool is_likely_track_id(uint32_t value) {
   return value >= 1000000 && value < 500000000;
 }
 
+// 構造的に検証された経路 (7.2.20 SongInfo) から得た ID も受理する判定。
+// ヒューリスティック経路 (OLVC 値の推測、広域スキャン) は is_likely_track_id のまま。
+bool is_accepted_track_id(uint32_t value) {
+  return is_likely_track_id(value) ||
+         (g_playerLayout7220 && value >= 1 && value < 0x7FFFFFFFu);
+}
+
+uint32_t read_song_info_content_id_7220(uintptr_t playerPtr) {
+  uintptr_t songInfo = 0;
+  if (!safe_read_ptr(playerPtr + kUiPlayerSongInfoOffset7220, songInfo) || !songInfo) {
+    return 0;
+  }
+  const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+  const uintptr_t imageSize = module_image_size(moduleBase);
+  uintptr_t vtable = 0;
+  if (!safe_read_ptr(songInfo, vtable) || vtable < moduleBase + sizeof(uintptr_t) ||
+      vtable >= moduleBase + imageSize ||
+      !vtable_rtti_matches(moduleBase, imageSize, vtable - moduleBase, 0,
+                           ".?AVSongInfo@djplay@@")) {
+    return 0;
+  }
+  uint32_t value = 0;
+  return safe_read_u32(songInfo + kSongInfoContentIdOffset7220, value) && value >= 1 &&
+                 value < 0x7FFFFFFFu
+             ? value
+             : 0;
+}
+
 uint32_t extract_track_id_from_olvc_value(uintptr_t rawValue) {
   const uint32_t low32 = static_cast<uint32_t>(rawValue & 0xFFFFFFFFULL);
   if (is_likely_track_id(low32)) {
@@ -1809,6 +1862,9 @@ uint32_t extract_track_id_from_olvc_value(uintptr_t rawValue) {
 uint32_t read_player_track_browser_id(uintptr_t playerPtr, bool allowFallback) {
   if (!playerPtr) {
     return 0;
+  }
+  if (g_playerLayout7220) {
+    return read_song_info_content_id_7220(playerPtr);
   }
   // 7.2.18 では TrackBrowserID の位置が +0x580 と確定できる。
   // 空デッキで近接フィールドを曲IDと誤認しないよう、このレイアウトでは
@@ -1882,7 +1938,7 @@ void poll_player_track_ids() {
   if (!resolve_player_slots()) {
     return;
   }
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   for (int i = 0; i < 4; ++i) {
     const uintptr_t player = g_playerSlots[i];
     if (!player) {
@@ -1903,7 +1959,7 @@ void poll_player_track_ids() {
     // allowFallback=true: already-loaded tracks (pre-injection) require the
     // wider memory scan. Cross-deck bleed is prevented at the app.js layer.
     const uint32_t directTrackId = read_player_track_browser_id(player, true);
-    if (!is_likely_track_id(directTrackId)) {
+    if (!is_accepted_track_id(directTrackId)) {
       if (g_trackIdMisses[i] < 0xFFFFFFFFu) {
         ++g_trackIdMisses[i];
       }
@@ -1999,7 +2055,7 @@ uintptr_t __fastcall load_file_detour(uintptr_t arg1, uintptr_t arg2, uintptr_t 
   if (g_loadDetourHits < 0xFFFFFFFFu) {
     ++g_loadDetourHits;
   }
-  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount());
+  const ULONGLONG nowTick = static_cast<ULONGLONG>(GetTickCount64());
   if (nowTick >= g_lastLoadDetourLogTick + 5000) {
     g_lastLoadDetourLogTick = nowTick;
     char loadDiag[256] = {};
@@ -2086,6 +2142,11 @@ uintptr_t find_notify_master_change_target() {
   const auto sig708 = parse_signature(kNotifyMasterChangeSig708);
   uintptr_t address = scan_module_text_section(module, sig708);
   if (address) return address;
+  // 7.2.20 では汎用フォールバックが float 引数と 7 個以上の引数を持つ無関係な
+  // 関数に一致する。4 引数 detour で中継すると引数が壊れるため使用しない。
+  if (scan_module_text_section(module, parse_signature(kMainComponentSig7220))) {
+    return 0;
+  }
   const auto sigFallback = parse_signature(kNotifyMasterChangeSigFallback);
   return scan_module_text_section(module, sigFallback);
 }
@@ -2127,7 +2188,7 @@ DWORD WINAPI worker_thread(LPVOID) {
   if (initRowDataTrackAddr) {
     g_initRowDataTrack = reinterpret_cast<InitRowDataTrackFn>(initRowDataTrackAddr);
     send_packet(g_rowDataLayout7218
-                    ? "{\"type\":\"log\",\"message\":\"initRowDataTrack found (7.2.18 layout)\"}"
+                    ? "{\"type\":\"log\",\"message\":\"initRowDataTrack found (7.2.18+ layout)\"}"
                     : "{\"type\":\"log\",\"message\":\"initRowDataTrack found (legacy layout)\"}");
   } else {
     send_packet("{\"type\":\"log\",\"message\":\"initRowDataTrack signature not found\"}");
@@ -2207,6 +2268,19 @@ DWORD WINAPI worker_thread(LPVOID) {
   }
 
   if (g_rowDataLayout7218) {
+    g_mixerProfile = select_mixer_profile();
+    if (g_mixerProfile) {
+      char profileLog[192] = {};
+      _snprintf_s(profileLog, sizeof(profileLog), _TRUNCATE,
+                  "{\"type\":\"log\",\"message\":\"Mixer layout %s verified by RTTI\"}",
+                  g_mixerProfile->label);
+      send_packet(profileLog);
+    } else {
+      send_packet(
+          "{\"type\":\"log\",\"message\":\"Mixer layout unknown for this build; mixer faders disabled\"}");
+    }
+  }
+  if (g_mixerProfile) {
     g_mixerUnits7218 = find_mixer_units_7218();
     char mixerLog[192] = {};
     _snprintf_s(mixerLog, sizeof(mixerLog), _TRUNCATE,
@@ -2243,7 +2317,7 @@ DWORD WINAPI worker_thread(LPVOID) {
         poll_track_strings();
       }
     }
-    if ((g_crossfaderWrappers7218.empty() || g_channelFaders7218.empty()) &&
+    if (g_mixerProfile && (g_crossfaderWrappers7218.empty() || g_channelFaders7218.empty()) &&
         (lastMixerRescanTick == 0 || nowTick - lastMixerRescanTick >= 2000)) {
       lastMixerRescanTick = nowTick;
       if (g_crossfaderWrappers7218.empty()) {

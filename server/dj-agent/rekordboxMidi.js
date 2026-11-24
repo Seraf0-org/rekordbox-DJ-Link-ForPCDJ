@@ -1,4 +1,5 @@
 const { EventEmitter } = require("node:events");
+const { resolveMidiModule } = require("./midiModuleResolver");
 
 function clampMidi(value, fallback = 0) {
   const number = Number(value);
@@ -78,28 +79,6 @@ function statusByte(mapping) {
   return base + mapping.channel - 1;
 }
 
-function resolveMidiModule(moduleName = "") {
-  const candidates = moduleName
-    ? [moduleName]
-    : ["@julusian/midi", "midi"];
-  for (const candidate of candidates) {
-    try {
-      // Keep the supported optional packages as literal requires so pkg can
-      // discover and include their Windows native prebuilds.
-      if (candidate === "@julusian/midi") {
-        return require("@julusian/midi");
-      }
-      if (candidate === "midi") {
-        return require("midi");
-      }
-      return require(candidate);
-    } catch {
-      // Optional adapters are best-effort; try the next built-in fallback.
-    }
-  }
-  return null;
-}
-
 function createRekordboxMidi({
   enabled = false,
   moduleName = "@julusian/midi",
@@ -112,6 +91,8 @@ function createRekordboxMidi({
   midiModule = null,
   outputFactory = null,
   now = () => Date.now(),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
 } = {}) {
   const emitter = new EventEmitter();
   const normalizedMappings = {};
@@ -125,8 +106,10 @@ function createRekordboxMidi({
   let output = null;
   let opened = false;
   let rampTimer = null;
+  let rampGeneration = 0;
   let rampStartedAt = 0;
   let releaseFadeTimer = null;
+  let releaseFadeGeneration = 0;
   let releaseFadeStartedAt = 0;
   let status = {
     enabled: Boolean(enabled),
@@ -136,10 +119,10 @@ function createRekordboxMidi({
     device: device || null,
     port: port,
     deckChannels: { ...normalizedDeckChannels },
-    releaseFadeConfigured: false,
-    releaseFadeActive: false,
     updatedAt: new Date(now()).toISOString(),
     rampActive: false,
+    releaseFadeConfigured: false,
+    releaseFadeActive: false,
   };
 
   function updateStatus(patch) {
@@ -147,28 +130,66 @@ function createRekordboxMidi({
     emitter.emit("status", { ...status });
   }
 
-  function choosePort(outputObject) {
-    const count = Number(outputObject?.getPortCount?.() || 0);
-    if (count <= 0) {
+  function readExactPortName(outputObject, index) {
+    try {
+      const name = outputObject?.getPortName?.(index);
+      return typeof name === "string" ? name.trim() : null;
+    } catch {
+      // A native name-read failure must fail closed, never guess a match.
       return null;
     }
-    const requestedPort =
-      port == null || String(port).trim() === ""
-        ? null
-        : Number.isFinite(Number(port))
-          ? Math.trunc(Number(port))
-          : null;
-    if (requestedPort != null && requestedPort >= 0 && requestedPort < count) {
-      return requestedPort;
+  }
+
+  function choosePort(outputObject) {
+    const count = Number(outputObject?.getPortCount?.() || 0);
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      return null;
     }
-    if (device && typeof outputObject.getPortName === "function") {
-      for (let index = 0; index < count; index += 1) {
-        if (String(outputObject.getPortName(index) || "").toLowerCase().includes(device.toLowerCase())) {
-          return index;
-        }
+    const requestedPort = typeof port === "number" && Number.isSafeInteger(port) && port >= 0
+      ? port
+      : null;
+    const requestedDevice = typeof device === "string" && device.trim() ? device.trim() : null;
+    if (
+      requestedPort == null
+      || requestedPort >= count
+      || requestedDevice == null
+      || typeof outputObject.getPortName !== "function"
+    ) {
+      return null;
+    }
+    // One exact, case-sensitive, trimmed device-name rule shared with the
+    // setup probe: the selected port must carry the literal configured name,
+    // and that name must be unique across every enumerated port. Duplicate
+    // identical port names are ambiguous and always fail closed.
+    if (readExactPortName(outputObject, requestedPort) !== requestedDevice) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      if (index !== requestedPort && readExactPortName(outputObject, index) === requestedDevice) {
+        return null;
       }
     }
-    return device ? null : 0;
+    return { port: requestedPort, device: requestedDevice };
+  }
+
+  function releaseOutput(outputObject, closeOpenedPort = false) {
+    if (!outputObject) {
+      return;
+    }
+    if (closeOpenedPort && typeof outputObject.closePort === "function") {
+      try {
+        outputObject.closePort();
+      } catch {
+        // Shutdown and failed-start cleanup remain best-effort.
+      }
+    }
+    if (typeof outputObject.destroy === "function") {
+      try {
+        outputObject.destroy();
+      } catch {
+        // Native-handle release failure is reported through connection state.
+      }
+    }
   }
 
   function start() {
@@ -179,8 +200,7 @@ function createRekordboxMidi({
     if (opened) {
       return;
     }
-    const moduleObject =
-      midiModule || resolveMidiModule(moduleName === "@julusian/midi" ? "" : moduleName);
+    const moduleObject = midiModule || resolveMidiModule(moduleName);
     const factory = outputFactory || (() => new moduleObject.Output());
     if (!moduleObject && !outputFactory) {
       updateStatus({
@@ -191,28 +211,61 @@ function createRekordboxMidi({
       emitter.emit("unavailable", { reason: "missing-midi-dependency" });
       return;
     }
+    let portOpened = false;
     try {
       output = factory();
-      const selectedPort = choosePort(output);
-      if (selectedPort == null || typeof output.openPort !== "function") {
-        updateStatus({ ok: false, available: true, message: "No configured MIDI output device found" });
+      const selection = choosePort(output);
+      if (!selection || typeof output.openPort !== "function") {
+        const message = device && port == null
+          ? "MIDI_DEVICE requires the matching MIDI_PORT"
+          : "No configured MIDI output device found";
+        updateStatus({ ok: false, available: true, message });
+        releaseOutput(output);
         output = null;
         return;
       }
-      output.openPort(selectedPort);
+      try {
+        if (output.openPort(selection.port) === false) {
+          // An explicit refusal means no port was opened; skip the close attempt.
+          updateStatus({ ok: false, available: true, message: "Configured MIDI output could not be opened" });
+          releaseOutput(output);
+          output = null;
+          return;
+        }
+        portOpened = true;
+      } catch {
+        // A thrown open can leave the port partially opened natively, so the
+        // open attempt gets exactly one best-effort close before destroy,
+        // without masking the primary failure.
+        releaseOutput(output, true);
+        output = null;
+        updateStatus({ ok: false, available: true, message: "MIDI output error" });
+        emitter.emit("adapter-error", { code: "midi-open-failed", message: "MIDI output error" });
+        return;
+      }
+      const observedAfterOpen = typeof output.getPortName === "function"
+        ? String(output.getPortName(selection.port) || "").trim()
+        : "";
+      if (observedAfterOpen !== selection.device) {
+        releaseOutput(output, true);
+        output = null;
+        updateStatus({ ok: false, available: true, message: "Configured MIDI output identity changed" });
+        return;
+      }
       opened = true;
       updateStatus({
         ok: true,
         available: true,
         message: "MIDI output connected",
-        port: selectedPort,
-        device: typeof output.getPortName === "function" ? output.getPortName(selectedPort) : device || null,
+        port: selection.port,
+        device: selection.device,
       });
-    } catch (error) {
+    } catch {
+      releaseOutput(output, portOpened || opened);
       output = null;
       opened = false;
-      updateStatus({ ok: false, available: true, message: `MIDI output error: ${error?.message || String(error)}` });
-      emitter.emit("adapter-error", error);
+      updateStatus({ ok: false, available: true, message: "MIDI output error" });
+      emitter.emit("adapter-error", { code: "midi-start-failed", message: "MIDI output error" });
     }
   }
 
@@ -225,9 +278,9 @@ function createRekordboxMidi({
       output.sendMessage(message);
       emitter.emit("sent", { message, ...context });
       return true;
-    } catch (error) {
-      emitter.emit("send-failed", { reason: "send-error", error, message, ...context });
-      updateStatus({ ok: false, message: `MIDI send failed: ${error?.message || String(error)}` });
+    } catch {
+      emitter.emit("send-failed", { reason: "send-error", code: "midi-send-failed", message, ...context });
+      updateStatus({ ok: false, message: "MIDI send failed" });
       return false;
     }
   }
@@ -245,7 +298,7 @@ function createRekordboxMidi({
       : baseMapping?.channel ?? (name === "filter" ? normalizeChannel(filter.channel, 1) : null);
     return {
       targetDeck: deck,
-      targetChannel: configuredChannel || fallbackChannel || null,
+      targetChannel: deck == null ? fallbackChannel || null : configuredChannel || null,
     };
   }
 
@@ -273,6 +326,10 @@ function createRekordboxMidi({
     }
     const { targetDeck, ...mappingOverride } = override && typeof override === "object" ? override : {};
     const target = resolveTarget(name, targetDeck, base, mappingOverride.channel);
+    if (target.targetDeck != null && target.targetChannel == null) {
+      emitter.emit("mapping-target-unavailable", { name, targetDeck: target.targetDeck });
+      return false;
+    }
     const mapping = normalizeMapping({
       ...base,
       ...mappingOverride,
@@ -289,11 +346,14 @@ function createRekordboxMidi({
     const target = resolveTarget("filter", options.targetDeck, normalizedMappings.filter || {
       channel: normalizeChannel(filter.channel, 1),
     });
-    if (rampTimer) {
+    if (rampTimer != null) {
       return { started: false, ok: false, reason: "ramp-in-progress", ...target };
     }
     if (!opened || !output) {
       return { started: false, ok: false, reason: "midi-not-connected", ...target };
+    }
+    if (target.targetDeck != null && target.targetChannel == null) {
+      return { started: false, ok: false, reason: "filter-target-channel-missing", ...target };
     }
     const mapping = normalizedMappings.filter || normalizeMapping({
       messageType: "controlChange",
@@ -322,13 +382,19 @@ function createRekordboxMidi({
       return { started: false, ok: false, reason: "midi-send-failed", ...target };
     }
     updateStatus({ rampActive: true });
-    rampTimer = setInterval(() => {
+    const generation = ++rampGeneration;
+    rampTimer = setIntervalImpl(() => {
+      // clearInterval prevents future callbacks in production. The generation
+      // fence also makes an already-queued callback a no-op, so an F13 Stop
+      // cannot be followed by a stale ramp CC under a timer-boundary race.
+      if (generation !== rampGeneration || rampTimer == null) return;
       const elapsed = now() - startedAt;
       const progress = Math.min(1, elapsed / durationMs);
       const value = Math.round(startValue + (endValue - startValue) * progress);
       if (!sendAt(value)) {
-        clearInterval(rampTimer);
+        clearIntervalImpl(rampTimer);
         rampTimer = null;
+        rampGeneration += 1;
         rampStartedAt = 0;
         updateStatus({ rampActive: false, ok: false, message: "MIDI filter ramp stopped after send failure" });
         emitter.emit("ramp-error", { reason: "midi-send-failed", value });
@@ -336,8 +402,9 @@ function createRekordboxMidi({
         return;
       }
       if (progress >= 1) {
-        clearInterval(rampTimer);
+        clearIntervalImpl(rampTimer);
         rampTimer = null;
+        rampGeneration += 1;
         rampStartedAt = 0;
         updateStatus({ rampActive: false });
         emitter.emit("ramp-complete", { startValue, endValue, durationMs });
@@ -356,16 +423,16 @@ function createRekordboxMidi({
   }
 
   function releaseFadeMapping() {
-    if (releaseFade?.enabled === false) {
+    if (releaseFade?.enabled !== true) {
       return null;
     }
-    return normalizedMappings[releaseFade?.mappingName || "releaseFade"] || null;
+    return normalizedMappings[releaseFade.mappingName || releaseFade.mapping || "releaseFade"] || null;
   }
 
   function releaseFadeTarget(targetDeck, mapping) {
     const scope = String(releaseFade?.target || "deck").trim().toLowerCase();
     return resolveTarget(
-      releaseFade?.mappingName || "releaseFade",
+      releaseFade?.mappingName || releaseFade?.mapping || "releaseFade",
       scope === "global" ? null : targetDeck,
       mapping,
     );
@@ -378,7 +445,7 @@ function createRekordboxMidi({
   function startReleaseFade(options = {}) {
     const mapping = releaseFadeMapping();
     const target = releaseFadeTarget(options.targetDeck, mapping);
-    if (releaseFadeTimer) {
+    if (releaseFadeTimer != null) {
       return { started: false, ok: false, reason: "release-fade-in-progress", ...target };
     }
     if (!mapping) {
@@ -387,30 +454,36 @@ function createRekordboxMidi({
     if (!opened || !output) {
       return { started: false, ok: false, reason: "midi-not-connected", ...target };
     }
+    if (target.targetDeck != null && target.targetChannel == null) {
+      return { started: false, ok: false, reason: "release-fade-target-channel-missing", ...target };
+    }
     const startValue = clampMidi(options.startValue ?? releaseFade.startValue, 127);
     const endValue = clampMidi(options.endValue ?? releaseFade.endValue, 0);
     const durationMs = Math.max(1, Number(options.durationMs ?? releaseFade.durationMs ?? 1_000));
     const updateIntervalMs = Math.max(1, Number(options.updateIntervalMs ?? releaseFade.updateIntervalMs ?? 50));
     const startedAt = now();
     releaseFadeStartedAt = startedAt;
-    const sendAt = (value) => sendNormalizedMapping(releaseFade.mappingName || "releaseFade", {
+    const sendAt = (value) => sendNormalizedMapping(releaseFade.mappingName || releaseFade.mapping || "releaseFade", {
       ...mapping,
       channel: target.targetChannel || mapping.channel,
       value,
     }, { ...target, phase: "release-fade" });
     if (!sendAt(startValue)) {
       releaseFadeStartedAt = 0;
-      options.onError?.({ reason: "midi-send-failed", value: startValue });
+      options.onError?.({ reason: "midi-send-failed", value: startValue, ...target });
       return { started: false, ok: false, reason: "midi-send-failed", ...target };
     }
     updateStatus({ releaseFadeActive: true });
-    releaseFadeTimer = setInterval(() => {
+    const generation = ++releaseFadeGeneration;
+    releaseFadeTimer = setIntervalImpl(() => {
+      if (generation !== releaseFadeGeneration || releaseFadeTimer == null) return;
       const elapsed = now() - startedAt;
       const progress = Math.min(1, elapsed / durationMs);
       const value = Math.round(startValue + (endValue - startValue) * progress);
       if (!sendAt(value)) {
-        clearInterval(releaseFadeTimer);
+        clearIntervalImpl(releaseFadeTimer);
         releaseFadeTimer = null;
+        releaseFadeGeneration += 1;
         releaseFadeStartedAt = 0;
         updateStatus({ releaseFadeActive: false, ok: false, message: "MIDI release fade stopped after send failure" });
         emitter.emit("release-fade-error", { reason: "midi-send-failed", value, ...target });
@@ -418,8 +491,9 @@ function createRekordboxMidi({
         return;
       }
       if (progress >= 1) {
-        clearInterval(releaseFadeTimer);
+        clearIntervalImpl(releaseFadeTimer);
         releaseFadeTimer = null;
+        releaseFadeGeneration += 1;
         releaseFadeStartedAt = 0;
         updateStatus({ releaseFadeActive: false });
         const result = { startValue, endValue, durationMs, updateIntervalMs, ...target };
@@ -434,7 +508,7 @@ function createRekordboxMidi({
       endValue,
       durationMs,
       updateIntervalMs,
-      resetAfterStop: releaseFade.resetAfterStop === true || releaseFade.resetPolicy === "restore-after-stop",
+      resetAfterStop: releaseFade.resetAfterStop === true,
       resetValue: clampMidi(releaseFade.resetValue, startValue),
       resetDelayMs: Math.max(0, Number(releaseFade.resetDelayMs) || 0),
       ...target,
@@ -447,8 +521,12 @@ function createRekordboxMidi({
     if (!mapping) {
       return { ok: false, reason: "release-fade-mapping-missing", ...target };
     }
+    if (target.targetDeck != null && target.targetChannel == null) {
+      return { ok: false, reason: "release-fade-target-channel-missing", ...target };
+    }
     const value = clampMidi(options.value ?? releaseFade.resetValue, 127);
-    const sent = sendNormalizedMapping(releaseFade.mappingName || "releaseFade", {
+    const mappingName = releaseFade.mappingName || releaseFade.mapping || "releaseFade";
+    const sent = sendNormalizedMapping(mappingName, {
       ...mapping,
       channel: target.targetChannel || mapping.channel,
       value,
@@ -457,45 +535,43 @@ function createRekordboxMidi({
   }
 
   function cancelFilterRamp(reason = "cancelled") {
-    if (!rampTimer) {
+    if (rampTimer == null) {
       return false;
     }
-    clearInterval(rampTimer);
+    clearIntervalImpl(rampTimer);
     rampTimer = null;
+    rampGeneration += 1;
     rampStartedAt = 0;
     updateStatus({ rampActive: false, message: `MIDI filter ramp ${reason}` });
     return true;
   }
 
   function cancelReleaseFade(reason = "cancelled") {
-    if (!releaseFadeTimer) {
+    if (releaseFadeTimer == null) {
       return false;
     }
-    clearInterval(releaseFadeTimer);
+    clearIntervalImpl(releaseFadeTimer);
     releaseFadeTimer = null;
+    releaseFadeGeneration += 1;
     releaseFadeStartedAt = 0;
     updateStatus({ releaseFadeActive: false, message: `MIDI release fade ${reason}` });
     return true;
   }
 
   function stop() {
-    if (rampTimer) {
-      clearInterval(rampTimer);
+    if (rampTimer != null) {
+      clearIntervalImpl(rampTimer);
       rampTimer = null;
     }
-    if (releaseFadeTimer) {
-      clearInterval(releaseFadeTimer);
+    rampGeneration += 1;
+    rampStartedAt = 0;
+    if (releaseFadeTimer != null) {
+      clearIntervalImpl(releaseFadeTimer);
       releaseFadeTimer = null;
     }
-    rampStartedAt = 0;
+    releaseFadeGeneration += 1;
     releaseFadeStartedAt = 0;
-    if (opened && output && typeof output.closePort === "function") {
-      try {
-        output.closePort();
-      } catch {
-        // Ignore close errors during shutdown.
-      }
-    }
+    releaseOutput(output, opened);
     output = null;
     opened = false;
     updateStatus({ ok: false, rampActive: false, message: enabled ? "MIDI output stopped" : status.message });
@@ -504,9 +580,9 @@ function createRekordboxMidi({
   function getStatus() {
     return {
       ...status,
-      rampActive: Boolean(rampTimer),
+      rampActive: rampTimer != null,
       rampStartedAt,
-      releaseFadeActive: Boolean(releaseFadeTimer),
+      releaseFadeActive: releaseFadeTimer != null,
       releaseFadeStartedAt,
       releaseFadeConfigured: hasReleaseFade(),
     };

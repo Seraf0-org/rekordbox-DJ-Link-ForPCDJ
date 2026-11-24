@@ -1,24 +1,133 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const isPackaged = typeof process.pkg !== "undefined";
 const _exeDir = isPackaged ? path.dirname(process.execPath) : null;
+
+// Installed-release verification mode: `server.exe --verify-install` checks
+// the installed tree (install-manifest, sidecar identity, exe binding and, in
+// packaged builds, the embedded commitment against the running executable)
+// and exits 0/1 WITHOUT starting the server. start-rb.bat runs it before
+// normal startup so a tampered or foreign installation never launches.
+if (process.argv.includes("--verify-install")) {
+  const { verifyInstalledInstall } = require("./installVerification");
+  function argValue(flag) {
+    const index = process.argv.indexOf(flag);
+    return index >= 0 ? process.argv[index + 1] : undefined;
+  }
+  const targetDir = argValue("--install-dir") || _exeDir || process.cwd();
+  const outcome = verifyInstalledInstall({ exeDir: path.resolve(targetDir) });
+  for (const warning of outcome.warnings) console.warn(`warning: ${warning}`);
+  if (!outcome.ok) {
+    for (const failure of outcome.failures) console.error(`- ${failure}`);
+    console.error(`installation verification FAILED for ${targetDir}`);
+    process.exit(1);
+  }
+  console.log(`installation verification OK for ${targetDir}`);
+  console.log(`identityHash: ${outcome.identityHash}`);
+  // Truthful scope label: only a packaged run proves the compiled-in
+  // commitment; system-Node runs are manifest-level checks (layers A-C).
+  console.log(isPackaged ? "provenance: verified-packaged" : "provenance: manifest-only (system Node; no embedded-commitment proof)");
+  process.exit(0);
+}
+
+const SERVER_ARGUMENTS = process.argv.slice(2);
+const REKORDBOX_LOCAL_TEST_ARGUMENT = "--rekordbox-local-test";
+const REKORDBOX_LOCAL_TEST_ACTIVE = SERVER_ARGUMENTS.length === 1 &&
+  SERVER_ARGUMENTS[0] === REKORDBOX_LOCAL_TEST_ARGUMENT;
+if (SERVER_ARGUMENTS.length > 0 && !REKORDBOX_LOCAL_TEST_ACTIVE) {
+  console.error("[ERROR] server accepts no arguments except the explicit --rekordbox-local-test mode.");
+  process.exit(64);
+}
+
 const express = require("express");
 const { Server } = require("socket.io");
 const { createPythonBridge } = require("./providers/pythonBridge");
 const { createAbletonLinkProvider } = require("./providers/abletonLinkProvider");
 const { createHookUdpProvider } = require("./providers/hookUdpProvider");
 const { upsertLoopState } = require("./loopState");
-const { loadDjAgentConfig } = require("./dj-agent/config");
+const {
+  metadataMatchesContentId,
+  metadataConsistentWithDeckPlayback,
+  trackNeedsMetadataHydration,
+} = require("./trackMetadataHydration");
+const {
+  loadDjAgentConfig,
+  loadRekordboxLocalTestConfig,
+  REKORDBOX_LOCAL_TEST_MODE,
+  REKORDBOX_LOCAL_TEST_SCHEMA,
+  REKORDBOX_LOCAL_TEST_SAFETY_LABEL,
+} = require("./dj-agent/config");
 const { createSyndocalClient } = require("./dj-agent/syndocalClient");
 const { createTrackActivityDetector } = require("./dj-agent/trackActivityDetector");
+const {
+  composeSignatureIdentityProof,
+  createSignaturePlaybackProof,
+} = require("./dj-agent/signatureIdentityProof");
 const { createRekordboxMidi } = require("./dj-agent/rekordboxMidi");
 const { createPedalController } = require("./dj-agent/pedalController");
 const { createShowEventRouter } = require("./dj-agent/showEventRouter");
-const { isLoopbackRequest } = require("./dj-agent/httpSecurity");
-const { createBuildIdentity } = require("./buildIdentity");
+const {
+  getActionRequestOrigin,
+  isActionPreflightAllowed,
+  isActionRequestAllowed,
+  isLocalSetupRequest,
+} = require("./dj-agent/httpSecurity");
+const { buildPublicLookupDiagnostic } = require("./publicDiagnostics");
+const { applyNowPlayingIdentityPatch } = require("./trackIdentityTransition");
+const { enumerateMidiOutputs } = require("./dj-agent/midiPorts");
+const { validateCustomMidiCsv } = require("./dj-agent/rekordboxMapping");
+const { SYNDOCAL_ADAPTERS, buildSetupChecklist } = require("./dj-agent/setupChecklist");
+const { exactMidiPort, verifyRuntimeMidiSelection } = require("./dj-agent/setupSelection");
+const { resolveBuildIdentity } = require("./buildIdentity");
+const { createLatestStateBroadcaster } = require("./stateBroadcast");
 
-const PORT = Number(process.env.PORT || 8787);
+const PUBLIC_ROOT = isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public");
+const SETUP_MAPPING_FILENAME = "CustomMIDI1-Syndocal-v1.1.11.csv";
+const SETUP_MAPPING_URL = `/setup/${SETUP_MAPPING_FILENAME}`;
+// Readiness-validation seam for operators and tests: point the semantic CSV
+// validator at an alternate artifact without touching the bundled file that
+// /setup serves. An unreadable or invalid override simply fails readiness
+// closed in inspectSetupMappingArtifact().
+const SETUP_MAPPING_PATH = String(process.env.RB_OUTPUT_SETUP_MAPPING_PATH || "").trim()
+  ? path.resolve(String(process.env.RB_OUTPUT_SETUP_MAPPING_PATH).trim())
+  : path.join(PUBLIC_ROOT, "setup", SETUP_MAPPING_FILENAME);
+
+const HTTP_DEFAULT_HOST = "0.0.0.0";
+
+// Preserve the product's IPv4 LAN-viewer default explicitly, while allowing
+// an operator to select a literal interface IP. Only an unset or blank value
+// selects the default: a typo must never broaden a local-only bind to every
+// IPv4 interface. Brackets are accepted only as IPv6 URL-style notation and
+// are removed before passing the address to net.Server.listen().
+function resolveHttpBindHost(rawHost = process.env.RB_OUTPUT_HOST) {
+  if (rawHost == null) {
+    return HTTP_DEFAULT_HOST;
+  }
+  if (typeof rawHost !== "string") {
+    throw new TypeError("RB_OUTPUT_HOST must be an IPv4 or IPv6 address literal");
+  }
+  const candidate = rawHost.trim();
+  if (!candidate) {
+    return HTTP_DEFAULT_HOST;
+  }
+  const bracketedIpv6 = candidate.match(/^\[([^\[\]]+)\]$/);
+  const normalized = bracketedIpv6 ? bracketedIpv6[1] : candidate;
+  const family = net.isIP(normalized);
+  if (family === 0 || (bracketedIpv6 && family !== 6)) {
+    throw new TypeError(
+      "RB_OUTPUT_HOST must be an IPv4 or IPv6 address literal; hostnames and malformed values are not allowed"
+    );
+  }
+  return normalized;
+}
+
+const HTTP_BIND_HOST = REKORDBOX_LOCAL_TEST_ACTIVE ? "127.0.0.1" : resolveHttpBindHost();
+const PORT = REKORDBOX_LOCAL_TEST_ACTIVE ? 8787 : Number(process.env.PORT || 8787);
 const POLL_MS = Number(process.env.REKORDBOX_POLL_MS || 500);
 // DB補完を無効化し、Hook由来のみでメタデータを扱う
 const PYTHON_BRIDGE_ENABLED = false;
@@ -40,9 +149,22 @@ const ABLETON_LINK_INITIAL_TEMPO = Number(process.env.ABLETON_LINK_INITIAL_TEMPO
 const HOOK_UDP_ENABLED = process.env.HOOK_UDP_ENABLED !== "false";
 const HOOK_UDP_PORT = Number(process.env.HOOK_UDP_PORT || 22346);
 const HISTORY_OFFSET_SECONDS = Number(process.env.HISTORY_OFFSET_SECONDS || 60);
-const DJ_AGENT_CONFIG = loadDjAgentConfig();
+const DJ_AGENT_CONFIG = REKORDBOX_LOCAL_TEST_ACTIVE
+  ? loadRekordboxLocalTestConfig()
+  : loadDjAgentConfig();
+if (REKORDBOX_LOCAL_TEST_ACTIVE && !DJ_AGENT_CONFIG.enabled) {
+  console.error(`[ERROR] ${REKORDBOX_LOCAL_TEST_SAFETY_LABEL} config preflight failed; runtime did not start.`);
+  process.exit(1);
+}
+if (REKORDBOX_LOCAL_TEST_ACTIVE) {
+  console.log(`[rb-output] ${REKORDBOX_LOCAL_TEST_SAFETY_LABEL}`);
+  console.log("[rb-output] existing Hook/Rekordbox candidate, MIDI, pedal, and router runtime is active; Syndocal is not applicable and no production LAN route is selected.");
+}
 
-const BUILD_IDENTITY = createBuildIdentity();
+// Packaged mode fails closed here: a missing or malformed build-identity.json
+// next to the executable throws before the HTTP server starts. Runtime env
+// vars can never forge packaged provenance.
+const BUILD_IDENTITY = resolveBuildIdentity();
 
 const app = express();
 const server = http.createServer(app);
@@ -91,25 +213,41 @@ const state = {
       state: DJ_AGENT_CONFIG.enabled ? "not-started" : "disabled",
       message: DJ_AGENT_CONFIG.enabled
         ? "DJ Agent not started"
-        : "DJ Agent extension disabled by config",
+        : DJ_AGENT_CONFIG.warning || "DJ Agent extension disabled by config",
       updatedAt: null,
       syndocal: null,
       midi: null,
       pedal: null,
       mode: "dj-control",
+      testOnly: DJ_AGENT_CONFIG.testOnly === true,
+      localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
+      safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+      deliveryPolicy: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE
+        ? "not-applicable/local-only"
+        : "syndocal-ack-required",
       timelineState: "unknown",
       timelineLoopActive: null,
+      timelineTransitionHoldActive: null,
       timelineId: null,
       timelinePositionBars: null,
+      operatorReturnRequestId: null,
       timelineSnapshotReady: false,
       lastTimelineAction: null,
       lastTimelineWarning: null,
-      releaseMacroSequence: "parallel",
+      releaseMacroSequence: "filter-then-fade-then-stop",
       releaseMacroPhase: "idle",
       releaseMacroReason: null,
       releaseMacroActive: false,
       lastAction: null,
       lastActionAt: null,
+      ownerDeck: null,
+      ownerDeckId: null,
+      activePlaySessionId: null,
+      ownerWireIdentity: null,
+      ownerSource: "none",
+      productionCandidateStatus: null,
+      authorityConsistency: null,
+      ownerTrack: null,
     },
   },
   warnings: [],
@@ -149,6 +287,19 @@ function broadcastSse(eventName, payload) {
 
 let lastStateFingerprint = "";
 
+const stateBroadcaster = createLatestStateBroadcaster({
+  // A 50 ms frame keeps the public stream responsive for the 500 ms physical
+  // action budget while preventing Hook OLVC packets from queueing thousands
+  // of obsolete browser states.
+  intervalMs: 50,
+  emitSnapshot: () => {
+    state.updatedAt = new Date().toISOString();
+    const snapshot = buildSnapshot();
+    io.emit("state", snapshot);
+    broadcastSse("state", snapshot);
+  },
+});
+
 function mergeWarning(message) {
   if (!message) {
     return;
@@ -168,14 +319,13 @@ function pushDebugLog(method, message, extra = {}) {
     message: String(message),
     ...extra,
   };
-  const last = state.debugLogs[state.debugLogs.length - 1];
-  const sameAsLast =
-    last &&
-    last.method === entry.method &&
-    last.message === entry.message &&
-    String(last.deck || "") === String(entry.deck || "") &&
-    String(last.contentId || "") === String(entry.contentId || "");
-  if (sameAsLast) {
+  const isDuplicate = state.debugLogs.some((existing) =>
+    existing.method === entry.method &&
+    existing.message === entry.message &&
+    String(existing.deck || "") === String(entry.deck || "") &&
+    String(existing.contentId || "") === String(entry.contentId || "")
+  );
+  if (isDuplicate) {
     return;
   }
   state.debugLogs.push(entry);
@@ -241,7 +391,7 @@ function buildSnapshot() {
   };
 }
 
-function emitState() {
+function emitState({ defer = false } = {}) {
   const fingerprintSource = {
     nowPlaying: state.nowPlaying,
     recentTracks: state.recentTracks,
@@ -262,11 +412,8 @@ function emitState() {
     return;
   }
 
-  state.updatedAt = new Date().toISOString();
   lastStateFingerprint = fingerprint;
-  const snapshot = buildSnapshot();
-  io.emit("state", snapshot);
-  broadcastSse("state", snapshot);
+  stateBroadcaster.request({ immediate: !defer });
 }
 
 function applyLoopState(loopState, { emitEvent = true } = {}) {
@@ -432,19 +579,23 @@ function resolveContentMetadata(contentId) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
-    let stderr = "";
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
+    // Drain diagnostics so a noisy helper cannot block, but never retain or
+    // publish child stderr: Python tracebacks can contain private paths.
+    child.stderr.resume();
     child.on("close", (code) => {
       if (code !== 0) {
-        pushDebugLog("db-lookup-error", `contentId ${key}: lookup process failed (${code})`, {
-          contentId: key,
-          stderr: stderr.trim() || null,
-        });
+        pushDebugLog(
+          "db-lookup-error",
+          `contentId ${key}: lookup process failed`,
+          buildPublicLookupDiagnostic({
+            contentId: key,
+            reason: "lookup-process-failed",
+            exitCode: code,
+          })
+        );
         resolve(null);
         return;
       }
@@ -465,18 +616,24 @@ function resolveContentMetadata(contentId) {
         pushDebugLog("db-lookup-miss", `contentId ${key}: metadata not found`, { contentId: key });
         resolve(null);
       } catch {
-        pushDebugLog("db-lookup-error", `contentId ${key}: invalid lookup payload`, {
-          contentId: key,
-          stdout: raw.slice(0, 240),
-        });
+        pushDebugLog(
+          "db-lookup-error",
+          `contentId ${key}: invalid lookup payload`,
+          buildPublicLookupDiagnostic({ contentId: key, reason: "invalid-lookup-payload" })
+        );
         resolve(null);
       }
     });
     child.on("error", (error) => {
-      pushDebugLog("db-lookup-error", `contentId ${key}: lookup spawn error`, {
-        contentId: key,
-        message: error?.message || String(error),
-      });
+      pushDebugLog(
+        "db-lookup-error",
+        `contentId ${key}: lookup spawn error`,
+        buildPublicLookupDiagnostic({
+          contentId: key,
+          reason: "lookup-spawn-failed",
+          error,
+        })
+      );
       resolve(null);
     });
   }).finally(() => {
@@ -532,7 +689,11 @@ function resolveDeckMetadataBySignature(deck) {
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
     });
-    child.on("close", () => {
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
       const raw = stdout.trim();
       if (!raw) {
         resolve(null);
@@ -562,6 +723,44 @@ function resolveDeckMetadataBySignature(deck) {
 
   contentLookupInFlight.set(sigKey, lookup);
   return lookup;
+}
+
+function captureIdentitylessSessionSignatureProof(deck) {
+  if (!DJ_AGENT_CONFIG.enabled) {
+    return null;
+  }
+  const deckNumber = Number(deck);
+  if (!Number.isSafeInteger(deckNumber) || deckNumber < 1 || deckNumber > 4) {
+    return null;
+  }
+  const detectorDeck = djAgentDetector.getState().decks[deckNumber];
+  if (
+    !detectorDeck ||
+    !detectorDeck.playSessionId ||
+    !detectorDeck.startedAt ||
+    detectorDeck.track ||
+    detectorDeck.wireIdentity ||
+    detectorDeck.pendingTrackChange ||
+    detectorDeck.signatureProofConflictRevision !== null ||
+    detectorDeck.awaitingPlayConfirmation
+  ) {
+    return null;
+  }
+  return createSignaturePlaybackProof({
+    deck: deckNumber,
+    playSessionId: detectorDeck.playSessionId,
+    startedAt: detectorDeck.startedAt,
+    signatureProofGeneration: detectorDeck.signatureProofGeneration,
+    playback: detectorDeck.playback,
+  });
+}
+
+function adoptSignatureResolvedIdentity(playbackProof, metadata) {
+  const proof = composeSignatureIdentityProof(playbackProof, metadata);
+  if (!proof) {
+    return null;
+  }
+  return djAgentDetector.onSignatureIdentityProof(proof);
 }
 
 function mergeDeckEntryMetadata(entry, metadata) {
@@ -675,35 +874,6 @@ function markFailedCandidate(contentId) {
   failedContentCandidates.set(key, Date.now());
 }
 
-function isMetadataConsistentWithDeck(deck, metadata) {
-  if (!metadata) {
-    return false;
-  }
-  const deckPlayback = state.deckPlaybacks.find((item) => Number(item?.deck) === Number(deck));
-  const deckTotal = Number(deckPlayback?.totalSec);
-  const deckBpm = Number(deckPlayback?.bpm);
-  const trackDuration = Number(metadata.durationSec);
-  const trackBpm = Number(metadata.trackBpm);
-  if (
-    Number.isFinite(deckTotal) &&
-    Number.isFinite(trackDuration) &&
-    deckTotal > 30 &&
-    deckTotal < 1200
-  ) {
-    const delta = Math.abs(deckTotal - trackDuration);
-    if (delta > 8) {
-      return false;
-    }
-  }
-  if (Number.isFinite(deckBpm) && Number.isFinite(trackBpm) && deckBpm > 60 && trackBpm > 60) {
-    const bpmDelta = Math.abs(deckBpm - trackBpm);
-    if (bpmDelta > 20.0) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function applyMasterNowPlayingFromDecks() {
   const activeDeck = Number(state.playback?.deck);
   const active = Number.isFinite(activeDeck)
@@ -765,12 +935,13 @@ function hydrateDeckNowPlayingMetadata() {
     if (!entry) {
       continue;
     }
-    const hasMetadata =
-      Boolean(entry.title) || Boolean(entry.artist) || Number.isFinite(Number(entry.durationSec));
+    const hasMetadata = Boolean(entry.title) || Boolean(entry.artist) ||
+      isPositiveFinite(entry.durationSec) || isPositiveFinite(entry.trackBpm);
     if (!hasMetadata) {
       continue;
     }
-    if (isMetadataConsistentWithDeck(entry.deck, entry)) {
+    const playback = state.deckPlaybacks.find((item) => Number(item?.deck) === Number(entry.deck));
+    if (metadataConsistentWithDeckPlayback(playback, entry)) {
       continue;
     }
     pushDebugLog(
@@ -795,17 +966,7 @@ function hydrateDeckNowPlayingMetadata() {
       if (!entry?.contentId) {
         return false;
       }
-      const key = String(entry.contentId);
-      if (contentMetadataCache.has(key)) {
-        return false;
-      }
-      return (
-        !entry.title ||
-        !entry.artist ||
-        !isPositiveFinite(entry.trackBpm) ||
-        !isPositiveFinite(entry.durationSec) ||
-        !entry.waveform
-      );
+      return trackNeedsMetadataHydration(entry);
     })
     .map(async (entry) => {
       const key = String(entry.contentId);
@@ -813,9 +974,18 @@ function hydrateDeckNowPlayingMetadata() {
         return;
       }
       const metadata = getRecentTrackMetadata(key) || (await resolveContentMetadata(key));
+      const signatureProof = metadata ? null : captureIdentitylessSessionSignatureProof(entry.deck);
       const resolvedMetadata = metadata || (await resolveDeckMetadataBySignature(entry.deck));
       if (!resolvedMetadata) {
         markFailedCandidate(key);
+        return;
+      }
+      if (!metadataMatchesContentId(key, resolvedMetadata)) {
+        markFailedCandidate(key);
+        pushDebugLog("metadata-identity-conflict", `Deck ${entry.deck}: metadata identity conflict rejected`, {
+          deck: Number(entry.deck),
+          contentId: key,
+        });
         return;
       }
       const current = state.deckNowPlaying.find((item) => Number(item?.deck) === Number(entry.deck));
@@ -823,6 +993,9 @@ function hydrateDeckNowPlayingMetadata() {
         return;
       }
       upsertDeckNowPlayingEntry(entry.deck, mergeDeckEntryMetadata(current, resolvedMetadata));
+      if (signatureProof && !metadata) {
+        adoptSignatureResolvedIdentity(signatureProof, resolvedMetadata);
+      }
     });
   if (pending.length === 0 && Array.isArray(state.deckPlaybacks) && state.deckPlaybacks.length > 0) {
     const missingDecks = state.deckPlaybacks
@@ -833,6 +1006,7 @@ function hydrateDeckNowPlayingMetadata() {
         return !existing || (!existing.title && !existing.artist);
       });
     for (const deck of missingDecks) {
+      const signatureProof = captureIdentitylessSessionSignatureProof(deck);
       pending.push(
         resolveDeckMetadataBySignature(deck).then((metadata) => {
           if (!metadata) {
@@ -853,6 +1027,9 @@ function hydrateDeckNowPlayingMetadata() {
               metadata
             )
           );
+          if (signatureProof) {
+            adoptSignatureResolvedIdentity(signatureProof, metadata);
+          }
         })
       );
     }
@@ -930,7 +1107,9 @@ const hookUdpProvider = createHookUdpProvider({
   port: HOOK_UDP_PORT,
 });
 
-const djAgentDetector = createTrackActivityDetector();
+const djAgentDetector = createTrackActivityDetector({
+  ownerSelectionPolicy: DJ_AGENT_CONFIG.trackActivity.ownerSelection,
+});
 const djAgentSyndocalClient = createSyndocalClient({
   enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.syndocal.enabled,
   host: DJ_AGENT_CONFIG.syndocal.host,
@@ -943,7 +1122,7 @@ const djAgentSyndocalClient = createSyndocalClient({
   reconnectMaxMs: DJ_AGENT_CONFIG.syndocal.reconnectMaxMs,
   heartbeatMs: DJ_AGENT_CONFIG.syndocal.heartbeatMs,
   ackTimeoutMs: DJ_AGENT_CONFIG.syndocal.ackTimeoutMs,
-  stateSyncProvider: () => (djAgentRouter ? djAgentRouter.getStateSync() : {}),
+  stateSyncProvider: () => (djAgentRouter ? djAgentRouter.getSyndocalStateSync() : {}),
 });
 const djAgentMidi = createRekordboxMidi({
   enabled: DJ_AGENT_CONFIG.enabled && DJ_AGENT_CONFIG.midi.enabled,
@@ -952,8 +1131,8 @@ const djAgentMidi = createRekordboxMidi({
   port: DJ_AGENT_CONFIG.midi.port,
   deckChannels: DJ_AGENT_CONFIG.midi.deckChannels,
   mappings: DJ_AGENT_CONFIG.midi.mappings,
-  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
   filter: DJ_AGENT_CONFIG.midi.filter,
+  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
 });
 let djAgentRouter = null;
 const djAgentPedal = createPedalController({
@@ -967,30 +1146,40 @@ djAgentRouter = createShowEventRouter({
   syndocalClient: djAgentSyndocalClient,
   midi: djAgentMidi,
   pedal: djAgentPedal,
-  releaseReset: DJ_AGENT_CONFIG.releaseReset,
+  releaseFade: DJ_AGENT_CONFIG.midi.releaseFade,
   releaseMacro: DJ_AGENT_CONFIG.midi.releaseMacro,
+  localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
 });
 
 function updateDjAgentStatus() {
   const routerStatus = djAgentRouter.getStatus();
   const syndocal = routerStatus.syndocal || {};
   const enabled = DJ_AGENT_CONFIG.enabled;
+  const localTestMode = DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE;
   state.status.djAgent = {
     ...state.status.djAgent,
     enabled,
-    ok: enabled && (syndocal.state === "connected" || syndocal.state === "disabled"),
-    state: enabled ? syndocal.state || "not-started" : "disabled",
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    localTestMode,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    deliveryPolicy: localTestMode ? "not-applicable/local-only" : "syndocal-ack-required",
+    ok: enabled && (localTestMode || syndocal.state === "connected" || syndocal.state === "disabled"),
+    state: enabled ? (localTestMode ? "local-test" : syndocal.state || "not-started") : "disabled",
     message: enabled
-      ? syndocal.message || "DJ Agent running"
-      : "DJ Agent extension disabled by config",
+      ? (localTestMode
+        ? `${REKORDBOX_LOCAL_TEST_SAFETY_LABEL} active; Syndocal not applicable`
+        : syndocal.message || "DJ Agent running")
+      : DJ_AGENT_CONFIG.warning || "DJ Agent extension disabled by config",
     syndocal,
     midi: routerStatus.midi,
     pedal: routerStatus.pedal,
     mode: routerStatus.mode,
     timelineState: routerStatus.timelineState,
     timelineLoopActive: routerStatus.timelineLoopActive,
+    timelineTransitionHoldActive: routerStatus.timelineTransitionHoldActive,
     timelineId: routerStatus.timelineId,
     timelinePositionBars: routerStatus.timelinePositionBars,
+    operatorReturnRequestId: routerStatus.operatorReturnRequestId,
     timelineSnapshotReady: routerStatus.timelineSnapshotReady,
     lastTimelineAction: routerStatus.lastTimelineAction,
     lastTimelineWarning: routerStatus.lastTimelineWarning,
@@ -998,9 +1187,18 @@ function updateDjAgentStatus() {
     releaseMacroPhase: routerStatus.releaseMacroPhase,
     releaseMacroReason: routerStatus.releaseMacroReason,
     releaseMacroActive: routerStatus.releaseMacroActive,
+    lastReleaseReset: routerStatus.lastReleaseReset,
     lastAction: routerStatus.lastAction || state.status.djAgent.lastAction || null,
     loopDivision: routerStatus.loopDivision,
     released: routerStatus.released,
+    ownerDeck: routerStatus.ownerDeck,
+    ownerDeckId: routerStatus.ownerDeckId,
+    activePlaySessionId: routerStatus.activePlaySessionId,
+    ownerWireIdentity: routerStatus.ownerWireIdentity,
+    ownerSource: routerStatus.ownerSource,
+    productionCandidateStatus: routerStatus.productionCandidateStatus,
+    authorityConsistency: routerStatus.authorityConsistency,
+    ownerTrack: routerStatus.ownerTrack,
     updatedAt: new Date().toISOString(),
   };
   emitState();
@@ -1008,6 +1206,9 @@ function updateDjAgentStatus() {
 
 if (DJ_AGENT_CONFIG.warning) {
   mergeWarning(DJ_AGENT_CONFIG.warning);
+}
+if (DJ_AGENT_CONFIG.allowRemoteDeprecationWarning) {
+  mergeWarning(DJ_AGENT_CONFIG.allowRemoteDeprecationWarning);
 }
 
 djAgentSyndocalClient.on("status", updateDjAgentStatus);
@@ -1052,7 +1253,7 @@ djAgentRouter.on("event", (event) => {
     state.status.djAgent.lastAction = {
       ...state.status.djAgent.lastAction,
       delivery: event.delivery,
-      ok: deliveryState === "acknowledged" && (
+      ok: !state.status.djAgent.lastAction.localFailure && deliveryState === "acknowledged" && (
         state.status.djAgent.lastAction.mode === "timeline-control" ||
         state.status.djAgent.lastAction.midiSent !== false
       ),
@@ -1063,7 +1264,8 @@ djAgentRouter.on("event", (event) => {
             ["send-failed", "rejected", "timed-out"].includes(deliveryState)
           ? "failed"
         : state.status.djAgent.lastAction.phase,
-      reason: deliveryState === "acknowledged" ? null : event.delivery?.reason || deliveryState,
+      reason: state.status.djAgent.lastAction.localFailure ||
+        (deliveryState === "acknowledged" ? null : event.delivery?.reason || deliveryState),
     };
   }
   if (
@@ -1081,7 +1283,7 @@ djAgentRouter.on("event", (event) => {
 // another UDP socket and it never injects another DLL.
 hookUdpProvider.on("snapshot", (snapshot) => {
   if (DJ_AGENT_CONFIG.enabled) {
-    djAgentRouter.onSnapshot(snapshot);
+    stateBroadcaster.runDeferred(() => djAgentRouter.onSnapshot(snapshot));
   }
 });
 hookUdpProvider.on("track-loaded", (event) => {
@@ -1173,10 +1375,10 @@ hookUdpProvider.on("snapshot", (snapshot) => {
     };
   }
   if (snapshot.nowPlayingPatch) {
-    state.nowPlaying = {
-      ...(state.nowPlaying || {}),
-      ...snapshot.nowPlayingPatch,
-    };
+    state.nowPlaying = applyNowPlayingIdentityPatch(
+      state.nowPlaying,
+      snapshot.nowPlayingPatch
+    );
     if (snapshot.nowPlayingPatch.contentId) {
       setNowPlayingMethod("hook-track-load", "nowPlayingPatch");
     }
@@ -1227,12 +1429,12 @@ hookUdpProvider.on("snapshot", (snapshot) => {
   }
   applyMasterNowPlayingFromDecks();
   hydrateDeckNowPlayingMetadata();
-  emitState();
+  emitState({ defer: true });
 });
 
 hookUdpProvider.on("loop-state", (loopState) => {
   if (applyLoopState(loopState)) {
-    emitState();
+    emitState({ defer: true });
   }
 });
 
@@ -1387,8 +1589,94 @@ hookUdpProvider.on("mixer-state", (mixerState) => {
   emitState();
 });
 
+const DJ_AGENT_ACTION_PATH_PREFIX = "/api/dj-agent/actions/";
+
+// Express 5 matches these routes case-insensitively and tolerates a single
+// trailing slash, while percent-encoded or malformed path variants never
+// reach the action handlers (verified against express@5.2.1). A single decode
+// is not enough to recognize every action-shaped request: nested encodings
+// such as %2561ctions hide the "actions" segment behind two rounds of
+// percent-decoding. The fence therefore walks a small bounded number of
+// decode rounds and fails closed: a request is protected action surface when
+// any round resolves to the action shape, or when the walk hits its depth
+// bound or a malformed sequence while the request still sits inside the
+// /api/dj-agent/ namespace with unresolved percent-encoding. Literal prefix
+// characters survive every decode round unchanged, so "inside the namespace"
+// here implies the raw request had the same prefix. This classification only
+// strips wildcard CORS from unroutable lookalikes; Express routing itself is
+// untouched, no new action becomes routable, and read-only surfaces outside
+// the namespace keep the LAN viewer policy.
+const ACTION_PATH_DECODE_LIMIT = 4;
+
+function isDjAgentActionRequestPath(rawPath) {
+  if (typeof rawPath !== "string") {
+    return false;
+  }
+  const matchesActionShape = (text) => {
+    const normalized = text.toLowerCase().replace(/\/+$/, "");
+    return (
+      normalized === "/api/dj-agent/actions"
+      || normalized.startsWith(DJ_AGENT_ACTION_PATH_PREFIX)
+    );
+  };
+  const sitsInActionNamespaceWithUnresolvedEncoding = (text) => {
+    const normalized = text.toLowerCase();
+    return normalized.startsWith("/api/dj-agent/") && normalized.includes("%");
+  };
+
+  if (!rawPath.includes("%")) {
+    // Literal path: no decode round could ever reveal a hidden action shape.
+    return matchesActionShape(rawPath);
+  }
+  let current = rawPath;
+  for (let round = 0; round < ACTION_PATH_DECODE_LIMIT; round += 1) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      // Malformed percent-encoding fails closed exactly as documented: only
+      // while the walk still sits inside the /api/dj-agent/ namespace with
+      // unresolved encoding. Malformed targets elsewhere are unrelated 404
+      // surface and keep the LAN viewer policy; none of them can route.
+      return sitsInActionNamespaceWithUnresolvedEncoding(current);
+    }
+    if (decoded === current) {
+      // Fully decoded: no percent-encoding remains anywhere in the path.
+      break;
+    }
+    current = decoded;
+    if (matchesActionShape(current)) {
+      return true;
+    }
+  }
+  return sitsInActionNamespaceWithUnresolvedEncoding(current);
+}
+
 app.use(express.json());
 app.use((_req, res, next) => {
+  const isDjAgentActionPath = isDjAgentActionRequestPath(_req.path);
+  if (isDjAgentActionPath) {
+    // Action endpoints never inherit the LAN viewer's wildcard CORS policy.
+    // A browser preflight must pass the same action fence as the POST itself.
+    res.removeHeader("Access-Control-Allow-Origin");
+    if (_req.method === "OPTIONS") {
+      if (!isActionPreflightAllowed(_req)) {
+        res.status(403).end();
+        return;
+      }
+      const origin = getActionRequestOrigin(_req);
+      if (origin) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+      }
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+      res.status(204).end();
+      return;
+    }
+    next();
+    return;
+  }
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Last-Event-ID");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -1398,7 +1686,7 @@ app.use((_req, res, next) => {
   }
   next();
 });
-app.use(express.static(isPackaged ? path.join(_exeDir, "public") : path.resolve(__dirname, "public")));
+app.use(express.static(PUBLIC_ROOT));
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -1448,18 +1736,246 @@ app.get("/api/state", (_req, res) => {
   res.json(buildSnapshot());
 });
 
-function handleDjAgentAction(action, _req, res) {
-  if (!DJ_AGENT_CONFIG.enabled) {
-    res.status(404).json({
+function listSetupNetworkInterfaces() {
+  const interfaces = [];
+  for (const [name, entries] of Object.entries(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (!entry || entry.internal === true || entry.family !== "IPv4" || net.isIP(entry.address) !== 4) {
+        continue;
+      }
+      interfaces.push({ name, address: entry.address });
+    }
+  }
+  return interfaces.sort((left, right) =>
+    left.name.localeCompare(right.name) || left.address.localeCompare(right.address)
+  );
+}
+
+function inspectSetupMappingArtifact() {
+  let result;
+  try {
+    result = validateCustomMidiCsv(fs.readFileSync(SETUP_MAPPING_PATH, "utf8"));
+  } catch {
+    result = { ok: false, code: "artifact-unavailable", summary: null, canonicalString: null };
+  }
+  return {
+    filename: SETUP_MAPPING_FILENAME,
+    url: SETUP_MAPPING_URL,
+    valid: result.ok === true,
+    code: result.ok === true ? "ok" : result.code || "artifact-invalid",
+    semanticFingerprint: result.ok === true
+      ? crypto.createHash("sha256").update(result.canonicalString, "utf8").digest("hex")
+      : null,
+    summary: result.ok === true ? result.summary : null,
+    operatorVerified: false,
+  };
+}
+
+function sanitizeMidiEnumeration(result) {
+  return {
+    ok: result?.ok === true,
+    available: result?.available === true,
+    reason: typeof result?.reason === "string" ? result.reason : null,
+    ports: Array.isArray(result?.ports)
+      ? result.ports.map((port) => ({
+          port: Number.isInteger(port?.port) ? port.port : null,
+          name: typeof port?.name === "string" ? port.name : null,
+        }))
+      : [],
+  };
+}
+
+function buildDjAgentSetupSnapshot() {
+  const localTestMode = DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE;
+  const mappingArtifact = inspectSetupMappingArtifact();
+  const networkInterfaces = listSetupNetworkInterfaces();
+  const midiPorts = sanitizeMidiEnumeration(enumerateMidiOutputs({
+    moduleName: DJ_AGENT_CONFIG.midi.moduleName,
+  }));
+  const runtime = state.status.djAgent || {};
+  const runtimeMidi = runtime.midi || {};
+  const runtimePedal = runtime.pedal || {};
+  const runtimeSyndocal = runtime.syndocal || {};
+  const midiSelection = verifyRuntimeMidiSelection({
+    config: DJ_AGENT_CONFIG.midi,
+    runtime: runtimeMidi,
+    ports: midiPorts.ports,
+  });
+  const readiness = buildSetupChecklist({
+    enabled: DJ_AGENT_CONFIG.enabled,
+    mapping: {
+      enabled: true,
+      valid: mappingArtifact.valid,
+      // The bundled, exact-validated CSV is software artifact readiness.
+      // operatorVerified remains false in the artifact response; physical
+      // Rekordbox Learn/hardware acceptance is a separate gate.
+      ready: mappingArtifact.valid,
+    },
+    pedal: DJ_AGENT_CONFIG.pedal.enabled
+      ? {
+          enabled: true,
+          available: runtimePedal.available === true,
+          state: runtimePedal.state === "listening" ? "verification-required" : runtimePedal.state,
+          ready: false,
+        }
+      : { enabled: false },
+    midi: DJ_AGENT_CONFIG.midi.enabled
+      ? {
+          enabled: true,
+          available: runtimeMidi.available === true,
+          ok: runtimeMidi.ok === true,
+          selected: midiSelection.ready,
+          selectionValid: midiSelection.ready,
+          nameVerified: midiSelection.nameVerified,
+        }
+      : { enabled: false },
+    syndocal: DJ_AGENT_CONFIG.syndocal.enabled
+      ? {
+          enabled: true,
+          available: runtimeSyndocal.state !== "unavailable",
+          state: runtimeSyndocal.state || "not-started",
+          connected: runtimeSyndocal.state === "connected",
+          adapter: DJ_AGENT_CONFIG.syndocal.adapter,
+        }
+      : { enabled: false },
+    macro: DJ_AGENT_CONFIG.midi.releaseMacro.enabled
+      ? {
+          enabled: true,
+          ready: false,
+          sequence: DJ_AGENT_CONFIG.midi.releaseMacro.sequence,
+        }
+      : { enabled: false },
+  });
+  const configuredHost = DJ_AGENT_CONFIG.syndocal.host === "127.0.0.1"
+    ? ""
+    : DJ_AGENT_CONFIG.syndocal.host;
+  const configuredDevice = DJ_AGENT_CONFIG.midi.device || "";
+  const matchingPort = exactMidiPort(
+    midiPorts.ports,
+    DJ_AGENT_CONFIG.midi.port,
+    configuredDevice
+  );
+
+  const configTemplate = {
+      version: "1.1.11",
+      enabled: true,
+      syndocal: {
+        enabled: true,
+        host: configuredHost,
+        port: DJ_AGENT_CONFIG.syndocal.port || 9100,
+        path: DJ_AGENT_CONFIG.syndocal.path || "/dj-link",
+        nic: DJ_AGENT_CONFIG.syndocal.nic || "",
+        // Fail-closed template adapter: only an exact recognized adapter may
+        // be echoed. An unknown/invalid configured adapter renders as the
+        // blank/unselected value instead of being silently rewritten to
+        // syndocal-envelope-v3; any other adapter is retired and the Syndocal
+        // readiness gate reports `syndocal-adapter-invalid` and the caller's
+        // input is never reflected back here.
+        adapter: SYNDOCAL_ADAPTERS.includes(DJ_AGENT_CONFIG.syndocal.adapter)
+          ? DJ_AGENT_CONFIG.syndocal.adapter
+          : "",
+        heartbeatMs: DJ_AGENT_CONFIG.syndocal.heartbeatMs || 5_000,
+      },
+      pedal: {
+        enabled: true,
+        bindings: { release: "F13", loopHalf: "F14", filterClose: "F15" },
+      },
+      trackActivity: {
+        ownerSelection: { ...DJ_AGENT_CONFIG.trackActivity.ownerSelection },
+      },
+      midi: {
+        enabled: true,
+        device: matchingPort?.name || "",
+        port: matchingPort?.port ?? null,
+        deckChannels: { "1": 1, "2": 2 },
+        mappings: {
+          loopHalf: { channel: 1, messageType: "noteOn", note: 36, value: 127 },
+          stop: { channel: 1, messageType: "noteOn", note: 37, value: 127 },
+          filter: { channel: 1, messageType: "controlChange", cc: 16 },
+          releaseFade: { channel: 1, messageType: "controlChange", cc: 17 },
+        },
+        filter: { startValue: 64, endValue: 127, durationMs: 1_000, updateIntervalMs: 50 },
+        releaseFade: {
+          enabled: true,
+          mapping: "releaseFade",
+          target: "deck",
+          startValue: 127,
+          endValue: 0,
+          durationMs: 1_000,
+          updateIntervalMs: 50,
+          resetAfterStop: true,
+          resetValue: 127,
+          resetDelayMs: 0,
+        },
+        releaseMacro: {
+          enabled: true,
+          sequence: "filter-then-fade-then-stop",
+          filter: {
+            startValue: 64,
+            endValue: 127,
+            durationMs: 1_000,
+            updateIntervalMs: 50,
+            resetValue: 64,
+          },
+          resetAfterStop: true,
+          resetDelayMs: 0,
+        },
+      },
+    };
+  if (localTestMode) {
+    delete configTemplate.version;
+    delete configTemplate.syndocal;
+    configTemplate.schema = REKORDBOX_LOCAL_TEST_SCHEMA;
+  }
+
+  return {
+    ok: true,
+    localOnly: true,
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    enabled: DJ_AGENT_CONFIG.enabled,
+    tokenConfigured: typeof DJ_AGENT_CONFIG.syndocal.token === "string"
+      && DJ_AGENT_CONFIG.syndocal.token.length > 0,
+    readiness,
+    networkInterfaces,
+    midiPorts,
+    mappingArtifact,
+    configTemplate,
+  };
+}
+
+app.get("/api/dj-agent/setup", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  // This diagnostic/config-template response is deliberately same-machine.
+  // Remove the server-wide LAN-viewer CORS header and reject DNS rebinding or
+  // cross-origin reads even when the TCP peer itself is loopback.
+  res.removeHeader("Access-Control-Allow-Origin");
+  if (!isLocalSetupRequest(req)) {
+    res.status(403).json({
       ok: false,
-      error: "DJ Agent extension is disabled; set DJ_AGENT_ENABLED=true or use DJ_AGENT_CONFIG_PATH",
+      localOnly: true,
+      error: "DJ Agent setup is available only on the DJ PC through localhost",
     });
     return;
   }
-  if (!DJ_AGENT_CONFIG.allowRemoteActions && !isLoopbackRequest(_req)) {
+  res.status(200).json(buildDjAgentSetupSnapshot());
+});
+
+function handleDjAgentAction(action, _req, res) {
+  res.removeHeader("Access-Control-Allow-Origin");
+  // Permanently loopback-only: the socket peer must be the DJ PC itself.
+  // Env/config opt-outs were removed; proxy headers cannot forge the peer.
+  if (!isActionRequestAllowed(_req)) {
     res.status(403).json({
       ok: false,
-      error: "DJ Agent actions are loopback-only unless DJ_AGENT_ALLOW_REMOTE_ACTIONS=true",
+      error: "DJ Agent actions are available only on the DJ PC through localhost",
+    });
+    return;
+  }
+  if (!DJ_AGENT_CONFIG.enabled) {
+    res.status(404).json({
+      ok: false,
+      error: "DJ Agent extension is disabled; exact external v1.1.11 filter-then-fade-then-stop configuration is required",
     });
     return;
   }
@@ -1490,6 +2006,12 @@ app.get("/api/dj-agent/status", (_req, res) => {
   // HTTP 200 response with enabled:false.
   res.status(200).json({
     enabled: DJ_AGENT_CONFIG.enabled,
+    testOnly: DJ_AGENT_CONFIG.testOnly === true,
+    localTestMode: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE,
+    safetyLabel: DJ_AGENT_CONFIG.safetyLabel || null,
+    deliveryPolicy: DJ_AGENT_CONFIG.mode === REKORDBOX_LOCAL_TEST_MODE
+      ? "not-applicable/local-only"
+      : "syndocal-ack-required",
     allowRemoteActions: DJ_AGENT_CONFIG.allowRemoteActions,
     status: state.status.djAgent,
     state: djAgentRouter.getStateSync(),
@@ -1544,6 +2066,7 @@ function shutdown() {
   if (pythonBridge) {
     pythonBridge.stop();
   }
+  stateBroadcaster.stop();
   server.close(() => process.exit(0));
 }
 
@@ -1560,6 +2083,9 @@ if (DJ_AGENT_CONFIG.enabled) {
   updateDjAgentStatus();
 }
 
-server.listen(PORT, () => {
-  console.log(`rb-output server listening on http://0.0.0.0:${PORT}`);
+server.listen(PORT, HTTP_BIND_HOST, () => {
+  const address = server.address();
+  const boundPort = address && typeof address === "object" ? address.port : PORT;
+  const printableHost = HTTP_BIND_HOST.includes(":") ? `[${HTTP_BIND_HOST}]` : HTTP_BIND_HOST;
+  console.log(`rb-output server listening on http://${printableHost}:${boundPort}`);
 });
