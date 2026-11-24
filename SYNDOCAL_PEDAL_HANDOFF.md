@@ -17,8 +17,9 @@ release固有のgateを無関係な編集へ適用しません。実機・LAN・
 現在の唯一のadapterは`syndocal-envelope-v3`で、全frameは
 `{v:3,type,agentId,sessionId,sequence,eventId,payload}`のexact shapeです。
 flat/v1/v2は退役し、設定・Setup・runtime・build identityで明示拒否します。
-product source versionは`1.1.12`です。v1.1.12のinstaller、tag、public release、または
-hardware acceptanceはこの文書で主張しません。production schema、external config、
+product source versionは`1.1.12`です。v1.1.12のannotated tag、installer、ZIP、
+public releaseは2026-11-24に公開済みです（下記checkpoint）。hardware acceptanceは
+この文書で主張しません。production schema、external config、
 CustomMIDI1 CSVは引き続きv1.1.11です。current/next operator routeはtracked
 `config/dj-agent-v1.1.11.example.json`と
 `server/public/setup/CustomMIDI1-Syndocal-v1.1.11.csv`を使います。exact
@@ -99,6 +100,28 @@ PASS for `DJLinkForPCDJ-setup.exe`, `rb-output-1.1.12.zip`, and
 the release flags (`-std=gnu++17 -Wall -Wextra`). DJ PC install and hardware
 acceptance (physical LAN, Rekordbox, MIDI, pedal, Syndocal ACK) remain 0/12 and
 are not claimed.
+
+### v1.1.12 immutable tag and distribution checkpoint
+
+PR #2 merged `beta-v1.1.2` into `main` as `da92a9f5682cbc0e8ee81727f669d3b4302f939f`
+(tree identical to the dry-run-verified `0333148`). Annotated tag `v1.1.12`
+points to that commit and is treated as immutable. The tag-driven release run
+`45308803455` on `windows-2022` passed every step, including full `npm test`
+535 total / 529 pass / 0 fail / 6 skipped, the required pkg provenance smoke
+2/2, `build-dist.ps1` Steps 0-7, the final preflight, the protected annotated
+tag binding, and `verify-release-artifacts.js`, then uploaded:
+
+- `DJLinkForPCDJ-setup.exe`: `55,276,679` bytes, SHA-256
+  `2ad497fa75fa800785b4e24ecaa92d8b9d60b2e18bce867f62a82918b3203e6e`
+- `rb-output-1.1.12.zip`: `61,833,155` bytes, SHA-256
+  `c8270a8b89499a141d29fd840efc16664730975c1e6d06194e2b3643fb8384df`
+- release identity hash:
+  `70b547c056c05deb975e36db96d8cca05648cc082fb44867c448c4644fa402c9`
+
+The downloaded assets match these hashes and `release-manifest.json`. This is
+software and packaging evidence only. Outstanding acceptance: DJ PC install,
+physical LAN, Rekordbox, MIDI, pedal, Syndocal ACK, disconnect/reconnect, and
+both-PC restart (0/12).
 
 ## 2026-09-03 product source 1.1.12: standalone core startup without Syndocal
 

@@ -16,8 +16,9 @@ Rekordbox のプロセスに専用のDLL (`rb_hook.dll`) を注入し、内部�
 The only current Syndocal adapter is `syndocal-envelope-v3`; every frame is the
 exact `{v:3,type,agentId,sessionId,sequence,eventId,payload}` shape. Flat, v1,
 and v2 adapters/frames are retired and fail closed. Product source metadata is
-`1.1.12`; no v1.1.12 installer/tag/public release or hardware acceptance is
-claimed here. The production schema, external config, and CustomMIDI1 CSV remain
+`1.1.12`. The v1.1.12 tag and GitHub release (installer, ZIP, release
+manifest) exist since 2026-11-24; DJ PC hardware acceptance is not claimed
+here and remains 0/12. The production schema, external config, and CustomMIDI1 CSV remain
 the v1.1.11 contract. Use an approved source checkout, an external
 `DJ_AGENT_CONFIG_PATH` when show synchronization is needed. With no
 `DJ_AGENT_CONFIG_PATH`, no-argument `start-all.bat` starts the core in standalone
